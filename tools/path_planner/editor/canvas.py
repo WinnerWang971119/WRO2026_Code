@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 import warnings
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import tkinter as tk
 
@@ -45,6 +45,14 @@ from matplotlib.figure import Figure  # noqa: E402
 from tools.path_planner.editor import theme  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.graph_builder import inflate_obstacles  # noqa: E402
+
+if TYPE_CHECKING:
+    # Type-only: ``align.py`` is a sibling module this canvas never imports at
+    # runtime (no Tk/matplotlib in that module, and importing it here would
+    # risk a needless coupling). ``render``'s ``align_preview`` parameter
+    # accepts any duck-typed object with ``.guide`` / ``.ghosts`` -- see
+    # :meth:`FieldCanvas._draw_align_preview`.
+    from tools.path_planner.editor.align import AlignPreview
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +197,36 @@ _OBSTACLE_PREVIEW_EDGECOLOR: str = "blue"
 _OBSTACLE_PREVIEW_LINESTYLE: str = ":"
 _OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
 
+# Style of the dotted rubber-band rectangle drawn while a node-selection
+# MARQUEE is being dragged in ``Mode.SELECT``. A separate, parallel constant
+# set from the obstacle preview above -- same shape of blit fast-path, but its
+# own colour because a different colour encodes a different verb: select
+# (this box) vs. create (the obstacle box, left untouched). Sourced from the
+# theme's selection accent so the marquee reads as "this is what I'm
+# selecting", consistent with the terracotta highlight ring drawn on the
+# selected nodes themselves.
+_MARQUEE_PREVIEW_ZORDER: int = 11
+_MARQUEE_PREVIEW_EDGECOLOR: str = theme.SELECTION_RING
+_MARQUEE_PREVIEW_LINESTYLE: str = ":"
+_MARQUEE_PREVIEW_LINEWIDTH: float = 1.5
+
+# Make-straight preview overlay (``FieldCanvas.render``'s ``align_preview``
+# kwarg): a guide line spanning the alignment axis plus hollow dots at each
+# mover's target. Styled like the proposed-edge overlay (same TEAL token,
+# same "this is where things would go" meaning) but drawn ABOVE the highlight
+# ring so the ghost targets stay legible against a selected (ringed) node.
+# These are STATIC artists added in the normal render pass -- unlike the
+# marquee/obstacle rubber-bands above, there is no drag to blit-fast-path
+# here; the preview only changes when the selection or axis choice changes,
+# which already triggers a full ``render``.
+_ALIGN_GUIDE_LINESTYLE: tuple = (0, (3, 3))  # dashed, matches _PROPOSED_EDGE
+_ALIGN_GUIDE_LINEWIDTH: float = 1.8
+_ALIGN_GUIDE_ZORDER: int = 9
+
+_ALIGN_GHOST_DOT_SIZE: float = 100.0
+_ALIGN_GHOST_LINEWIDTH: float = 2.0
+_ALIGN_GHOST_ZORDER: int = 10
+
 # Resolve ``map_png`` relative to this directory (same as ``visualizer.py``
 # and ``pick_xy.py``: ``tools/path_planner/``).
 _PLANNER_ROOT: Path = Path(__file__).resolve().parent.parent
@@ -213,9 +251,13 @@ class FieldCanvas:
 
     Each callback receives world coordinates already converted to
     centimetres (``world_x_cm``, ``world_y_cm``), and click/release also
-    receive the matplotlib button number (``1`` = left, ``3`` = right).
-    Callbacks are only invoked when the underlying event is inside this
-    canvas' axes; out-of-axes events are silently dropped.
+    receive the matplotlib button number (``1`` = left, ``3`` = right) and
+    the modifier key held during the event (``event.key``: ``None``,
+    ``"shift"``, ``"control"``, ...), so the editor application can
+    implement shift-add / ctrl-toggle selection. Callbacks are only invoked
+    when the underlying event is inside this canvas' axes; out-of-axes
+    events are silently dropped (release is the one exception -- see
+    :meth:`_on_button_release`).
 
     :param parent: Parent Tk widget (or :class:`tkinter.Tk`) that will
         host the embedded canvas widget.
@@ -248,13 +290,18 @@ class FieldCanvas:
         self._canvas.draw()
 
         # Three callback slots the editor application sets directly. Each
-        # is invoked only when the originating event is inside ``self._ax``.
+        # is invoked only when the originating event is inside ``self._ax``
+        # (release is the one exception -- see :meth:`_on_button_release`).
+        # ``on_click`` / ``on_release`` carry ``(x, y, button, key)`` -- the
+        # 4th arg is matplotlib's ``event.key`` (``None``, ``"shift"``,
+        # ``"control"``, ...) so the app can implement modifier-click
+        # selection (shift = add, ctrl = toggle).
         self.on_click: Optional[
-            Callable[[float, float, int], None]
+            Callable[[float, float, int, Optional[str]], None]
         ] = None
         self.on_drag: Optional[Callable[[float, float], None]] = None
         self.on_release: Optional[
-            Callable[[float, float, int], None]
+            Callable[[float, float, int, Optional[str]], None]
         ] = None
 
         # Cache the most recently rendered model so callers (and the
@@ -274,12 +321,13 @@ class FieldCanvas:
         # Last render's overlay arguments, cached so the drag fast-path
         # (begin/update/end_node_drag) and the blit fallback can re-issue an
         # identical full render -- same highlight ring, same proposed-edge
-        # overlay -- as the discrete-edit path produced. Refreshed on every
-        # :meth:`render` call.
+        # overlay, same make-straight preview -- as the discrete-edit path
+        # produced. Refreshed on every :meth:`render` call.
         self._last_highlighted_nodes: Optional[list[str]] = None
         self._last_proposed_edges: Optional[
             list[tuple[str, str, str]]
         ] = None
+        self._last_align_preview: Optional["AlignPreview"] = None
 
         # ---- Per-element artist retention (rebuilt every ``render``) ----
         # ``ax.clear()`` drops every artist, so these are repopulated as the
@@ -323,6 +371,16 @@ class FieldCanvas:
         self._obstacle_preview_artist: Optional[object] = None
         self._obstacle_blit_background: object = None
         self._last_obstacle_blit_time: float = _BLIT_TIME_FORCE_FIRST
+
+        # ---- Node-selection marquee blit state (set by begin_marquee_drag) ----
+        # A separate, parallel clone of the obstacle rubber-band blit state
+        # above -- its own preview artist, its own baked background, its own
+        # throttle clock -- so a Mode.SELECT marquee drag never shares state
+        # with a Mode.OBSTACLE resize. See :meth:`begin_marquee_drag` /
+        # :meth:`update_marquee_preview` / :meth:`end_marquee_drag`.
+        self._marquee_preview_artist: Optional[object] = None
+        self._marquee_blit_background: object = None
+        self._last_marquee_blit_time: float = _BLIT_TIME_FORCE_FIRST
 
         # Wire matplotlib's event system into our three Python callbacks.
         # Connection IDs are stashed so a future ``destroy`` method (out of
@@ -373,13 +431,15 @@ class FieldCanvas:
         *,
         highlighted_nodes: Optional[list[str]] = None,
         proposed_edges: Optional[list[tuple[str, str, str]]] = None,
+        align_preview: "AlignPreview | None" = None,
     ) -> None:
         """Redraw the canvas from scratch for the given model.
 
         Clears the axes, restores the cosmetic limits / labels / grid,
         then paints in fixed z-order: background → obstacles → edges →
-        proposed-edge overlay → nodes → highlight ring. Calling this after
-        every model mutation is the editor's standard refresh path.
+        proposed-edge overlay → nodes → highlight ring → make-straight
+        preview. Calling this after every model mutation is the editor's
+        standard refresh path.
 
         :param model: The :class:`FieldModel` to render. Stored on the
             canvas for use by :meth:`find_node_at`.
@@ -392,6 +452,13 @@ class FieldCanvas:
             reporting); the canvas styles all proposed edges identically.
             Unknown node names are silently skipped (consistent with
             ``highlighted_nodes``).
+        :param align_preview: Optional make-straight preview (the
+            ``editor.align.AlignPreview`` dataclass, or any duck-typed
+            object exposing the same ``.guide`` / ``.ghosts`` shape). When
+            given, draws a teal guide line and hollow teal ghost dots at
+            each mover's target -- see :meth:`_draw_align_preview`. These are
+            plain static artists in this normal render pass, not part of any
+            blit fast-path.
         :return: ``None``.
         """
         self._last_model = model
@@ -399,6 +466,7 @@ class FieldCanvas:
         # fallback can replay an identical full render.
         self._last_highlighted_nodes = highlighted_nodes
         self._last_proposed_edges = proposed_edges
+        self._last_align_preview = align_preview
 
         ax = self._ax
         ax.clear()
@@ -446,6 +514,8 @@ class FieldCanvas:
         self._draw_nodes(model)
         if highlighted_nodes:
             self._draw_highlight(model, highlighted_nodes)
+        if align_preview is not None:
+            self._draw_align_preview(align_preview)
 
         self._canvas.draw_idle()
 
@@ -485,6 +555,7 @@ class FieldCanvas:
             model,
             highlighted_nodes=self._last_highlighted_nodes,
             proposed_edges=self._last_proposed_edges,
+            align_preview=self._last_align_preview,
         )
 
         dot_artist = self._node_dot_artists.get(name)
@@ -599,6 +670,7 @@ class FieldCanvas:
                 self._last_model,
                 highlighted_nodes=self._last_highlighted_nodes,
                 proposed_edges=self._last_proposed_edges,
+                align_preview=self._last_align_preview,
             )
 
     # ------------------------------------------------------------------
@@ -634,6 +706,7 @@ class FieldCanvas:
             model,
             highlighted_nodes=self._last_highlighted_nodes,
             proposed_edges=self._last_proposed_edges,
+            align_preview=self._last_align_preview,
         )
 
         rect = mpatches.Rectangle(
@@ -692,6 +765,7 @@ class FieldCanvas:
                     self._last_model,
                     highlighted_nodes=self._last_highlighted_nodes,
                     proposed_edges=self._last_proposed_edges,
+                    align_preview=self._last_align_preview,
                 )
             return
 
@@ -715,6 +789,7 @@ class FieldCanvas:
                     self._last_model,
                     highlighted_nodes=self._last_highlighted_nodes,
                     proposed_edges=self._last_proposed_edges,
+                    align_preview=self._last_align_preview,
                 )
             return
 
@@ -745,6 +820,169 @@ class FieldCanvas:
                 self._last_model,
                 highlighted_nodes=self._last_highlighted_nodes,
                 proposed_edges=self._last_proposed_edges,
+                align_preview=self._last_align_preview,
+            )
+
+    # ------------------------------------------------------------------
+    # Node-selection marquee blit fast-path
+    # ------------------------------------------------------------------
+
+    def begin_marquee_drag(self) -> None:
+        """Arm the blit fast-path for a node-selection marquee drag.
+
+        A separate, parallel clone of :meth:`begin_obstacle_drag`: renders
+        the current model once the normal way (so the static scene is up to
+        date), adds a single zero-size ``animated`` dotted ``Rectangle`` for
+        the marquee preview, bakes the static scene with a full :meth:`draw`
+        (matplotlib excludes ``animated`` artists from that bake), and
+        snapshots it with ``copy_from_bbox``. Each subsequent
+        :meth:`update_marquee_preview` then only restores that frozen
+        background and re-draws the one rectangle -- no ``ax.clear``, no
+        model re-render, per motion event.
+
+        This is a distinct implementation from :meth:`begin_obstacle_drag`
+        -- its own preview artist, its own baked background, its own
+        throttle clock -- so a ``Mode.SELECT`` marquee drag never shares
+        state with a ``Mode.OBSTACLE`` resize, and the obstacle path's
+        hardcoded ``"blue"`` styling is left untouched.
+
+        Degrades gracefully: with no model rendered yet the fast-path is
+        left disarmed (``_marquee_blit_background`` stays ``None``) so the
+        next :meth:`update_marquee_preview` falls back to a defensive full
+        render.
+
+        :return: ``None``.
+        """
+        model = self._last_model
+        if model is None:
+            return
+
+        # Render the current model first so the static scene under the
+        # preview is up to date, then rebuild the per-element artist
+        # handles.
+        self.render(
+            model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+            align_preview=self._last_align_preview,
+        )
+
+        rect = mpatches.Rectangle(
+            (0.0, 0.0),
+            0.0,
+            0.0,
+            linewidth=_MARQUEE_PREVIEW_LINEWIDTH,
+            edgecolor=_MARQUEE_PREVIEW_EDGECOLOR,
+            linestyle=_MARQUEE_PREVIEW_LINESTYLE,
+            facecolor="none",
+            zorder=_MARQUEE_PREVIEW_ZORDER,
+            animated=True,
+        )
+        self._ax.add_patch(rect)
+        self._marquee_preview_artist = rect
+
+        # Bake the static scene (the animated rect is excluded) and
+        # snapshot it.
+        self._canvas.draw()
+        self._marquee_blit_background = self._canvas.copy_from_bbox(
+            self._ax.bbox
+        )
+        # Force the first ``update_marquee_preview`` to composite.
+        self._last_marquee_blit_time = _BLIT_TIME_FORCE_FIRST
+
+    def update_marquee_preview(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> None:
+        """Resize the marquee rectangle to span ``(x0, y0)``-``(x1, y1)`` and blit.
+
+        Updates the rectangle's lower-left corner + width/height on every
+        call (so the artist always holds the latest extent), then composites
+        the frame by restoring the baked background and re-drawing only the
+        rectangle. As with :meth:`update_obstacle_preview`, only the visible
+        composite is throttled to ~60 Hz; a call arriving within
+        :data:`_BLIT_MIN_INTERVAL_S` of the last composite updates the
+        geometry but skips the restore/draw/blit.
+
+        Defensive paths mirror the obstacle drag: if the fast-path was never
+        armed (``_marquee_blit_background is None``) a full :meth:`render`
+        is issued; if the composite raises on an exotic backend it is
+        caught, the fast-path disarmed, and a full render issued for that
+        tick so a marquee drag never crashes the editor.
+
+        :param x0: Anchor x (drag start), in centimetres.
+        :param y0: Anchor y (drag start), in centimetres.
+        :param x1: Cursor x (current), in centimetres.
+        :param y1: Cursor y (current), in centimetres.
+        :return: ``None``.
+        """
+        rect = self._marquee_preview_artist
+        if self._marquee_blit_background is None or rect is None:
+            # Fast-path not armed: fall back to a plain repaint so the drag
+            # is still reflected (defensive -- the app arms it on
+            # anchor-set).
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                    align_preview=self._last_align_preview,
+                )
+            return
+
+        # Always update the artist geometry, even on a throttled tick.
+        xmin = min(x0, x1)
+        ymin = min(y0, y1)
+        rect.set_bounds(xmin, ymin, abs(x1 - x0), abs(y1 - y0))
+
+        now = time.monotonic()
+        if now - self._last_marquee_blit_time < _BLIT_MIN_INTERVAL_S:
+            return
+
+        try:
+            self._canvas.restore_region(self._marquee_blit_background)
+            self._ax.draw_artist(rect)
+            self._canvas.blit(self._ax.bbox)
+        except Exception:  # noqa: BLE001 -- exotic backend: never crash a drag.
+            self._marquee_blit_background = None
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                    align_preview=self._last_align_preview,
+                )
+            return
+
+        self._last_marquee_blit_time = now
+
+    def end_marquee_drag(self) -> None:
+        """Tear down the marquee blit fast-path and re-bake the static scene.
+
+        Removes the preview rectangle, drops the drag state, and issues a
+        full :meth:`render` so the scene returns to normal. Safe to call
+        when no marquee drag is active (the preview artist is simply
+        ``None``).
+
+        :return: ``None``.
+        """
+        rect = self._marquee_preview_artist
+        if rect is not None:
+            try:
+                rect.remove()
+            except (ValueError, NotImplementedError):
+                # Already detached (e.g. a full render cleared the axes):
+                # fine.
+                pass
+        self._marquee_preview_artist = None
+        self._marquee_blit_background = None
+        self._last_marquee_blit_time = _BLIT_TIME_FORCE_FIRST
+
+        if self._last_model is not None:
+            self.render(
+                self._last_model,
+                highlighted_nodes=self._last_highlighted_nodes,
+                proposed_edges=self._last_proposed_edges,
+                align_preview=self._last_align_preview,
             )
 
     def _apply_drag_geometry(self, name: str, x: float, y: float) -> None:
@@ -825,6 +1063,7 @@ class FieldCanvas:
             self._last_model,
             highlighted_nodes=self._last_highlighted_nodes,
             proposed_edges=self._last_proposed_edges,
+            align_preview=self._last_align_preview,
         )
         self._apply_drag_geometry(name, x, y)
         self._canvas.draw_idle()
@@ -874,6 +1113,40 @@ class FieldCanvas:
                     best_dist_sq = dist_sq
                     best_name = name
         return best_name
+
+    def find_nodes_in_rect(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> list[str]:
+        """Return every node whose coordinate falls inside the given box.
+
+        Searches the most recently rendered model (see :meth:`render`). The
+        box test is inclusive on all four edges (``x_min <= nx <= x_max``
+        and ``y_min <= ny <= y_max``), matching the boundary-inclusive
+        convention already used by :meth:`find_obstacle_at`. The corners
+        need not be given in any particular order -- an "inverted" box
+        (``x1 < x0`` and/or ``y1 < y0``, which a marquee dragged up-and-left
+        naturally produces) is normalized before testing, so the caller
+        never has to sort the anchor/cursor pair itself.
+
+        :param x0: One corner's x coordinate, in centimetres.
+        :param y0: One corner's y coordinate, in centimetres.
+        :param x1: The opposite corner's x coordinate, in centimetres.
+        :param y1: The opposite corner's y coordinate, in centimetres.
+        :return: Node names inside the box, in the model's dict iteration
+            order. Empty if no node matches, or if :meth:`render` has never
+            been called.
+        """
+        if self._last_model is None:
+            return []
+
+        x_min, x_max = (x0, x1) if x0 <= x1 else (x1, x0)
+        y_min, y_max = (y0, y1) if y0 <= y1 else (y1, y0)
+
+        matches: list[str] = []
+        for name, (nx, ny) in self._last_model.nodes.items():
+            if x_min <= float(nx) <= x_max and y_min <= float(ny) <= y_max:
+                matches.append(name)
+        return matches
 
     def find_obstacle_at(self, x: float, y: float) -> Optional[int]:
         """Return the index of the topmost obstacle whose raw rectangle
@@ -988,8 +1261,13 @@ class FieldCanvas:
         # progress. Releasing the button clears this in
         # :meth:`_on_button_release`.
         self._active_button = button
+        # ``getattr`` (rather than ``event.key`` directly) tolerates minimal
+        # hand-built test events that omit the attribute; real matplotlib
+        # ``MouseEvent``s always carry ``key`` (``None`` when no modifier is
+        # held).
+        key = getattr(event, "key", None)
         if self.on_click is not None:
-            self.on_click(coords[0], coords[1], button)
+            self.on_click(coords[0], coords[1], button, key)
 
     def _on_motion_notify(self, event) -> None:
         """Forward an in-axes ``motion_notify_event`` to :attr:`on_drag`.
@@ -1028,6 +1306,11 @@ class FieldCanvas:
         the button on such a release, the LATCHED button is passed through so
         the release still commits (the bug that left a node visually stuck
         with no undo entry).
+
+        As with :meth:`_on_button_press`, the modifier key (``event.key``)
+        is forwarded as the 4th argument to :attr:`on_release`, read via
+        ``getattr`` so a minimal hand-built test event without the
+        attribute still works.
         """
         released_button = self._normalize_button(event.button)
         # A release ends any in-progress drag; clear the single-button latch
@@ -1052,7 +1335,8 @@ class FieldCanvas:
                 if released_button is not None
                 else active_button
             )
-            self.on_release(coords[0], coords[1], button)
+            key = getattr(event, "key", None)
+            self.on_release(coords[0], coords[1], button, key)
 
     # ------------------------------------------------------------------
     # Internal: rendering helpers
@@ -1343,6 +1627,57 @@ class FieldCanvas:
             edgecolors=_HIGHLIGHT_EDGECOLOR,
             linewidths=_HIGHLIGHT_LINEWIDTH,
             zorder=_HIGHLIGHT_ZORDER,
+        )
+
+    def _draw_align_preview(self, align_preview: "AlignPreview") -> None:
+        """Overlay the make-straight guide line + ghost target dots.
+
+        Draws ``align_preview.guide`` as a dashed teal line (styled like the
+        proposed-edge overlay: same colour token, same "this is where things
+        would go" meaning) and, when ``align_preview.ghosts`` is non-empty,
+        a hollow teal dot at each mover's target coordinate. A node already
+        sitting exactly on its target is not a "mover" and has no entry in
+        ``ghosts`` (see :mod:`editor.align`), so it gets no ghost.
+
+        This method only ever runs from the normal :meth:`render` pass, not
+        from any blit fast-path -- the preview changes only when the
+        selection or axis choice changes, both of which already trigger a
+        full render, so there is no per-motion-event drag to fast-path here.
+
+        Accepts any duck-typed object exposing ``.guide`` (an
+        ``((x0, y0), (x1, y1))`` pair, in centimetres) and ``.ghosts`` (a
+        ``dict[str, tuple[float, float]]`` mapping mover name to target
+        ``(x, y)``) so this module never needs a hard runtime import of
+        :mod:`tools.path_planner.editor.align` -- see the ``TYPE_CHECKING``
+        guard at the top of this file.
+
+        :param align_preview: The preview payload built by
+            ``editor.align.build_preview``.
+        :return: ``None``.
+        """
+        (x0, y0), (x1, y1) = align_preview.guide
+        self._ax.plot(
+            [x0, x1],
+            [y0, y1],
+            color=theme.TEAL,
+            linestyle=_ALIGN_GUIDE_LINESTYLE,
+            linewidth=_ALIGN_GUIDE_LINEWIDTH,
+            zorder=_ALIGN_GUIDE_ZORDER,
+        )
+
+        ghosts = align_preview.ghosts
+        if not ghosts:
+            return
+        ghost_xs = [float(gx) for gx, _gy in ghosts.values()]
+        ghost_ys = [float(gy) for _gx, gy in ghosts.values()]
+        self._ax.scatter(
+            ghost_xs,
+            ghost_ys,
+            s=_ALIGN_GHOST_DOT_SIZE,
+            facecolors="none",
+            edgecolors=theme.TEAL,
+            linewidths=_ALIGN_GHOST_LINEWIDTH,
+            zorder=_ALIGN_GHOST_ZORDER,
         )
 
     # ------------------------------------------------------------------

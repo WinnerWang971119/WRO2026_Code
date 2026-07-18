@@ -186,13 +186,16 @@ static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_reverse()
 }
 
 // ===========================================================================
-// TC7b — Mid-follow below-floor correction reaches the DriveDC mock at
-//        +/-PWM_MIN_MAGNITUDE (35), NOT the kinetic floor.
+// TC7b — Mid-follow correction is clamped to LINE_MAX_CORR and dispatched as
+//        cruise +/- corr. With the current tuning (SLOW cruise 60, LINE_MAX_CORR
+//        20) both wheels stay inside [PWM_MIN_MAGNITUDE, PWM_MAX], so no
+//        deadbandSnap floor/cap engages on the line-follow path. The
+//        kinetic-floor-leak guard for PROFILED moves lives in test_drive_decel_floor.
 // ===========================================================================
 
-static void test_TC7b_mid_follow_below_floor_correction_uses_static_floor()
+static void test_TC7b_mid_follow_correction_clamped_to_line_max_corr()
 {
-    TEST_SCOPE("TC7b: mid-follow below-floor correction dispatches at PWM_MIN_MAGNITUDE (35)");
+    TEST_SCOPE("TC7b: mid-follow correction clamps to LINE_MAX_CORR, dispatched as cruise +/- corr");
 
     resetWorld();
 
@@ -208,26 +211,29 @@ static void test_TC7b_mid_follow_below_floor_correction_uses_static_floor()
     ASSERT_EQ(MiniR4.DriveDC.moveCallCount, (uint32_t) 0);
 
     // Inject a large line error. On the first tick after enable, `_lastErr == 0`, so
-    // `dErr == err`. With Config::LINE_KP == 3.0 and Config::LINE_KD == 0.3, any
-    // `err >= Config::LINE_MAX_CORR / 3.3` clips `corr` to exactly `Config::LINE_MAX_CORR`
-    // (40) regardless of the precise `err` value — deterministic clamp. err = 15.0 clips with
-    // comfortable margin (40/3.3 ~= 12.13).
+    // `dErr == err`. With the tuned gains, `Config::LINE_KP * err + Config::LINE_KD * err` for
+    // err = 15.0 sits far above `Config::LINE_MAX_CORR`, so `corr` clips to exactly
+    // `Config::LINE_MAX_CORR` regardless of the precise err/gain values — a deterministic clamp.
     LineArray.mockSetError(15.0f);
 
     LineFollower.update();
 
-    // cruise (SLOW == 60) +/- corr (40, clamped): L = 100 (clamped by deadbandSnap to PWM_MAX
-    // == 95), R = 20 — a magnitude strictly inside (0, PWM_MIN_MAGNITUDE) BEFORE the snap. The
-    // real Drive::setSpeed's deadbandSnap(20, stopFloorMag=35) must floor it UP to +35, not the
-    // kinetic 30 — proving the kinetic floor does not leak onto the mid-follow PID path.
+    // Dispatched pair is cruise (SLOW preset) +/- the clamped correction:
+    //   L = SPEED_SLOW + LINE_MAX_CORR, R = SPEED_SLOW - LINE_MAX_CORR.
+    // With the current tuning (60 +/- 20 => 80 / 40) both wheels land inside
+    // [PWM_MIN_MAGNITUDE (35), PWM_MAX (95)], so deadbandSnap changes neither — the below-floor
+    // snap path is simply not reachable from the line follower at this cap (min wheel 40 > 35).
+    const int16_t expL = (int16_t) (Config::SPEED_SLOW + Config::LINE_MAX_CORR);
+    const int16_t expR = (int16_t) (Config::SPEED_SLOW - Config::LINE_MAX_CORR);
     ASSERT_EQ(MiniR4.DriveDC.moveCallCount, (uint32_t) 1);
-    ASSERT_EQ(MiniR4.DriveDC.lastMoveR, (int16_t) Config::PWM_MIN_MAGNITUDE);
-    ASSERT_EQ(MiniR4.DriveDC.lastMoveR, (int16_t) 35);
-    ASSERT_TRUE(MiniR4.DriveDC.lastMoveR != (int16_t) Config::PWM_MOVING_MIN);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, expL);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveR, expR);
 
-    // Sanity: L is the large-side wheel, clamped at PWM_MAX (95), confirming the (100, 20)
-    // pre-snap pair this scenario is built around, not some other error/corr combination.
-    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) Config::PWM_MAX);
+    // Document why the floor never engages here: the small-side wheel stays at/above the static
+    // breakaway floor, so this path cannot exercise (nor leak) the kinetic floor. If a future
+    // retune pushes SPEED_SLOW - LINE_MAX_CORR below PWM_MIN_MAGNITUDE, restore the floor-snap
+    // assertions (and see the kinetic-floor-leak guard in test_drive_decel_floor).
+    ASSERT_TRUE(expR >= Config::PWM_MIN_MAGNITUDE);
 }
 
 // ===========================================================================
@@ -238,7 +244,7 @@ int main()
 {
     test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_forward();
     test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_reverse();
-    test_TC7b_mid_follow_below_floor_correction_uses_static_floor();
+    test_TC7b_mid_follow_correction_clamped_to_line_max_corr();
 
     TEST_REPORT();
 }

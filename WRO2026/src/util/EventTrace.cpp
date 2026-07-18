@@ -148,6 +148,10 @@ void EventTraceClass::update()
 
 void EventTraceClass::_emitHeartbeat()
 {
+    if (!_heartbeatEnabled)
+    {
+        return;
+    }
     const uint32_t now = millis();
     if (now - _lastHeartbeat_ms < Config::MISSION_HEARTBEAT_MS)
     {

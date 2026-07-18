@@ -19,12 +19,33 @@
  */
 namespace Config
 {
-    /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 3.0f;
-    /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
+    /** @brief Line-follower outer-loop Kp (FRONT board / forward follow). @note TODO: tune on real strip. */
+    constexpr float LINE_KP = 5.6f;
+    /** @brief Line-follower outer-loop Ki. @note Unused by the P+D law (kept for future I-term). */
     constexpr float LINE_KI = 0.0f;
-    /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 0.3f;
+    /** @brief Line-follower outer-loop Kd (FRONT board / forward follow). @note TODO: tune on real strip. */
+    constexpr float LINE_KD = 1.4f;
+
+    // ---------------------------------------------------------------------------------------
+    // Rear-board (reverse follow) gains — ADR-070.
+    //
+    // The front line sensor sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle;
+    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). That distance is the
+    // controller's lookahead, so the SAME Kp/Kd steer differently on each board: the shorter
+    // rear lookahead goes unstable (over-corrects, swings off the line) at gains the longer
+    // front lookahead rides smoothly. `LineFollower` therefore selects these gains whenever the
+    // rear board leads (reverse follow, `_reverse == true`); the FRONT gains above are used for
+    // forward follow. Tune them independently with the `inoTest/line_pid_tune` ping-pong tuner
+    // (its reverse runs optimise THIS set).
+    //
+    // Default to the front gains so behaviour is unchanged until the rear set is tuned — replace
+    // with the tuner's printed REAR values once measured.
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
+    constexpr float LINE_KP_REAR = LINE_KP;
+    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
+    constexpr float LINE_KD_REAR = LINE_KD;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -40,7 +61,7 @@ namespace Config
     constexpr int16_t CRUISE_SPEED = SPEED_NORMAL;
 
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
-    constexpr int16_t LINE_MAX_CORR = 40;
+    constexpr int16_t LINE_MAX_CORR = 20;
 
     /**
      * @brief Signed lateral-offset setpoint bias for LINE follow, in sensor-centroid index units.
@@ -165,7 +186,7 @@ namespace Config
      * Applied per-channel: onLine = (HIGH[b][ch] - raw) / (HIGH[b][ch] - LOW[b][ch])
      *                               >= LINE_CHANNEL_ON_RATIO.
      */
-    constexpr float LINE_CHANNEL_ON_RATIO = 0.5f;
+    constexpr float LINE_CHANNEL_ON_RATIO = 0.7f;
 
     /**
      * @brief Minimum number of channels simultaneously ON-LINE to declare a
@@ -200,7 +221,7 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_LEFT_HI_DEFAULT
-#define LINE_JUNCTION_LEFT_HI_DEFAULT 4
+#define LINE_JUNCTION_LEFT_HI_DEFAULT 5
 #endif
     constexpr uint8_t LINE_JUNCTION_LEFT_HI = LINE_JUNCTION_LEFT_HI_DEFAULT;
 
@@ -218,7 +239,7 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT
-#define LINE_JUNCTION_RIGHT_LO_DEFAULT 3
+#define LINE_JUNCTION_RIGHT_LO_DEFAULT 2
 #endif
     constexpr uint8_t LINE_JUNCTION_RIGHT_LO = LINE_JUNCTION_RIGHT_LO_DEFAULT;
 
@@ -297,7 +318,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 60;
+    constexpr int16_t CRAWL_PWM = 40;
 
     /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.

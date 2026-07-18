@@ -66,6 +66,102 @@ namespace Config
                   "PWM_MOVING_MIN must be in (0, PWM_MIN_MAGNITUDE]");
 
     // -----------------------------------------------------------------------------------------
+    // Turn PD controller checks (ConfigDrive.h, ADR-068)
+    //
+    // `Drive::_updateTurnProfile` (via `TurnPDPolicy.h`) is a per-tick PD + kinetic creep floor
+    // + slew-limited ramp-up. These eight asserts pin the physical/dynamical relationships
+    // between the PD knobs so a future retune of any ONE of them cannot silently desync from
+    // the others and produce a turn that hunts to its timeout on every dispatch (the plan's
+    // single sharpest failure mode — see docs/plans/2026-07-16-turn-pd-controller.md).
+    // -----------------------------------------------------------------------------------------
+
+    // (a) The settle band must be at least one physical step wide, or NO sample can ever land
+    // in-band and the turn can never exit via the debounce (only via TURN_TIMEOUT_MS).
+    static_assert(TURN_TOLERANCE_DEG >= TURN_MIN_RESOLVABLE_DEG,
+                  "Config::TURN_TOLERANCE_DEG must be >= TURN_MIN_RESOLVABLE_DEG — a settle band "
+                  "narrower than the bench-measured physical step size (omega_at_creep * tick) "
+                  "can never contain a sample, so the turn would always hunt to TURN_TIMEOUT_MS.");
+
+    // (b) LOAD-BEARING: enough physical steps must land in-band per crossing for the
+    // TURN_SETTLE_SAMPLES-consecutive-sample debounce to ever be satisfiable. At
+    // TOLERANCE=0.75, MIN_RESOLVABLE=0.4423, SETTLE=2 this is (2*0.75)/0.4423 ~= 3.39 > 2, a
+    // 1.70x margin. Converts the plan's sharpest failure mode (every turn silently hunting to
+    // timeout, since timeout is non-faulting by design) into a build error.
+    static_assert((2.0f * TURN_TOLERANCE_DEG) / TURN_MIN_RESOLVABLE_DEG > TURN_SETTLE_SAMPLES,
+                  "Config::TURN_TOLERANCE_DEG / TURN_MIN_RESOLVABLE_DEG / TURN_SETTLE_SAMPLES are "
+                  "desynced: (2 * TURN_TOLERANCE_DEG) / TURN_MIN_RESOLVABLE_DEG must exceed "
+                  "TURN_SETTLE_SAMPLES, or fewer physical steps land in-band per crossing than "
+                  "the debounce requires and EVERY turn silently hunts to TURN_TIMEOUT_MS. Widen "
+                  "TURN_TOLERANCE_DEG, lower TURN_SETTLE_SAMPLES, or re-bench a lower creep PWM.");
+
+    // (c)/(d) The creep floor must sit strictly below its own hand-off threshold, and must be a
+    // real, non-zero push — a zero or negative creep floor could never sustain rotation.
+    static_assert(TURN_CREEP_PWM < TURN_CREEP_THRESH_PWM,
+                  "Config::TURN_CREEP_PWM must be < TURN_CREEP_THRESH_PWM — otherwise the PD "
+                  "would hand off to a creep command it could already command unfloored, making "
+                  "TURN_CREEP_THRESH_PWM's hand-off band meaningless.");
+    static_assert(TURN_CREEP_PWM > 0,
+                  "Config::TURN_CREEP_PWM must be > 0 — a zero or negative creep floor could "
+                  "never sustain in-place rotation once the PD's authority drops below "
+                  "TURN_CREEP_THRESH_PWM.");
+
+    // (e) At least one in-band sample must be required, or the debounce is a no-op and the turn
+    // exits on the very first (possibly noisy) in-band tick.
+    static_assert(TURN_SETTLE_SAMPLES >= 1,
+                  "Config::TURN_SETTLE_SAMPLES must be >= 1 — zero would make the settle "
+                  "debounce a no-op, exiting on the first in-band sample with no confirmation.");
+
+    // (f)/(g) The slew step must be strictly positive (or the ramp-up limiter never lets the
+    // command grow at all), and it must be able to cross the creep-to-threshold hand-off gap in
+    // a single tick, or a command growing off the creep floor lands back inside the gap and gets
+    // re-floored to the SAME creep value every tick — the "ramp" never actually grows.
+    static_assert(TURN_SLEW_PWM_PER_TICK > 0,
+                  "Config::TURN_SLEW_PWM_PER_TICK must be > 0 — zero would freeze the command at "
+                  "its seeded start value forever, since growth is never permitted.");
+    static_assert(TURN_SLEW_PWM_PER_TICK >= (TURN_CREEP_THRESH_PWM - TURN_CREEP_PWM),
+                  "Config::TURN_SLEW_PWM_PER_TICK must be able to cross the "
+                  "(TURN_CREEP_THRESH_PWM - TURN_CREEP_PWM) hand-off gap in a single tick. "
+                  "NOTE: this deviates from the turn-PD plan's literal AC8(g) text "
+                  "(`TURN_SLEW_PWM_PER_TICK >= TURN_CREEP_PWM`), which fails to compile even "
+                  "with the plan's OWN placeholder values (slew=10, creep=15) and with the "
+                  "bench-measured values (slew=10, creep=38) -- flagged for review in the T3 "
+                  "handoff, not silently resolved. A slew step smaller than this gap means a "
+                  "command growing off the creep floor lands back inside "
+                  "[TURN_CREEP_PWM, TURN_CREEP_THRESH_PWM) and turnCreepFloor snaps it straight "
+                  "back to TURN_CREEP_PWM every tick -- the ramp-up limit would be a lie.");
+
+    // (h) The turn's own timeout must fire before Drive's blocking-drain ceiling, or a hunting
+    // turn (non-faulting by design) could stall the drain's 10 s-per-command budget instead of
+    // resolving on its own.
+    static_assert(TURN_TIMEOUT_MS < DRIVE_DRAIN_TIMEOUT_MS_PER_CMD,
+                  "Config::TURN_TIMEOUT_MS must be < DRIVE_DRAIN_TIMEOUT_MS_PER_CMD — the turn's "
+                  "own non-faulting timeout must resolve before the blocking drain's per-command "
+                  "ceiling, or a hunting turn eats the whole drain budget instead of the turn's "
+                  "own bounded give-up.");
+
+    // (i) The static breakaway floor must sit ABOVE the kinetic creep floor — starting an in-place
+    // spin from rest breaks more (scrub) friction than sustaining one, so a breakaway at or below
+    // the creep would defeat its own purpose (bench: 46 vs 38 on Lofaix).
+    static_assert(TURN_BREAKAWAY_PWM > TURN_CREEP_PWM,
+                  "Config::TURN_BREAKAWAY_PWM must be > TURN_CREEP_PWM — the from-rest static "
+                  "breakaway floor is higher than the kinetic floor that sustains an already-"
+                  "moving spin. A breakaway <= creep cannot start a turn the creep floor could "
+                  "not already start.");
+
+    // (j) The breakaway kick must be reachable within the default authority ceiling, or the ±power
+    // clamp (which runs before the floor) caps the command below the floor the chassis needs.
+    static_assert(TURN_BREAKAWAY_PWM <= TURN_CRUISE_PWM,
+                  "Config::TURN_BREAKAWAY_PWM must be <= TURN_CRUISE_PWM — the ±power clamp runs "
+                  "before the floor, so a breakaway above the default authority ceiling could "
+                  "never be commanded on a default-power turn.");
+
+    // (k) The breakaway->creep hand-off distance must be at least one physically resolvable step,
+    // or a genuinely-rotating chassis could never accumulate enough measured motion to cross it.
+    static_assert(TURN_BREAKAWAY_MOTION_DEG >= TURN_MIN_RESOLVABLE_DEG,
+                  "Config::TURN_BREAKAWAY_MOTION_DEG must be >= TURN_MIN_RESOLVABLE_DEG — the "
+                  "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
+                  "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
+
     // Line-junction predicate checks (ConfigLine.h, issue #152).
     //
     // COUPLED SITE: WROLineArrayClass::getJunctionType() classifies against these three knobs
@@ -94,38 +190,6 @@ namespace Config
                   "satisfied by an 8-channel array.");
 
     // -----------------------------------------------------------------------------------------
-    // Turn-ladder invariant (ConfigDrive.h, issue #152).
-    //
-    // COUPLED SITE: Drive::_updateTurnProfile() drives at TURN_CRUISE_PWM until the heading
-    // error falls within TURN_SLOW_ZONE_DEG of the target, ramps down to TURN_SLOW_SPEED_PWM,
-    // and brakes once the error is within TURN_TOLERANCE_DEG. TURN_SLOW_SPEED_PWM is
-    // INTENTIONALLY set below the motor deadband floor (PWM_MIN_MAGNITUDE) -- `deadbandSnap`
-    // floors it back up to PWM_MIN_MAGNITUDE at emit time (see the corrected doc comment on
-    // TURN_SLOW_SPEED_PWM in ConfigDrive.h) -- so this invariant deliberately does NOT assert
-    // `TURN_SLOW_SPEED_PWM >= PWM_MIN_MAGNITUDE` (that would be false today: 20 < 35). Each
-    // constant referenced below got an `#ifndef *_DEFAULT` override hook in ConfigDrive.h so a
-    // compile-fail probe can trip each clause independently.
-    // -----------------------------------------------------------------------------------------
-
-    static_assert(TURN_SLOW_SPEED_PWM > 0 && TURN_SLOW_SPEED_PWM <= TURN_CRUISE_PWM &&
-                  TURN_CRUISE_PWM <= PWM_MAX,
-                  "Config::TURN_SLOW_SPEED_PWM/TURN_CRUISE_PWM/PWM_MAX turn-ladder ordering "
-                  "violated -- require 0 < TURN_SLOW_SPEED_PWM <= TURN_CRUISE_PWM <= PWM_MAX so "
-                  "the slow-zone ramp is a reduction from cruise, never an increase, and cruise "
-                  "never exceeds the saturation cap.");
-
-    static_assert(TURN_CRUISE_PWM >= PWM_MIN_MAGNITUDE,
-                  "Config::TURN_CRUISE_PWM must be >= PWM_MIN_MAGNITUDE -- the fast turn phase "
-                  "must clear the motor deadband floor or the chassis would never break static "
-                  "friction during the cruise phase of a turn.");
-
-    static_assert(TURN_TOLERANCE_DEG < TURN_SLOW_ZONE_DEG,
-                  "Config::TURN_TOLERANCE_DEG must be < TURN_SLOW_ZONE_DEG -- the slow zone must "
-                  "be strictly wider than the final tolerance gate or the TurnGyro state machine "
-                  "would brake at TURN_CRUISE_PWM without ever ramping down through the slow "
-                  "zone.");
-
-    // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)
     // -----------------------------------------------------------------------------------------
 
@@ -143,6 +207,9 @@ namespace Config
     // ...and must NOT collide with the differential-drive pair (M2/M3).
     static_assert(BELT_M_ID != MOTOR_LEFT_ID && BELT_M_ID != MOTOR_RIGHT_ID,
                   "BELT_M_ID collides with a drive motor (MOTOR_LEFT_ID/MOTOR_RIGHT_ID).");
+    // Belt direction sign is applied at the ManipBelt driver boundary; must be exactly +/-1.
+    static_assert(BELT_DIR_SIGN == 1 || BELT_DIR_SIGN == -1,
+                  "BELT_DIR_SIGN must be +1 or -1.");
     // Table sizes must be non-empty.
     static_assert(SORTER_BIN_COUNT >= 1, "SORTER_BIN_COUNT must be >= 1.");
     static_assert(BELT_STATION_COUNT >= 1, "BELT_STATION_COUNT must be >= 1.");

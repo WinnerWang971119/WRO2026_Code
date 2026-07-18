@@ -109,6 +109,7 @@ public:
     ManipAction dump() { return ManipAction{}; }
     ManipAction dumpReset() { return ManipAction{}; }
     ManipAction sortTo(uint8_t /*bin*/) { return ManipAction{}; }
+    ManipAction beltTo(Config::BeltStation /*station*/) { return ManipAction{}; }
     ManipAction reset() { return ManipAction{}; }
     ManipAction boxOpen() { return ManipAction{}; }
     ManipAction boxClose() { return ManipAction{}; }

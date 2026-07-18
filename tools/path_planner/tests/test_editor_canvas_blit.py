@@ -418,14 +418,19 @@ def test_release_with_none_button_still_fires_on_release(field_canvas):
     # A left-button drag is in progress (press latched the button).
     field_canvas._active_button = _MOUSE_BUTTON_LEFT
     received: list = []
-    field_canvas.on_release = lambda x, y, b: received.append((x, y, b))
+    # 4-arg form: (x, y, button, key) -- ``_in_axes_event`` builds a plain
+    # ``SimpleNamespace`` with no ``key`` attribute, so the handler's
+    # ``getattr(event, "key", None)`` fallback supplies ``None`` here.
+    field_canvas.on_release = lambda x, y, b, k: received.append((x, y, b, k))
 
     field_canvas._on_button_release(
         _in_axes_event(field_canvas, button=None, xdata=10.0, ydata=20.0)
     )
 
     assert field_canvas._active_button is None  # latch cleared
-    assert received == [(10.0, 20.0, _MOUSE_BUTTON_LEFT)]  # fired w/ latched btn
+    assert received == [
+        (10.0, 20.0, _MOUSE_BUTTON_LEFT, None)
+    ]  # fired w/ latched btn, no modifier key
 
 
 def test_release_with_mismatched_button_clears_latch(field_canvas):

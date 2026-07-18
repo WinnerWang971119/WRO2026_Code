@@ -290,9 +290,9 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    Drive.holdYaw();
-    Drive.driveDist(50).setMode(DriveMode::GYRO);
-    //Drive.driveDist(50).setMode(DriveMode::SYNC); 
+    //PathTracker.goTo("i1");
+    //Drive.driveDist(50).setPower(60).setMode(DriveMode::RAW);
+    Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
     return true;
 }
 

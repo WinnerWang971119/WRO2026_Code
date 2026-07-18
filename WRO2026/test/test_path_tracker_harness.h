@@ -39,11 +39,15 @@
  *     _profileStartEnc)` against `_profileTotalEnc` (Drive.cpp:714). RETIRED by ADVANCING
  *     `MiniR4.M2` past the profile total, then a tick (the profile flips `_moveDone`). The
  *     done-bit is irrelevant here (the drain is skipped while a profile is in flight).
- *   - **Custom TurnGyro profile** (`turnToYaw().setMode(...)` pre-edge turn): owns `_turnDone`
- *     via `_updateTurnProfile`, which drives `Move(L,R)` until the corrected IMU yaw read
- *     (`YawSource.readYawDeg` -> `mmL.mockYawDeg * IMU_YAW_SIGN`) is within `TURN_TOLERANCE_DEG`
- *     of the app-frame target (Drive.cpp:1124). RETIRED by parking `mmL.mockYawDeg` at the
- *     hardware-frame value for the app target, then a tick.
+ *   - **Turn PD controller** (`turnToYaw().setMode(...)` pre-edge turn, ADR-068): owns `_turnDone`
+ *     via `_updateTurnProfile`, which runs ONE PD step per tick against `Move(L,R)` until the
+ *     corrected IMU yaw read (`YawSource.readYawDeg` -> `mmL.mockYawDeg * IMU_YAW_SIGN`) has sat
+ *     within `TURN_TOLERANCE_DEG` of the app-frame target for `Config::TURN_SETTLE_SAMPLES`
+ *     CONSECUTIVE ticks — the settle debounce (Drive.cpp:1144-1153), not a single-shot check; one
+ *     out-of-band sample resets the counter to 0. RETIRED by parking `mmL.mockYawDeg` at the
+ *     hardware-frame value for the app target, then ticking until the debounce is satisfied
+ *     (`expectPreTurn` parks ONCE before the loop — the mock field persists across ticks, so the
+ *     required consecutive in-band samples accumulate without re-parking each iteration).
  *   - **stopAtLine seek** (BLIND-resolved-to-seek hop, STOP_AT_LINE): owns `_moveDone` via
  *     `_updateStopAtLine`, which reads `abs(M2.getDegrees() - _stopStartEnc)` for `traveled` and
  *     `LineArray.getJunctionType() == JUNCTION_T_OR_CROSS` for detection (Drive.cpp:1217,:1301).
@@ -452,17 +456,23 @@ inline void driveToLineFollowEntry(const char* startName, const char* goalName,
  *
  * @details
  * A pre-edge turn dispatches `Drive.turnToYaw(Localization.toImuYaw(bodyHeading)).setMode(byte)
- * .async()` (PathTracker.cpp:1649), which runs the CUSTOM TurnGyro profile (`_updateTurnProfile`,
- * Drive.cpp:1075). That profile drives `Move(L,R)` every tick and completes when the CORRECTED
- * IMU yaw (`YawSource.readYawDeg` -> `mmL.mockYawDeg * IMU_YAW_SIGN`) lands within
- * `Config::TURN_TOLERANCE_DEG` of the app-frame target `_turnTargetYaw` (Drive.cpp:1124), at
- * which point it BRAKEs and sets `_turnDone`/`_moveDone`. PathTracker's `TURNING` state then sees
- * `Drive.isIdle()` and dispatches the edge (PathTracker.cpp:680).
+ * .async()` (PathTracker.cpp:1649), which runs the turn PD controller (`_updateTurnProfile`,
+ * Drive.cpp:1090, ADR-068). That controller runs ONE PD step per tick against `Move(L,R)` and
+ * exits only once the CORRECTED IMU yaw (`YawSource.readYawDeg` -> `mmL.mockYawDeg *
+ * IMU_YAW_SIGN`) has sat within `Config::TURN_TOLERANCE_DEG` of the app-frame target
+ * `_turnTargetYaw` for `Config::TURN_SETTLE_SAMPLES` CONSECUTIVE ticks — the settle debounce
+ * (Drive.cpp:1144-1153); a single in-band sample is NOT enough, and one out-of-band sample resets
+ * the counter to 0. Once the debounce is satisfied it BRAKEs and sets `_turnDone`/`_moveDone`.
+ * PathTracker's `TURNING` state then sees `Drive.isIdle()` and dispatches the edge
+ * (PathTracker.cpp:680).
  *
- * This helper PARKS `mmL.mockYawDeg` at the hardware-frame value of @p appYawTarget so the
- * profile's next read sees the chassis already AT the target, then ticks until `Drive.isIdle()`.
- * One tick is normally enough (the FSM reads the parked yaw, transitions CRUISE/SLOW -> BRAKE ->
- * IDLE), but the loop is budgeted to absorb a SLOW-zone intermediate tick.
+ * This helper PARKS `mmL.mockYawDeg` at the hardware-frame value of @p appYawTarget ONCE, before
+ * the loop, then ticks until `Drive.isIdle()`. A single park is sufficient: `mmL.mockYawDeg` is a
+ * persistent mock field that `cooperativeTick()` never touches, so the parked value stays in-band
+ * across every loop iteration and the debounce counter climbs by one per tick with no further
+ * scripting — `Config::TURN_SETTLE_SAMPLES` (currently 2) consecutive in-band ticks settle the
+ * turn. `kMaxHandshakeTicks` (64) is generous headroom over that; do NOT assume a single tick
+ * retires the turn.
  *
  * @param appYawTarget The APP-frame (CCW-positive) yaw the chassis turns to (deg). CONTRACT 2:
  *                     converted to the hw frame internally, so the test passes the app value.
@@ -471,19 +481,21 @@ inline void driveToLineFollowEntry(const char* startName, const char* goalName,
  *                     PIVOT_RIGHT=3, or the pipeline default). Recorded for the assert below.
  *
  * @note Asserts the turn actually COMPLETED: `Drive.isIdle()` and `Drive.isTurnDone()` true after
- *       the handshake (the representative observable for a turn — the custom TurnGyro profile
- *       never issues a lower-MCU `MoveGyroDegs`, so there is no `lastMoveGyroDegsTarget` to check;
- *       the gyro-target assert belongs to the GYRO MOVE helpers). @p wheelByte is accepted so the
+ *       the handshake (the representative observable for a turn — the turn PD controller never
+ *       issues a lower-MCU `MoveGyroDegs`, so there is no `lastMoveGyroDegsTarget` to check; the
+ *       gyro-target assert belongs to the GYRO MOVE helpers). @p wheelByte is accepted so the
  *       signature documents the dispatched pattern and a future TurnMode-recording assert has the
- *       expected value at the call site; it is not otherwise consulted (the mock TurnGyro profile
- *       drives `Move(L,R)`, whose L/R sign encodes the pattern, not a recorded mode byte).
+ *       expected value at the call site; it is not otherwise consulted (the PD controller drives
+ *       `Move(L,R)`, whose L/R sign encodes the pattern, not a recorded mode byte).
  */
 inline void expectPreTurn(int16_t appYawTarget, uint8_t wheelByte)
 {
     (void) wheelByte;    // documents the dispatched pattern; see @note (no recorded mode byte).
 
-    // Park the corrected IMU read AT the app-frame target (hw frame = app * IMU_YAW_SIGN), so the
-    // custom TurnGyro profile's next `readYawDeg` sees the chassis already aligned and BRAKEs.
+    // Park the corrected IMU read AT the app-frame target (hw frame = app * IMU_YAW_SIGN) ONCE —
+    // the mock field holds this value across every tick below (cooperativeTick() never touches
+    // it), so the settle debounce's TURN_SETTLE_SAMPLES consecutive in-band ticks (Drive.cpp:
+    // 1144-1153) accumulate without re-parking each iteration.
     mmL.mockYawDeg = (double) hwYaw(appYawTarget);
 
     for (int i = 0; i < path_harness::kMaxHandshakeTicks && !Drive.isIdle(); ++i)
