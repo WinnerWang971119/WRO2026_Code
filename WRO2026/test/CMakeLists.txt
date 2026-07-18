@@ -626,6 +626,46 @@ add_fixture_routes_force_include(test_path_tracker_stop_at_line)   # FIRST (ROUT
 add_path_force_includes(test_path_tracker_stop_at_line)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
 
+# --- Test executables #3d(a)/#3d(b) — anticipatory line-approach ramp PathTracker dispatch
+# (2026-07-17 line-approach-ramp plan, T11): TC6 (LineFollower OVERRUN -> DRIVE_FAULT), TC9
+# (forward vs reverse axle-offset prediction), TC8 (toggle-off byte-identical, seek half). Same
+# real-link recipe as `test_path_tracker_passthrough_on`/`_off` above, built TWICE with
+# `LINE_APPROACH_RAMP_ENABLED_DEFAULT` flipped so TC8's assertions run in the toggle-off build
+# while TC6/TC9 exercise the (default-on) enabled build.
+add_executable(test_path_tracker_approach_ramp
+    ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_approach_ramp
+    PRIVATE LINE_APPROACH_RAMP_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_approach_ramp PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_approach_ramp)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_approach_ramp)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_approach_ramp COMMAND test_path_tracker_approach_ramp)
+
+add_executable(test_path_tracker_approach_ramp_disabled
+    ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_approach_ramp_disabled
+    PRIVATE LINE_APPROACH_RAMP_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_approach_ramp_disabled PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_approach_ramp_disabled)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_approach_ramp_disabled)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_approach_ramp_disabled COMMAND test_path_tracker_approach_ramp_disabled)
+
 # --- Test executable #3e — PathTracker projection-NODE dispatch, real-linked (issue #64 / #106). ---
 # Drives the two projection cells of the REAL `_dispatchEdgeAfterTurn` through the real FSM:
 #   - LINE  → projection : distance-gated PROJECTION_FOLLOW, dead-reckon advance (`Inter1→ProjL`).

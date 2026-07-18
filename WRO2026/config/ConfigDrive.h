@@ -404,8 +404,17 @@ namespace Config
      *
      * @note Global kill switch, not a per-call knob: flip this to `false` to instantly revert
      *       the feature without touching any call site.
+     * @note **Compile-time override:** guarded by `#ifndef LINE_APPROACH_RAMP_ENABLED_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_APPROACH_RAMP_ENABLED_DEFAULT=false`
+     *       on the compiler command line without editing this file — same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` (`ConfigNav.h`). The public
+     *       `Config::LINE_APPROACH_RAMP_ENABLED` symbol is unchanged; only its initializer is
+     *       overridable.
      */
-    constexpr bool LINE_APPROACH_RAMP_ENABLED = true;
+#ifndef LINE_APPROACH_RAMP_ENABLED_DEFAULT
+#define LINE_APPROACH_RAMP_ENABLED_DEFAULT true
+#endif
+    constexpr bool LINE_APPROACH_RAMP_ENABLED = LINE_APPROACH_RAMP_ENABLED_DEFAULT;
 
     /**
      * @brief Distance (cm) BEFORE the predicted line crossing where the ramp bottoms out at

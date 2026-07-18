@@ -302,11 +302,14 @@ void LineFollowerClass::update()
     }
 
     // Emit floor for this tick's Drive.setSpeed calls. Defaults to the static deadband
-    // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone below
-    // — mid-follow PID and lost-line CRAWL must keep the static floor (a stationary chassis
-    // needs the higher static-friction breakaway PWM), while the ramp-down tail is already
-    // moving and can crawl at the lower kinetic floor without stalling. See the
-    // PWM_MOVING_MIN @warning in ConfigGlobal.h for the rationale.
+    // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone, or in
+    // the ramp-down plateau below when the seeded `_tShapeRampDownStart` is itself already
+    // sub-static (the approach-ramp case) — mid-follow PID, lost-line CRAWL, and a legacy
+    // (PROJECTION_FOLLOW) plateau seeded at full preset cruise must all keep the static
+    // floor (a stationary chassis, or one whose inside wheel is near-stalled through a turn,
+    // needs the higher static-friction breakaway PWM), while a chassis already crawling at
+    // or below the kinetic floor can stay there without stalling. See the PWM_MOVING_MIN
+    // @warning in ConfigGlobal.h for the rationale.
     int16_t stopFloorMag = Config::PWM_MIN_MAGNITUDE;
 
     // -------------------------------------------------------------------------------------
@@ -374,7 +377,53 @@ void LineFollowerClass::update()
             // static floor. See the PWM_MOVING_MIN @warning in ConfigGlobal.h.
             stopFloorMag = Config::PWM_MOVING_MIN;
         }
-        // else: still in the cruise plateau zone — leave `cruise` unchanged.
+        else if (!_useTShape)
+        {
+            // Still in the cruise plateau zone (far from the gate) AND the ramp-UP branch is
+            // not concurrently owning `cruise` this tick: HOLD `cruise` at the captured
+            // ramp-down start rather than leaving it at the top-of-tick preset default. Gated
+            // on `!_useTShape` so a session that also has ramp-up in flight (e.g.
+            // `setDistanceTarget(...)` with both ramps on, the historical
+            // ramp-up-then-ramp-down combo) is untouched — the ramp-up branch above already
+            // owns `cruise` for that portion, exactly as before this fix.
+            //
+            // For a LEGACY ramp-down (no approach ramp armed this session)
+            // `_tShapeRampDownStart == presetToPwm(_preset)` (sign-corrected) already — the T6
+            // AC3 seed contract — so holding it here is numerically byte-identical to "leave
+            // cruise unchanged" and changes nothing observable pre-feature / with the feature
+            // disabled (AC8/AC13). It is ALSO byte-identical immediately after ramp-up
+            // completes (`_useTShape` flips false): the ramp-up's own target
+            // (`_tShapeTargetPwm == presetToPwm(_preset)`, sign-corrected) already equals
+            // `_tShapeRampDownStart` in that no-approach-ramp case.
+            //
+            // When an approach ramp DID seed a lower magnitude (T11 TC3 finding), the prior
+            // "leave unchanged" fell through to `cruise = presetToPwm(_preset)` computed at
+            // the top of this tick — full preset cruise — jolting the chassis from the
+            // approach floor back UP to cruise for the plateau portion of the overshoot
+            // window before ramping back down over the last `rampDownCm`. That violated the
+            // AC3 / F2 monotonic detect-handoff guarantee this seed exists to provide.
+            // Holding `_tShapeRampDownStart` here keeps the commanded magnitude flat at the
+            // seeded (already-reduced) value through the plateau, so the detect→overshoot
+            // handoff is genuinely non-increasing.
+            //
+            // `stopFloorMag` is lowered to the kinetic floor here ONLY when the seed itself
+            // is already sub-static (`abs(_tShapeRampDownStart) < PWM_MIN_MAGNITUDE` — the
+            // approach-ramp case, where the seed is `PWM_MOVING_MIN`), so `deadbandSnap`
+            // cannot re-snap that sub-static-floor seed back up to the static floor
+            // mid-plateau. A legacy/PROJECTION_FOLLOW plateau seeds `_tShapeRampDownStart`
+            // at full preset cruise (>= SPEED_SLOW, well above the static floor) and must
+            // keep `stopFloorMag` at the static floor — lowering it there would let the
+            // inside wheel of a turn crawl at the kinetic floor instead of the static
+            // breakaway floor, reintroducing the inside-wheel stall the static floor exists
+            // to prevent (F4/AC13 PROJECTION_FOLLOW byte-identical guarantee).
+            cruise = _tShapeRampDownStart;
+            if (abs(_tShapeRampDownStart) < Config::PWM_MIN_MAGNITUDE)
+            {
+                stopFloorMag = Config::PWM_MOVING_MIN;
+            }
+        }
+        // else (`_useTShape` still true): the ramp-up branch above owns `cruise` this tick —
+        // leave it untouched (matches the pre-fix behavior for this combo).
     }
 
     // -------------------------------------------------------------------------------------
