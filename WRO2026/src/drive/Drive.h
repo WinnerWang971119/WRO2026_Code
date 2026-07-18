@@ -555,7 +555,8 @@ public:
     /**
      * @brief Current IMU yaw in degrees, in the corrected app (CCW-positive) frame.
      * @return Corrected app-frame yaw via `YawSource::readYawDegOr` (which applies
-    *         `Config::IMU_YAW_SIGN`); best-effort `0.0` on a transient read failure (ADR-045).
+    *         `Config::GYRO_YAW_SIGN` via the decode policy); best-effort `0.0` on a
+    *         transient read failure (ADR-071).
      *         NOT the raw `MiniR4.Motion.getEuler` value — do not re-apply the sign.
      */
     double getYaw() const;

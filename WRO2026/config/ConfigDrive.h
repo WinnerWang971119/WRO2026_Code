@@ -171,7 +171,7 @@ namespace Config
      * @brief Coarse speed selector for chassis movement primitives.
      *
      * Used by every fluent verb that takes a power: Drive.driveDist / driveTime /
-     * forwardGyro / turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
+     * turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
      * `NORMAL`; pass `SLOW` for intersection approaches and tight corners, `FAST` for long
      * straights.
      */
