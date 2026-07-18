@@ -290,10 +290,9 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    // T1's bench-probe harness (turn creep-floor / tick-period / IMU-noise measurement)
-    // was extracted to the standalone `inoTest/turn_probe` diagnostic sketch per the
-    // operator's amendment to T10 (docs/plans/2026-07-16-turn-pd-controller.md) — run it
-    // via `uv run inoTest/turn_probe/build.py` instead of dispatching this task.
+    //PathTracker.goTo("i1");
+    //Drive.driveDist(50).setPower(60).setMode(DriveMode::RAW);
+    Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
     return true;
 }
 

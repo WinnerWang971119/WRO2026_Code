@@ -257,17 +257,20 @@ static void test_TC6_belt_position_move_to_mid()
 
     // MID's absolute target comes from config (the user tunes it). Seed the encoder a fixed
     // 300 deg BELOW it so a real POSITION move of exactly 300 toward FAR_END is issued,
-    // regardless of the configured MID value.
-    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
-    const int32_t seed   = midDeg - 300;
-    MiniR4.M1.mockSetDegrees(seed);    // belt is on M1
+    // regardless of the configured MID value. mockSetDegrees seeds the PHYSICAL encoder while
+    // _getDegrees() folds in Config::BELT_DIR_SIGN, so seed through the same sign to land the
+    // intended value in the belt's logical frame.
+    const int32_t midDeg     = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    const int32_t logicalCur = midDeg - 300;
+    MiniR4.M1.mockSetDegrees((int32_t) (Config::BELT_DIR_SIGN * logicalCur));    // belt is on M1
 
     Manipulator.belt.toStation(Config::BeltStation::MID);    // POSITION, abs target midDeg
 
-    // rotateFor called once with POSITIVE speed (toward FAR_END) and |delta| == 300.
+    // rotateFor called once, driving toward FAR_END (logical +speed, i.e. physical sign ==
+    // BELT_DIR_SIGN) with |delta| == 300.
     ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 1);
-    ASSERT_GT(MiniR4.M1.lastRotateSpeed, (int16_t) 0);
-    ASSERT_EQ(MiniR4.M1.lastRotateDegree, (uint16_t) (midDeg - seed));
+    ASSERT_GT((int16_t) (MiniR4.M1.lastRotateSpeed * Config::BELT_DIR_SIGN), (int16_t) 0);
+    ASSERT_EQ(MiniR4.M1.lastRotateDegree, (uint16_t) (midDeg - logicalCur));
 
     // Move is in flight (POS_MOVE) until the rotate-done bit is set.
     ASSERT_FALSE(Manipulator.belt.isDone());
@@ -384,7 +387,8 @@ static void test_TC8_belt_home_resets_settles_then_moves_to_mid()
     const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
     ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 1);
     ASSERT_EQ(MiniR4.M1.lastRotateDegree, (uint16_t) midDeg);
-    ASSERT_GT(MiniR4.M1.lastRotateSpeed, (int16_t) 0);
+    // Drive is toward FAR_END (logical +speed): physical rotate sign == BELT_DIR_SIGN.
+    ASSERT_GT((int16_t) (MiniR4.M1.lastRotateSpeed * Config::BELT_DIR_SIGN), (int16_t) 0);
     ASSERT_FALSE(Manipulator.belt.isDone());
 
     // Signal the MID move complete; a single update() retires the whole sequence.

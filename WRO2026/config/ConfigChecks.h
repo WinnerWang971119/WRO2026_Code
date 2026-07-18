@@ -207,6 +207,9 @@ namespace Config
     // ...and must NOT collide with the differential-drive pair (M2/M3).
     static_assert(BELT_M_ID != MOTOR_LEFT_ID && BELT_M_ID != MOTOR_RIGHT_ID,
                   "BELT_M_ID collides with a drive motor (MOTOR_LEFT_ID/MOTOR_RIGHT_ID).");
+    // Belt direction sign is applied at the ManipBelt driver boundary; must be exactly +/-1.
+    static_assert(BELT_DIR_SIGN == 1 || BELT_DIR_SIGN == -1,
+                  "BELT_DIR_SIGN must be +1 or -1.");
     // Table sizes must be non-empty.
     static_assert(SORTER_BIN_COUNT >= 1, "SORTER_BIN_COUNT must be >= 1.");
     static_assert(BELT_STATION_COUNT >= 1, "BELT_STATION_COUNT must be >= 1.");

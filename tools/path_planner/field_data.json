@@ -10,7 +10,7 @@
   "BLIND_DECAY_EXPONENT": 2.0,
   "BLIND_DECAY_D_REF": 50.0,
   "START_NODE": "Start",
-  "START_HEADING_DEG": 0.2,
+  "START_HEADING_DEG": 270.0,
   "NODES": {
     "C": [
       185.5,
@@ -113,8 +113,8 @@
       51.700000000000045
     ],
     "Start": [
-      19.401983784006262,
-      19.42960036218463
+      19.4,
+      23.400000000000002
     ],
     "bowlF": [
       169.46989340247768,
@@ -152,21 +152,21 @@
       167.3,
       27.3
     ],
-    "shovel1F": [
-      81.16603695929538,
-      15.501518706013083
-    ],
     "shovel1O": [
       89.4,
-      27.3
-    ],
-    "shovel2F": [
-      32.5,
       27.3
     ],
     "shovel2O": [
       139.60200847841298,
       23.80051035107215
+    ],
+    "shovelGet": [
+      81.16603695929538,
+      15.501518706013083
+    ],
+    "shovelPut": [
+      32.5,
+      27.3
     ]
   },
   "NODE_TYPES": {
@@ -205,10 +205,10 @@
     "i3": "line",
     "i6": "line",
     "p1": "projection",
-    "shovel1F": "blind",
     "shovel1O": "line",
-    "shovel2F": "blind",
-    "shovel2O": "blind"
+    "shovel2O": "blind",
+    "shovelGet": "blind",
+    "shovelPut": "projection"
   },
   "LINE_SEGMENTS": [
     [
@@ -282,13 +282,13 @@
     [
       "p1",
       "i6"
+    ],
+    [
+      "shovelPut",
+      "i1"
     ]
   ],
   "BLIND_EDGES": [
-    [
-      "Start",
-      "i1"
-    ],
     [
       "dump1",
       "i3"
@@ -362,10 +362,6 @@
       "i3"
     ],
     [
-      "shovel2F",
-      "i1"
-    ],
-    [
       "shovel2O",
       "i6"
     ],
@@ -374,9 +370,22 @@
       "i3"
     ],
     [
-      "shovel1F",
+      "shovelGet",
       "shovel1O"
+    ],
+    [
+      "Start",
+      "shovelPut"
     ]
+  ],
+  "blind_projection_auto_seek": false,
+  "EDGES": [
+    {
+      "type": "LINE",
+      "u": "shovelPut",
+      "v": "i1",
+      "speed": "SLOW"
+    }
   ],
   "OBSTACLES": []
 }

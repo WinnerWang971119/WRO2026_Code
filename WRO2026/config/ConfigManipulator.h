@@ -91,14 +91,40 @@ namespace Config
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
+    /**
+     * @brief Belt motor direction sign (`+1` or `-1`). Applied ONCE at the `ManipBelt`
+     *        driver boundary — the `_setSpeed` / `_rotateFor` speed argument and the
+     *        `_getDegrees` read — so the sign convention above holds no matter how the
+     *        belt motor is wired (ADR-045 style single-point sign, like `IMU_YAW_SIGN`).
+     * @note  This is the LOGICAL-direction knob (which physical end is FAR_END). It is a
+     *        different axis from `BELT_MOTOR_REVERSE`, which fixes motor/encoder AGREEMENT so
+     *        the closed-loop `rotateFor` can complete. On this build both come out such that
+     *        `BELT_DIR_SIGN = +1` and `BELT_MOTOR_REVERSE = true` home the belt correctly.
+     */
+    constexpr int8_t   BELT_DIR_SIGN        = +1;    // logical +speed = FAR_END on this build
+
+    /**
+     * @brief Reverse the belt motor's power direction (`setReverse` / `SetDCMotorDir`).
+     *
+     * The belt encoder counts OPPOSITE to the motor's power on this build, so the lower MCU's
+     * closed-loop `rotateFor` (POSITION moves) saw the count run away from target and hung to
+     * the `BELT_MOVE_TIMEOUT_MS` watchdog. Reversing the MOTOR (the working `SetDCMotorDir`
+     * half of `setReverse`) brings motor + encoder back into agreement so `rotateFor`
+     * completes — verified on hardware via `inoTest/belt_encoder_probe`. `SetEncoderDir`
+     * (flip the encoder instead) does NOT work: the STM32 rotate controller ignores it, which
+     * is why the vendor left it commented out of `setReverse`.
+     * @note `true` on the current belt (measured: +motor command drove the count negative).
+     */
+    constexpr bool     BELT_MOTOR_REVERSE   = true;    // flip motor to agree with the encoder
+
     /** @brief Belt encoder pulses per revolution (LEGO EV3). TODO confirm. */
     constexpr uint16_t BELT_PPR             = 360;    // LEGO EV3; TODO confirm
     /** @brief Belt free-run speed spec (RPM). TODO confirm. */
     constexpr uint16_t BELT_RPM             = 300;    // TODO confirm
     /** @brief Magnitude of a POSITION-mode belt move (PWM). TODO. */
-    constexpr int16_t  BELT_MOVE_SPEED      = 50;     // POSITION-move magnitude; TODO
+    constexpr int16_t  BELT_MOVE_SPEED      = 55;     // POSITION-move magnitude; TODO
     /** @brief Magnitude of the stall-home drive toward HOME (PWM). TODO. */
-    constexpr int16_t  BELT_STALL_SPEED      = 25;     // stall-home magnitude (toward HOME); TODO
+    constexpr int16_t  BELT_STALL_SPEED      = 18;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
     constexpr uint32_t BELT_RESET_MS         = 2000;   // stall-home timed run; TODO
     /**
@@ -116,7 +142,7 @@ namespace Config
      *        `setSpeed()` drive into the `rotateFor()` position move — mirroring how ordinary
      *        back-to-back moves are separated across ticks. TODO tune at bring-up.
      */
-    constexpr uint32_t BELT_HOME_SETTLE_MS = 150;   // dwell after the stall before the MID rotate; TODO
+    constexpr uint32_t BELT_HOME_SETTLE_MS = 200;   // dwell after the stall before the MID rotate; TODO
     /**
      * @brief Wall-clock ceiling for the FULL `home()` sequence: stall into the LEFT/HOME
      *        end-stop, re-zero the encoder, settle, then drive to the MID rest position.
@@ -165,10 +191,10 @@ namespace Config
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
-        { BeltMode::POSITION, 100, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
-        { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // FAR_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    200,   0,          BELT_STALL_SPEED },  // REAR_BOX_OPEN (pos); TODO
-        { BeltMode::POSITION,    100,   0,          BELT_STALL_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION, 640, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); 
+        { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
+        { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos); 
+        { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
     };
 }    // namespace Config
 

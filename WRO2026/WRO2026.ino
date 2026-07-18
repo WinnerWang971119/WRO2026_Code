@@ -388,9 +388,10 @@ void loop()
         }
     }
 
-    // BTN_UP rising edge arms the mission. The press captures the IMU yaw NOW
-    // (operator has placed the chassis on `Routes::START_NODE` facing
-    // `START_HEADING_DEG`). In production (`Config::MISSION_ALLOW_REARM` false)
+    // BTN_UP rising edge arms the mission. The press re-anchors the chassis to
+    // `Routes::START_NODE` and captures the IMU yaw NOW (the operator has just
+    // placed it there, facing `START_HEADING_DEG`) — both halves of that pose,
+    // not the heading alone. In production (`Config::MISSION_ALLOW_REARM` false)
     // it arms exactly once per power cycle; subsequent presses do nothing.
     //
     // `_missionArmed` is set ONLY on a successful zero so a transient
@@ -400,7 +401,10 @@ void loop()
     // BTN_UP press also re-fires once the mission has returned to idle — a
     // clean finish or a cleared fault, never mid-run (Mission.isIdle() is
     // false while RUNNING or faulting). `_missionArmed` stays latched, so the
-    // BTN_DOWN calibration-menu path stays suppressed after the first arm.
+    // BTN_DOWN calibration-menu path stays suppressed after the first arm. The
+    // re-arm rebinds the frame from scratch via `Localization.begin()` below —
+    // the previous run left `_currentNode` on ITS final node, and re-planning
+    // from there is what made a re-armed route no-op or take a wrong path.
     //
     // Guard: while BTN_DOWN is being held toward the 2-s menu-entry threshold,
     // ignore BTN_UP so that accidental thumb-on-both-buttons cannot spuriously
@@ -410,6 +414,26 @@ void loop()
         !_missionArmed || (Config::MISSION_ALLOW_REARM && Mission.isIdle());
     if (btnUpNow && !_btnUpPrev && armable && _btnDownPressStartMs == 0)
     {
+        // Rebind the WHOLE world frame, not just heading. BTN_UP asserts "the chassis is
+        // physically on `Routes::START_NODE` facing `START_HEADING_DEG`", and the NODE half of
+        // that contract needs its own write: `zeroHeadingFromCurrent()` binds `_yawOffsetDeg`
+        // and drops `_offset`, but deliberately never touches `_currentNode`. `begin()` is the
+        // only verb that re-seeds `_currentNode = Routes::START_NODE` (plus the offset,
+        // integrator baselines and nav gate), so a re-arm without it leaves `_currentNode`
+        // latched on the PREVIOUS run's final node — `PathTracker::_onPlanNextHop` then sees
+        // `cur == _destinationNode`, reports an instant arrival, and the chassis never moves.
+        //
+        // Unconditional (NOT gated on `_missionArmed`): on the first arm this is a no-op —
+        // nothing can have moved `_currentNode` or grown `_offset` before the first zero (the
+        // integrate gate needs `isZeroed()`, and a pre-zero `goTo` faults NOT_ZEROED).
+        //
+        // Order matters: `begin()` runs FIRST so the zero below binds against clean state. It
+        // clears `_zeroed`, so a failed zero leaves the chassis un-zeroed with the mission
+        // un-started — recoverable, not a lockout: `armable` still holds, so BTN_UP retries. It also
+        // re-seeds the heading cache to `START_HEADING_DEG`, which is exactly the truth at this
+        // moment (`zeroHeadingFromCurrent()` does not refresh that cache itself), instead of
+        // serving the prior run's final heading to no-I/O readers until the next live read.
+        Localization.begin();
         if (!Localization.zeroHeadingFromCurrent())
         {
             EventTrace.pushEvent("ZERO FAIL");

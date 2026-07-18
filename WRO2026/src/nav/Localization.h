@@ -95,6 +95,14 @@ public:
      * `_navActive` gate) so a re-begin between bench runs starts from a clean frame rather than
      * serving the prior run's displacement or inheriting a stuck nav gate.
      *
+     * ALSO the arm-time frame-rebind: the `.ino` BTN_UP handler calls this immediately before
+     * `zeroHeadingFromCurrent()` on every arm. That pairing is the ONLY way `_currentNode` returns
+     * to `Routes::START_NODE` for a `Config::MISSION_ALLOW_REARM` re-arm — `zeroHeadingFromCurrent()`
+     * binds heading alone, so without this the re-armed run plans from the PREVIOUS run's final
+     * node and `PathTracker` fake-arrives on a goal it believes it is already standing on. Call the
+     * two together: this clears `_zeroed`, so `begin()` without a following zero leaves the chassis
+     * unable to `goTo` (faults `NOT_ZEROED`).
+     *
      * @return `true` always (defensive — kept for symmetry with the other modules' bool
      *         return convention so `.ino` can collect a single `_setupFailed` flag).
      */

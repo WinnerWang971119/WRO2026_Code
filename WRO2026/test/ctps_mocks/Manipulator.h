@@ -158,6 +158,19 @@ public:
         return ManipAction{};
     }
 
+    /**
+     * @brief Record a `beltTo` manip op carrying the station index.
+     * @note Templated on the station type (like `ManipBelt::toStation`) so this mock
+     *       stays free of a `Config.h` dependency; the scoped-enum station casts to its
+     *       underlying index.
+     */
+    template<typename T>
+    ManipAction beltTo(T station)
+    {
+        ctps::recordManip("beltTo", static_cast<uint8_t>(station));
+        return ManipAction{};
+    }
+
     /** @brief Record a `reset` manip op. */
     ManipAction reset()
     {

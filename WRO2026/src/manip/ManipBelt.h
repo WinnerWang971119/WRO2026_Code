@@ -98,8 +98,12 @@ public:
      * Sequence:
      *   1. `setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM)` — encoder resolution + RPM
      *      ceiling for the lower-MCU speed/position loops.
-     *   2. `setReverse(false)` — placeholder hardware direction (the sign convention is
-     *      carried by speed; flip this at bring-up if the motor wiring is reversed).
+     *   2. `setReverse(Config::BELT_MOTOR_REVERSE)` — reverse the motor power if it disagrees
+     *      with the encoder, so the closed-loop `rotateFor` (POSITION moves) completes on the
+     *      encoder instead of running away to the watchdog. Flipping the MOTOR realigns it
+     *      with a reversed encoder; the encoder-side `SetEncoderDir` does NOT work (the STM32
+     *      rotate controller ignores it — why the vendor left it commented out of setReverse).
+     *      The logical drive direction is carried separately by `Config::BELT_DIR_SIGN`.
      *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, `resetCounter()`,
      *      settle, then drive to MID), polled by `update()` + `delay(2)` until `isDone()`
      *      or the `Config::BELT_HOME_TIMEOUT_MS` ceiling.
@@ -116,7 +120,10 @@ public:
     bool begin()
     {
         bool ok = _setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM);
-        ok = _setReverse(false) && ok;    // placeholder HW direction; sign carries direction
+        // Reverse the motor power if it disagrees with the encoder, so the closed-loop
+        // rotateFor completes on ChkRotateEnd instead of running away to the watchdog. The
+        // logical drive direction is then carried by BELT_DIR_SIGN.
+        ok = _setReverse(Config::BELT_MOTOR_REVERSE) && ok;
 
         // Full home (stall to LEFT/HOME, reset, drive to MID), blocking-bounded. begin() runs
         // before any tick callback is registered, so we cannot rely on Drive-style _drain —
@@ -204,6 +211,17 @@ public:
         const int16_t  mag    = (int16_t)abs(Config::BELT_MOVE_SPEED);
         const int16_t  speed  = (delta >= 0) ? mag : (int16_t)(-mag);
         const uint16_t degree = (uint16_t)labs(delta);
+
+        // TEMP bring-up telemetry: shows the actual encoder frame at move time so we can tell
+        // a sign-frame bug (current reads the wrong sign) from a stale-position one.
+        Serial.print(F("[ManipBelt] beltTo cur="));
+        Serial.print((long)current);
+        Serial.print(F(" tgt="));
+        Serial.print((long)absDeg);
+        Serial.print(F(" delta="));
+        Serial.print((long)delta);
+        Serial.print(F(" spd="));
+        Serial.println((int)speed);
 
         if (!_rotateFor(speed, degree)) {
             Serial.println(F("[ManipBelt] beltTo: rotateFor failed"));
@@ -446,21 +464,24 @@ private:
      */
     bool _rotateFor(int16_t speed, uint16_t degree)
     {
-        bool ok = false;
+        // Apply the belt direction sign once here so the caller's logical convention
+        // (+ toward FAR_END) holds regardless of motor wiring (see Config::BELT_DIR_SIGN).
+        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
+        bool          ok = false;
         switch (_motorId) {
-            case 1: ok = MiniR4.M1.rotateFor(speed, degree); break;
-            case 2: ok = MiniR4.M2.rotateFor(speed, degree); break;
-            case 3: ok = MiniR4.M3.rotateFor(speed, degree); break;
-            case 4: ok = MiniR4.M4.rotateFor(speed, degree); break;
+            case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
+            case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
+            case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
+            case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
             default: return false;
         }
         if (!ok) {
             delay(1);
             switch (_motorId) {
-                case 1: ok = MiniR4.M1.rotateFor(speed, degree); break;
-                case 2: ok = MiniR4.M2.rotateFor(speed, degree); break;
-                case 3: ok = MiniR4.M3.rotateFor(speed, degree); break;
-                case 4: ok = MiniR4.M4.rotateFor(speed, degree); break;
+                case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
+                case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
+                case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
+                case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
                 default: return false;
             }
         }
@@ -502,7 +523,13 @@ private:
      */
     int32_t _getDegrees()
     {
-        return EncoderSource.readDegreesOr(_motorId, 0);
+        // Route through EncoderSource for the last-good read (ADR-066), then fold the belt
+        // direction sign so getDegrees() is in the same logical frame as the speed commands
+        // (see Config::BELT_DIR_SIGN) — absolute POSITION math in beltTo() stays correct no
+        // matter how the motor + encoder are wired. An invalid id / cold-cache miss reads 0,
+        // and BELT_DIR_SIGN * 0 == 0, so the fallback is unchanged.
+        const int32_t raw = EncoderSource.readDegreesOr(_motorId, 0);
+        return (int32_t)(Config::BELT_DIR_SIGN * raw);
     }
 
     /**
@@ -512,21 +539,24 @@ private:
      */
     bool _setSpeed(int16_t speed)
     {
-        bool ok = false;
+        // Apply the belt direction sign once here (see Config::BELT_DIR_SIGN) so a negative
+        // speed always drives toward HOME and a positive toward FAR_END, whatever the wiring.
+        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
+        bool          ok = false;
         switch (_motorId) {
-            case 1: ok = MiniR4.M1.setSpeed(speed); break;
-            case 2: ok = MiniR4.M2.setSpeed(speed); break;
-            case 3: ok = MiniR4.M3.setSpeed(speed); break;
-            case 4: ok = MiniR4.M4.setSpeed(speed); break;
+            case 1: ok = MiniR4.M1.setSpeed(s); break;
+            case 2: ok = MiniR4.M2.setSpeed(s); break;
+            case 3: ok = MiniR4.M3.setSpeed(s); break;
+            case 4: ok = MiniR4.M4.setSpeed(s); break;
             default: return false;
         }
         if (!ok) {
             delay(1);
             switch (_motorId) {
-                case 1: ok = MiniR4.M1.setSpeed(speed); break;
-                case 2: ok = MiniR4.M2.setSpeed(speed); break;
-                case 3: ok = MiniR4.M3.setSpeed(speed); break;
-                case 4: ok = MiniR4.M4.setSpeed(speed); break;
+                case 1: ok = MiniR4.M1.setSpeed(s); break;
+                case 2: ok = MiniR4.M2.setSpeed(s); break;
+                case 3: ok = MiniR4.M3.setSpeed(s); break;
+                case 4: ok = MiniR4.M4.setSpeed(s); break;
                 default: return false;
             }
         }

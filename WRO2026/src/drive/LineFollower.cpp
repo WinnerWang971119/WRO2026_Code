@@ -517,16 +517,22 @@ void LineFollowerClass::update()
             const float dErr = err - _lastErr;
             _lastErr         = err;
 
-            // Bias the proportional term by the staged signed lateral offset (issue #156).
-            // ONLY the P setpoint shifts: `_lastErr` / `dErr` above stay the RAW centroid, so
-            // `getRawError()` telemetry is intact and a mid-follow offset change injects no
-            // derivative kick — just a bounded P-step of ≈ LINE_KP*_lineFollowOffset.
-            // `_lineFollowOffset` is 0.0f on a centred follow, making this byte-identical to
-            // the pre-#156 steering. The biased P term is reached ONLY on this online,
-            // non-junction path, so a zero-weight offline read (runOnlinePath == false above)
-            // never sees it and no extra dropout guard is needed. See issue #156 / ADR-069.
-            float corr =
-                (Config::LINE_KP * (err - _lineFollowOffset)) + (Config::LINE_KD * dErr);
+            // Select the gain set for the leading board (ADR-070): the rear board's shorter
+            // sensor-to-axle lookahead needs its own Kp/Kd, so reverse follow uses the REAR
+            // gains and forward follow the FRONT gains.
+            const float kp = _reverse ? Config::LINE_KP_REAR : Config::LINE_KP;
+            const float kd = _reverse ? Config::LINE_KD_REAR : Config::LINE_KD;
+
+            // Bias the proportional term by the staged signed lateral offset (issue #156 /
+            // ADR-069). ONLY the P setpoint shifts: `_lastErr` / `dErr` above stay the RAW
+            // centroid, so `getRawError()` telemetry is intact and a mid-follow offset change
+            // injects no derivative kick — just a bounded P-step of ≈ kp*_lineFollowOffset.
+            // `_lineFollowOffset` is 0.0f on a centred follow, making this byte-identical to the
+            // pre-#156 steering. The biased P term is reached ONLY on this online, non-junction
+            // path, so a zero-weight offline read (runOnlinePath == false above) never sees it
+            // and no extra dropout guard is needed. The board-selected gains (ADR-070) apply to
+            // both the P and D terms.
+            float corr = (kp * (err - _lineFollowOffset)) + (kd * dErr);
 
             // Clamp the correction to the configured maximum.
             if (corr > Config::LINE_MAX_CORR)

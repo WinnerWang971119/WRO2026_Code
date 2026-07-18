@@ -262,8 +262,11 @@ int main()
     // TC5 (AC1 off-axis) — a forward drive at a NON-ZERO world heading decomposes onto BOTH
     // world axes with the correct signs (proves the cosf/sinf split, not just the magnitude).
     //
-    // Setup: zero at world heading 0, open the gate, then rotate the world heading to 150 deg
-    // (a pure IMU-yaw change; encoders untouched) and settle so the yaw baseline tracks it.
+    // Setup: zero at the field's START_HEADING_DEG, open the gate, then rotate the world heading
+    // to 150 deg (a pure IMU-yaw change; encoders untouched) and settle so the yaw baseline
+    // tracks it. The target yaw is derived from Routes::START_HEADING_DEG (world = START - yaw),
+    // so the world heading lands on 150 deg regardless of the field's start heading — the
+    // component expectations below stay valid when field_data.json retunes START_HEADING_DEG.
     // Then drive 30 cm forward. At heading 150: x = 30*cos(150) = -25.98, y = 30*sin(150) =
     // +15.0. The magnitude-only check (TC1) would still pass on an axis-swapped or sign-flipped
     // decomposition; pinning the individual components is what catches that.
@@ -274,12 +277,13 @@ int main()
     {
         resetWorld();
 
-        mmL.mockYawDeg = 0.0;    // zero at world heading 0.
+        mmL.mockYawDeg = 0.0;    // arbitrary boot yaw; post-zero world heading == START_HEADING_DEG.
         check(Localization.zeroHeadingFromCurrent(), "TC5: zeroHeadingFromCurrent succeeds");
         Localization.setNavActive(false);
 
-        // Rotate the world heading to 150 deg and settle the baselines there (no translation yet).
-        mmL.mockYawDeg = -150.0;
+        // Rotate to world heading 150 deg and settle the baselines there (no translation yet).
+        // world = START_HEADING_DEG - yaw, so this yaw lands on exactly 150 deg for any start.
+        mmL.mockYawDeg = Routes::START_HEADING_DEG - 150.0;
         Localization.update();
 
         // Drive 30 cm forward along the 150-deg heading.
