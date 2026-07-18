@@ -37,6 +37,7 @@ from tools.path_planner.compiler import (
     ACT_TURN_REL,
     Primitive,
     compile_path,
+    normalize_turn,
 )
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
@@ -2701,33 +2702,40 @@ def test_pivot_tc19_chained_fitting_pivots_land_with_zero_residual():
 
 
 # ---------------------------------------------------------------------------
-# TC20 -- a pivot hop the auto heuristic would resolve REAR is forced FRONT
+# TC20 -- a FRONT-approach pivot holds its departure FRONT under force-SAME
 # ---------------------------------------------------------------------------
 
 
-def test_pivot_tc20_auto_rear_pivot_hop_is_forced_front_and_fires():
-    """TC20: an obtuse pivot whose departure hop auto-resolves REAR is forced FRONT.
+def test_pivot_tc20_front_approach_pivot_holds_departure_front_under_force_same():
+    """TC20: a FRONT-approach pivot whose departure edge would auto-resolve REAR
+    is held FRONT by force-SAME.
 
     On the route ``P -> Q -> R`` the pivot ``(P, Q, R)`` is an obtuse 120 deg
     turn. After the FRONT approach ``P -> Q`` the chassis heading is 0 deg and the
-    departure edge ``Q -> R`` heads 120 deg, so the bidirectional auto heuristic
-    (|delta| = 120 deg > the 90 deg threshold, 2-board chassis) would resolve the
-    departure REAR. The FRONT-only pivot override in ``_walk_hops`` must flip it
-    back to FRONT and STILL fire the pivot trim:
+    departure edge ``Q -> R`` heads 120 deg, so the departure's OWN
+    ``BIDIRECTIONAL_AUTO`` resolution (|delta| = 120 deg > the 90 deg threshold,
+    2-board chassis) would independently pick REAR. Force-SAME (#54 / ADR-072)
+    commits the pivot to the direction it APPROACHED in and forces the departure
+    to that same direction: the FRONT approach holds the departure FRONT, so the
+    geometry-derived wheel + over-travel ``delta`` stay valid.
+
+    This is the FRONT-approach half of TC3's "both approaches" matrix (the
+    REAR-approach half is ``make_auto_rear_approach_pivot_field``). Force-SAME
+    here reduces to the v1 force-FRONT behavior -- a FRONT-approach pivot -- so
+    the emitted stream is unchanged:
 
     * the departure ``Q -> R`` emits a FRONT ``ACT_FORWARD`` (trimmed by delta),
-      NEVER ``ACT_BLIND_REVERSE`` -- no silent downgrade to a counter-rotation;
-    * the approach ``P -> Q`` is also trimmed (it drives into the pivot node).
-
-    This is the load-bearing FRONT-only sim case. The skip+trace backstop stays a
-    should-be-impossible path.
+      NEVER ``ACT_BLIND_REVERSE`` -- force-SAME held it FRONT, no silent REAR
+      downgrade;
+    * the approach ``P -> Q`` is also trimmed (it drives into the pivot node);
+    * the taken pivot's resolved direction is FRONT.
     """
     field = pivot_field_data.make_auto_rear_pivot_field()
     sim, chassis, graph, _next_hop = _make_pivot_sim(field)
     delta = compute_pivot_compensation(_PIVOT_TURN_120_DEG, _PIVOT_TRACK_CM)
 
     # Control: the SAME departure edge, resolved WITHOUT a pivot, auto-resolves
-    # REAR -- so the force-FRONT below is genuinely load-bearing.
+    # REAR -- so force-SAME holding it FRONT below is genuinely load-bearing.
     qr_heading = float(graph.edges["Q", "R"]["heading_deg"])
     auto_dir = resolve_direction(
         edge_dir_override=DirectionMode.DEFAULT,
@@ -2741,23 +2749,29 @@ def test_pivot_tc20_auto_rear_pivot_hop_is_forced_front_and_fires():
         line_board_count=2,
     )
     assert auto_dir == Direction.REAR, (
-        "fixture geometry no longer makes Q->R auto-resolve REAR; the force-FRONT "
+        "fixture geometry no longer makes Q->R auto-resolve REAR; the force-SAME "
         "assertion below would be vacuous"
     )
 
     prims = sim.go_to("R")
     act_tags = [p[0] for p in prims]
 
-    # Force-FRONT: the departure emits FRONT ACT_FORWARD, never ACT_BLIND_REVERSE.
+    # Force-SAME: the FRONT approach holds the departure FRONT (ACT_FORWARD),
+    # never a silent REAR downgrade to ACT_BLIND_REVERSE.
     assert ACT_BLIND_REVERSE not in act_tags, (
-        f"pivot departure hop was NOT forced FRONT (silent REAR downgrade); got {act_tags}"
+        f"pivot departure hop was NOT held FRONT (silent REAR downgrade); got {act_tags}"
     )
+
+    # The taken pivot committed to the FRONT approach direction.
+    taken = sim.taken_pivot("P", "Q", "R")
+    assert taken is not None
+    assert taken.direction == Direction.FRONT
 
     # Both legs trimmed by delta; the obtuse pivot turn is emitted as ACT_TURN_REL.
     assert prims == [
         (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),    # P->Q approach trim (FRONT)
         (ACT_TURN_REL, pytest.approx(_PIVOT_TURN_120_DEG, abs=1e-9)),
-        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),    # Q->R departure trim (forced FRONT)
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),    # Q->R departure held FRONT
     ]
     assert sim.localization.current_node() == "R"
 
@@ -2834,6 +2848,236 @@ def test_tc21_goto_step_through_identical_on_pivot_chain():
     assert go_to_prims == step_prims
     assert sim_go.localization.current_node() == "X"
     assert sim_step.localization.current_node() == "X"
+
+
+# ===========================================================================
+# Reverse (REAR-traversal) single-wheel pivot behavior (#54 / ADR-072, T8)
+#
+# TC2 / TC3 / TC5 of the reverse-pivots plan. These exercise the sim FSM side of
+# force-SAME + the wheel-flip + the direction-resolved overshoot budget on the T9
+# reverse-pivot fixtures:
+#
+#   * TC2 -- an authored-REAR pivot flips the wheel, keeps the same delta, forces
+#     the departure REAR, and lands the axle on ``w`` (AC1).
+#   * TC3 -- a >90 deg AUTO pivot whose approach resolves REAR runs COHERENTLY
+#     (both legs forced REAR), rather than degrading to a plain center turn (AC2);
+#     the AUTO REAR rung is asserted to FIRE (an axis-aligned fixture would tie
+#     FRONT -- a false green).
+#   * TC5 -- the pivot overshoot budget uses the REAR board offset on a REAR
+#     approach and the FRONT board offset on a FRONT approach, via the single
+#     ``pivot_overshoot_budget_cm`` policy call (AC4).
+#
+# Every delta is DERIVED from the parsed chassis track + the graph's own edge
+# headings (never a hardcoded literal), so a future track / turn-angle retune
+# reddens only the shared drive-constant surfaces, not these tests.
+# ===========================================================================
+
+
+def _pivot_turn_geometry(graph, u: str, v: str, w: str) -> tuple:
+    """Return ``(theta_deg, delta_cm)`` for the pivot ``(u, v, w)`` from the graph.
+
+    Reads the two directed edge headings off ``graph`` and folds them through the
+    SAME closed form the planner/validator/sim share (``normalize_turn`` +
+    :func:`compute_pivot_compensation`), so a test never hard-codes a second
+    turn-angle or delta.
+    """
+    h_in = float(graph.edges[u, v]["heading_deg"])
+    h_out = float(graph.edges[v, w]["heading_deg"])
+    theta_deg = normalize_turn(h_out - h_in)
+    delta_cm = compute_pivot_compensation(theta_deg, _PIVOT_TRACK_CM)
+    return theta_deg, delta_cm
+
+
+def _only_overshoot_payload(primitives: List[Primitive]) -> float:
+    """Return the single ``ACT_LINE_OVERSHOOT`` payload in @p primitives."""
+    payloads = [p[1] for p in primitives if p[0] == ACT_LINE_OVERSHOOT]
+    assert len(payloads) == 1, f"expected exactly one LINE_OVERSHOOT step, got {payloads}"
+    return payloads[0]
+
+
+def test_pivot_tc2_rear_pivot_flips_wheel_same_delta_departure_forced_rear():
+    """TC2 (AC1): a REAR pivot flips the wheel, keeps the same delta, forces the
+    departure REAR, and lands the axle on ``w``.
+
+    ``make_authored_rear_pivot_field`` pins both pivot legs ``direction:"rear"``:
+    the SENSOR-terminated approach ``L0 -> L1`` is a REAR LINE hop and the
+    departure ``L1 -> L2`` is a REAR BLIND hop. The pivot ``(L0, L1, L2)``
+    therefore:
+
+    * fires with ``direction == REAR`` and the PLANTED wheel FLIPPED -- the
+      L<->R swap of the stored forward wheel, single-sourced through
+      :func:`resolve_pivot_wheel`;
+    * keeps the direction-invariant over-travel ``delta`` (``taken.trim_cm`` ==
+      the forward record's ``trim_cm``);
+    * emits a REAR departure (``ACT_BLIND_REVERSE``), never a FRONT
+      ``ACT_FORWARD`` -- force-SAME held the departure to the REAR approach;
+    * lands the axle on ``L2`` within ``_POSITION_TOL_CM`` (the point-model
+      in-place rotation corrected by the pivot maneuver's own physical
+      translation, as in TC16/TC19).
+    """
+    field = pivot_field_data.make_authored_rear_pivot_field()
+    sim, chassis, graph, _next_hop = _make_pivot_sim(field)
+    h_in = float(graph.edges["L0", "L1"]["heading_deg"])
+    h_out = float(graph.edges["L1", "L2"]["heading_deg"])
+    theta_deg, delta = _pivot_turn_geometry(graph, "L0", "L1", "L2")
+
+    prims = sim.go_to("L2")
+
+    record = sim.find_pivot_turn("L0", "L1", "L2")
+    taken = sim.taken_pivot("L0", "L1", "L2")
+    assert taken is not None
+    assert taken.direction == Direction.REAR
+
+    # Wheel FLIPPED: the planted wheel is the L<->R swap of the stored forward
+    # wheel (single-sourced through the policy twin) -- a genuine change.
+    assert taken.wheel == _runtime.resolve_pivot_wheel(record.wheel, Direction.REAR)
+    assert taken.wheel != record.wheel
+
+    # Same direction-invariant delta as the stored forward-sense record.
+    assert taken.trim_cm == pytest.approx(record.trim_cm, abs=1e-9)
+    assert taken.trim_cm == pytest.approx(delta, abs=1e-9)
+
+    # Full emitted stream: the leading S0->L0 FRONT blind hop, the 180 deg
+    # body-facing pre-edge turn, the REAR LINE approach + its reduced REAR
+    # overshoot, the pivot turn, and the REAR departure trimmed by delta. Both
+    # pivot legs REVERSE (ACT_LINE_REVERSE / ACT_BLIND_REVERSE) -- no FRONT
+    # ACT_FOLLOW_INT / ACT_FORWARD drive belongs to the pivot.
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(40.0, abs=1e-9)),
+        (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)),
+        (ACT_LINE_REVERSE, "L1", SpeedTier.NORMAL),
+        (
+            ACT_LINE_OVERSHOOT,
+            pytest.approx(LINE_SENSOR_AXLE_OFFSET_REAR_CM - delta, abs=1e-9),
+        ),
+        (ACT_TURN_REL, pytest.approx(theta_deg, abs=1e-9)),
+        (
+            ACT_BLIND_REVERSE,
+            "L2",
+            pytest.approx(40.0 - delta, abs=1e-9),
+            BlindMode.SYNC_TSHAPE,
+        ),
+    ]
+
+    # Axle lands on L2: correct the point-model in-place rotation by the pivot's
+    # own physical translation (delta along the inbound + outbound TRAVEL headings).
+    px, py = _pivot_corrected_position(chassis, delta, [(h_in, h_out)])
+    lx, ly = field.NODES["L2"]
+    assert math.hypot(px - lx, py - ly) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "L2"
+
+
+def test_pivot_tc3_sharp_auto_rear_pivot_runs_coherently_both_legs_rear():
+    """TC3 (AC2): a >90 deg AUTO pivot whose approach resolves REAR runs
+    coherently -- both legs forced REAR -- instead of degrading to a center turn.
+
+    ``make_auto_rear_approach_pivot_field`` carries NO authored direction
+    override. ``START_HEADING_DEG = 0`` makes the first hop ``U -> V``'s AUTO
+    delta exactly the (>90 deg, non-axis-aligned) entry heading, so ``U -> V``
+    genuinely resolves REAR under ``BIDIRECTIONAL_AUTO`` -- the AUTO REAR rung
+    FIRES (an axis-aligned fixture would tie FRONT, a false green, so the fired
+    rung is asserted, not assumed). The declared pivot ``(U, V, W)`` is an obtuse
+    120 deg turn: the departure ``V -> W``'s own unforced AUTO delta
+    (``wrap(120 - 180) = -60``) would independently resolve FRONT, so force-SAME
+    holding it REAR is the coherent-run proof.
+
+    A naive skip-on-mismatch would drop the pivot entirely (a plain center turn,
+    full-length drives, landing ~delta off). Instead the pivot RUNS: a SINGLE
+    pivot turn of the full obtuse angle, both legs REAR (``ACT_BLIND_REVERSE``,
+    never a FRONT ``ACT_FORWARD`` downgrade), both drives trimmed by delta, and
+    the axle lands on ``W``.
+    """
+    field = pivot_field_data.make_auto_rear_approach_pivot_field()
+    sim, chassis, graph, _next_hop = _make_pivot_sim(field)
+    h_in = float(graph.edges["U", "V"]["heading_deg"])
+    h_out = float(graph.edges["V", "W"]["heading_deg"])
+    theta_deg, delta = _pivot_turn_geometry(graph, "U", "V", "W")
+    # A genuinely SHARP pivot (guards the coherent-run claim: a <=90 deg pivot
+    # would not exercise the mixed-direction AUTO resolution force-SAME defeats).
+    assert abs(theta_deg) > 90.0
+
+    prims = sim.go_to("W")
+
+    # The AUTO REAR rung FIRED (proof, not assumption): the pivot's approach
+    # resolved REAR under BIDIRECTIONAL_AUTO, not the axis-aligned tie-FRONT.
+    taken = sim.taken_pivot("U", "V", "W")
+    assert taken is not None
+    assert taken.direction == Direction.REAR
+
+    # Coherent run: NO FRONT ACT_FORWARD downgrade anywhere; both dead-reckon
+    # legs reverse and are trimmed by delta.
+    assert ACT_FORWARD not in [p[0] for p in prims]
+    blind_reverse_dists = [p[2] for p in prims if p[0] == ACT_BLIND_REVERSE]
+    assert blind_reverse_dists == [
+        pytest.approx(40.0 - delta, abs=1e-9),   # U->V REAR approach trim
+        pytest.approx(40.0 - delta, abs=1e-9),   # V->W REAR departure trim (force-SAME)
+    ]
+
+    # A SINGLE pivot turn of the full obtuse angle -- not degraded to a center
+    # turn (the pre-edge facing turn is a different, smaller magnitude).
+    pivot_turns = [
+        p for p in prims
+        if p[0] == ACT_TURN_REL and p[1] == pytest.approx(theta_deg, abs=1e-9)
+    ]
+    assert len(pivot_turns) == 1
+
+    # Wheel flipped (REAR), same direction-invariant delta.
+    record = sim.find_pivot_turn("U", "V", "W")
+    assert taken.wheel == _runtime.resolve_pivot_wheel(record.wheel, Direction.REAR)
+    assert taken.wheel != record.wheel
+    assert taken.trim_cm == pytest.approx(delta, abs=1e-9)
+
+    # Final pose on W (point-model corrected by the pivot's physical translation).
+    px, py = _pivot_corrected_position(chassis, delta, [(h_in, h_out)])
+    wx, wy = field.NODES["W"]
+    assert math.hypot(px - wx, py - wy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "W"
+
+
+def test_pivot_tc5_overshoot_budget_rear_offset_vs_front_offset():
+    """TC5 (AC4): a pivot's sensor-terminated overshoot uses the REAR board offset
+    on a reverse-reachable REAR approach and the FRONT board offset on a FRONT
+    approach -- the single ``pivot_overshoot_budget_cm`` policy call, not a
+    hardcoded offset.
+
+    The authored-REAR pivot (``make_authored_rear_pivot_field``) arrives over a
+    REAR LINE hop, so its post-detect ``ACT_LINE_OVERSHOOT`` rolls
+    ``LINE_SENSOR_AXLE_OFFSET_REAR_CM - delta``; the FRONT LINE-incoming pivot
+    (``make_line_incoming_pivot_field``) arrives over a FRONT LINE hop, so its
+    overshoot rolls ``LINE_SENSOR_AXLE_OFFSET_CM - delta``. Adding each trim back
+    recovers the board offset the policy selected for that direction, and the two
+    offsets genuinely differ -- so the direction branch is load-bearing.
+    """
+    # REAR approach: overshoot rolls the REAR board offset minus the trim.
+    rear_field = pivot_field_data.make_authored_rear_pivot_field()
+    rear_sim, _rc, rear_graph, _rn = _make_pivot_sim(rear_field)
+    _rear_theta, rear_delta = _pivot_turn_geometry(rear_graph, "L0", "L1", "L2")
+    rear_overshoot = _only_overshoot_payload(rear_sim.go_to("L2"))
+    assert rear_overshoot == pytest.approx(
+        LINE_SENSOR_AXLE_OFFSET_REAR_CM - rear_delta, abs=1e-9
+    )
+    # Adding the trim back recovers exactly the REAR policy offset.
+    assert rear_overshoot + rear_delta == pytest.approx(
+        _runtime.pivot_overshoot_budget_cm(Direction.REAR), abs=1e-9
+    )
+
+    # FRONT approach: overshoot rolls the FRONT board offset minus the trim.
+    front_field = pivot_field_data.make_line_incoming_pivot_field()
+    front_sim, _fc, front_graph, _fn = _make_pivot_sim(front_field)
+    _front_theta, front_delta = _pivot_turn_geometry(front_graph, "L0", "L1", "L2")
+    front_overshoot = _only_overshoot_payload(front_sim.go_to("L2"))
+    assert front_overshoot == pytest.approx(
+        LINE_SENSOR_AXLE_OFFSET_CM - front_delta, abs=1e-9
+    )
+    assert front_overshoot + front_delta == pytest.approx(
+        _runtime.pivot_overshoot_budget_cm(Direction.FRONT), abs=1e-9
+    )
+
+    # The branch is load-bearing: the two board offsets genuinely differ, so the
+    # REAR overshoot is NOT accidentally equal to the FRONT one.
+    assert LINE_SENSOR_AXLE_OFFSET_REAR_CM != pytest.approx(
+        LINE_SENSOR_AXLE_OFFSET_CM, abs=1e-9
+    )
 
 
 # ===========================================================================
