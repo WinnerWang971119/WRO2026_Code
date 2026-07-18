@@ -502,6 +502,20 @@ public:
     bool isLineFound() const;
 
     /**
+     * @brief Whether a `stopAtLine` seek is currently in flight.
+     *
+     * @return `true` iff the seek FSM is outside `StopAtLineState::IDLE` (i.e. in `SEEK`,
+     *         `ARMED`, `OVERSHOOT`, or `DONE`); `false` once the seek has finished (or before
+     *         one has ever been dispatched).
+     * @note Keys off the seek FSM state rather than a specific phase, so this stays correct
+     *       regardless of any approach-ramp sub-phase layered inside the `SEEK`/`ARMED` states
+     *       by other work.
+     * @note `wallStop` is a SEPARATE verb driven by the encoder stall watchdog (`_wallState`) —
+     *       an in-flight `wallStop` does NOT make this return `true`.
+     */
+    bool isSeekingLine() const;
+
+    /**
      * @brief The overshoot distance the in-flight (or most recent) `stopAtLine` seek rolls past
      *        the line after detection (cm).
      *

@@ -167,6 +167,23 @@ public:
      */
     JunctionType getLastType() const;
 
+    /**
+     * @brief Non-consuming query: is the debouncer currently seeing or holding a junction?
+     *
+     * Returns `true` while the sensor is over a junction marker OR still climbing toward the
+     * debounced "armed" verdict — i.e. `_wasAtJunction` (already armed) OR `_validStreak > 0`
+     * (a valid-junction sample was seen this tick or is mid-streak). Returns `false` only once
+     * the marker has fully cleared: not armed AND no in-progress valid streak.
+     *
+     * @return `true` if a junction is active or forming; `false` when the marker has released.
+     * @note Purely observational — does NOT consume the `isAtIntersection()` edge, unlike that
+     *       method. Intended for the `cooperativeTick()` reopen-drain, which keys "keep draining
+     *       until the departure marker releases" off this signal (issue #164 W2). A mid-marker
+     *       NONE/UNKNOWN sample does not flip this to `false` because `_wasAtJunction` holds
+     *       (the F7 debounce hold), so it does not falsely report release under sensor flicker.
+     */
+    bool isJunctionActive() const;
+
 private:
     WROLineArrayClass* _array         = nullptr;                ///< Shared WROLineArrayClass singleton from LineFollower.
     bool              _wasAtJunction = false;                  ///< Debounced at-junction state.
