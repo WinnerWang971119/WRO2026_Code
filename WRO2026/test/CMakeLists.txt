@@ -2689,11 +2689,14 @@ add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
 #     `LINE_JUNCTION_T_MIN_ON_DEFAULT` idiom; ZERO default-behavior change for the real sketch
 #     or the Python pipeline, which hardcodes its OWN `LINE_BOARD_COUNT` in `sim/runtime.py`,
 #     untouched by this header). Covers the AC8/TC11 non-pivot forced-REAR STOP_AT_LINE ->
-#     dead-reckon-reverse degrade (unchanged). See that test file's docblock for the AC8/TC11
-#     pivot-scoped REAR-seek REVERSE_UNAVAILABLE finding (currently unreachable through the
-#     real FSM as committed — `resolveStopAtLine`'s own board gate degrades a REAR seek to
-#     BLIND_DEAD_RECKON before `PathTracker.cpp`'s pivot-scoped guard, nested inside
-#     `case DispatchPrimitive::STOP_AT_LINE_SEEK`, is ever reached).
+#     dead-reckon-reverse degrade (unchanged) AND the pivot-scoped REAR-seek
+#     REVERSE_UNAVAILABLE fault. ADR-072's Fix 1 HOISTED that guard out of
+#     `case DispatchPrimitive::STOP_AT_LINE_SEEK` up into `_onPlanNextHop` (pre-turn, keyed off
+#     the RESOLVED direction and the "seek requested" rungs, asked of the resolver with the
+#     board gate forced open), so it now fires BEFORE `resolveStopAtLine`'s own board gate can
+#     silently degrade the REAR seek to `BLIND_DEAD_RECKON`. The finding is therefore reachable
+#     and the fault FIRES against the real FSM — no longer the pre-hoist documented gap. See
+#     that test file's docblock.
 # =========================================================================================
 add_executable(test_reverse_pivot_dispatch
     ${TEST_DIR}/test_reverse_pivot_dispatch.cpp

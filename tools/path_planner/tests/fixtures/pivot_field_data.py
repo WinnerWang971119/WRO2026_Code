@@ -1087,6 +1087,63 @@ def make_binding_contradiction_pivot_field() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
+# Fixture 9b -- builder-route contradiction pivot: per-edge FRONT approach,
+# UNPINNED departure that a runtime `.setRouteDirection(REAR)` forces REAR (W1)
+# ---------------------------------------------------------------------------
+#
+#   U(0,0) --BLIND,"front",heading 0--> V(40,0) --BLIND,(unpinned),heading 90--> W
+#
+#   The approach U->V is pinned `direction:"front"` (step 1 of resolveDirection,
+#   binding), so the pivot COMMITS to FRONT. The departure V->W carries NO
+#   authored direction override, so it is invisible to the offline validator's
+#   static contradiction check -- unlike `make_binding_contradiction_pivot_field`
+#   (both legs pinned). Only when a caller drives it with a RUNTIME
+#   `.setRouteDirection(REAR)` (builder route, step 4) does the departure resolve
+#   REAR and contradict the FRONT approach. This is the builder-rung twin of the
+#   per-edge fixture: force-SAME's runtime backstop (`PIVOT_DIRECTION_MISMATCH`)
+#   is the ONLY guard, since the validator never sees the builder override
+#   (ADR-072 "Faults / rejects", canonizing builder route/arrival as binding).
+
+_RC_U: Tuple[float, float] = (0.0, 0.0)
+_RC_V: Tuple[float, float] = (40.0, 0.0)
+_RC_OUT_CM: float = 40.0
+_RC_TURN_DEG: float = 90.0
+_RC_W: Tuple[float, float] = (
+    _RC_V[0] + _RC_OUT_CM * math.cos(math.radians(_RC_TURN_DEG)),
+    _RC_V[1] + _RC_OUT_CM * math.sin(math.radians(_RC_TURN_DEG)),
+)
+
+_RC_NODES: Dict[str, Tuple[float, float]] = {"U": _RC_U, "V": _RC_V, "W": _RC_W}
+
+
+def make_route_contradiction_pivot_field() -> SimpleNamespace:
+    """Return the builder-route contradiction pivot: FRONT approach, unpinned departure (W1).
+
+    `U -> V` is pinned `direction:"front"` (a binding per-edge override), so the
+    pivot `(U, V, W)` commits FRONT. `V -> W` carries NO authored override, so it
+    stays statically AUTO -- the offline validator sees no contradiction. A
+    runtime `go_to("W", route_direction=Direction.REAR)` then resolves the
+    departure REAR (builder route, step 4), contradicting the FRONT approach, and
+    the force-SAME runtime backstop must fault `PIVOT_DIRECTION_MISMATCH` -- the
+    builder-rung counterpart to `make_binding_contradiction_pivot_field`'s
+    statically-visible per-edge contradiction.
+    """
+    return _make_field(
+        nodes=_RC_NODES,
+        node_types={name: "blind" for name in _RC_NODES},
+        line_segments=[],
+        blind_edges=[],
+        pivot_turns=[("U", "V", "W")],
+        start_node="U",
+        start_heading_deg=0.0,
+        edges=[
+            {"type": "BLIND", "u": "U", "v": "V", "direction": "front"},
+            {"type": "BLIND", "u": "V", "v": "W"},
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fixture 10 -- reset-node (wall-zero) pivot, reject + FRONT-pinned accept
 # (AC7b)
 # ---------------------------------------------------------------------------

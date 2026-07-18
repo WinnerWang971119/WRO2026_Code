@@ -96,6 +96,7 @@ from tools.path_planner.sim.runtime import (
     Offset2D,
     OffMapFaultError,
     OffMapGate,
+    PivotDirectionMismatchError,
     RETURN_DISTANCE_CAP_CM,
     RETURN_TRIGGER_THRESHOLD_CM,
     ReanchorKind,
@@ -3078,6 +3079,114 @@ def test_pivot_tc5_overshoot_budget_rear_offset_vs_front_offset():
     assert LINE_SENSOR_AXLE_OFFSET_REAR_CM != pytest.approx(
         LINE_SENSOR_AXLE_OFFSET_CM, abs=1e-9
     )
+
+
+# ---------------------------------------------------------------------------
+# W1 -- force-SAME contradiction on the BUILDER rungs (arrival / route)
+#
+# C1 regression coverage: before the fix, the sim's `_binding_override_direction`
+# checked ONLY the per-edge + pipeline rungs (resolveDirection steps 1-2) and its
+# docstring claimed builder route/arrival were NOT binding. A contradicting
+# `.setArrivalDirection()` / `.setRouteDirection()` across a pivot departure was
+# therefore silently overwritten and the pivot RAN in the sim/CTPS while the real
+# robot FAULTED `PIVOT_DIRECTION_MISMATCH`. The sim now mirrors the firmware's
+# full 4-rung cascade (per-edge -> pipeline -> arrival[last hop] -> route[all
+# hops]), so a binding builder override that contradicts the committed approach
+# raises `PivotDirectionMismatchError` -- the runtime-only twin of the firmware
+# host test TC4 (per-edge) and the validator's static reject. These are the FIRST
+# tests to exercise `PivotDirectionMismatchError` at all.
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_w1_binding_builder_arrival_contradiction_raises():
+    """W1 (C1): a binding builder ARRIVAL override contradicting the approach faults.
+
+    On ``make_auto_rear_approach_pivot_field`` the approach ``U -> V`` resolves
+    REAR under ``BIDIRECTIONAL_AUTO`` (100 deg entry > the 90 deg threshold), so
+    the pivot ``(U, V, W)`` commits REAR. The departure ``V -> W`` is the LAST hop
+    (goal ``W``), so ``go_to("W", arrival_direction=Direction.FRONT)`` binds the
+    departure FRONT via ``resolve_direction`` step 3 -- directly contradicting the
+    REAR approach. This is the RUNTIME-only builder rung the firmware
+    ``PathTracker._onPlanNextHop`` cascade guards (ADR-072) and the offline
+    validator cannot see; before C1 the sim silently overwrote the pin and ran the
+    pivot mis-trimmed. Force-SAME must now refuse it, exactly as the firmware
+    hard-faults ``PIVOT_DIRECTION_MISMATCH`` (host test TC4's intent, builder rung).
+    """
+    field = pivot_field_data.make_auto_rear_approach_pivot_field()
+    sim, _chassis, _graph, _next_hop = _make_pivot_sim(field)
+
+    with pytest.raises(PivotDirectionMismatchError) as exc_info:
+        sim.go_to("W", arrival_direction=Direction.FRONT)
+
+    err = exc_info.value
+    assert (err.u, err.v, err.w) == ("U", "V", "W")
+    assert err.approach_dir == Direction.REAR       # committed approach
+    assert err.departure_dir == Direction.FRONT     # binding builder-arrival pin
+
+
+def test_pivot_w1_binding_builder_route_contradiction_raises():
+    """W1 (C1): a binding builder ROUTE override contradicting the approach faults.
+
+    ``make_route_contradiction_pivot_field`` pins the approach ``U -> V``
+    ``direction:"front"`` (a binding per-edge override, ``resolve_direction`` step
+    1), so the pivot ``(U, V, W)`` commits FRONT, while the departure ``V -> W`` is
+    UNPINNED (statically invisible to the validator). Driving it with
+    ``route_direction=Direction.REAR`` resolves the departure REAR via step 4 --
+    the per-edge FRONT on the approach short-circuits ahead of the route rung, so
+    the approach stays FRONT and the two legs genuinely disagree. This exercises
+    the SECOND builder rung C1 added (route, step 4), the twin of the arrival case;
+    force-SAME must refuse it rather than silently overwrite the operator's route.
+    """
+    field = pivot_field_data.make_route_contradiction_pivot_field()
+    sim, _chassis, _graph, _next_hop = _make_pivot_sim(field)
+
+    with pytest.raises(PivotDirectionMismatchError) as exc_info:
+        sim.go_to("W", route_direction=Direction.REAR)
+
+    err = exc_info.value
+    assert (err.u, err.v, err.w) == ("U", "V", "W")
+    assert err.approach_dir == Direction.FRONT      # committed approach (per-edge pin)
+    assert err.departure_dir == Direction.REAR      # binding builder-route pin
+
+
+def test_pivot_w1_non_contradicting_builder_arrival_runs_coherently():
+    """W1 positive control: a builder override AGREEING with the approach runs clean.
+
+    Same fixture + approach as the arrival contradiction above
+    (``make_auto_rear_approach_pivot_field``; the approach resolves REAR). Here
+    ``go_to("W", arrival_direction=Direction.REAR)`` binds the departure to the
+    SAME REAR direction the approach committed, so the widened C1 contradiction
+    check must NOT false-fault: the pivot runs with both legs REAR, byte-identical
+    to the bare ``go_to("W")`` coherent run (TC3), and lands the axle on ``W``.
+    Proves the fix narrows to genuine contradictions only.
+    """
+    field = pivot_field_data.make_auto_rear_approach_pivot_field()
+    sim, chassis, graph, _next_hop = _make_pivot_sim(field)
+    h_in = float(graph.edges["U", "V"]["heading_deg"])
+    h_out = float(graph.edges["V", "W"]["heading_deg"])
+    _theta_deg, delta = _pivot_turn_geometry(graph, "U", "V", "W")
+
+    prims = sim.go_to("W", arrival_direction=Direction.REAR)
+
+    # No false fault: the pivot committed REAR and ran; the taken pivot is REAR.
+    taken = sim.taken_pivot("U", "V", "W")
+    assert taken is not None
+    assert taken.direction == Direction.REAR
+
+    # Coherent run: both legs REAR (ACT_BLIND_REVERSE), trimmed by delta; no FRONT
+    # ACT_FORWARD downgrade -- identical to TC3's bare coherent run.
+    assert ACT_FORWARD not in [p[0] for p in prims]
+    blind_reverse_dists = [p[2] for p in prims if p[0] == ACT_BLIND_REVERSE]
+    assert blind_reverse_dists == [
+        pytest.approx(40.0 - delta, abs=1e-9),   # U->V REAR approach trim
+        pytest.approx(40.0 - delta, abs=1e-9),   # V->W REAR departure trim (force-SAME)
+    ]
+
+    # Axle lands on W (point-model corrected by the pivot's physical translation).
+    px, py = _pivot_corrected_position(chassis, delta, [(h_in, h_out)])
+    wx, wy = field.NODES["W"]
+    assert math.hypot(px - wx, py - wy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "W"
 
 
 # ===========================================================================

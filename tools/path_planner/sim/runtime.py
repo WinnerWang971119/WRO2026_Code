@@ -905,13 +905,18 @@ class PivotDirectionMismatchError(RuntimeError):
     Sim mirror of the firmware ``_enterFault(Fault::PIVOT_DIRECTION_MISMATCH, ...)``
     (#54 / ADR-072). A single-wheel pivot commits to the direction it *approached*
     in (force-SAME) and its departure hop is forced to that same direction, so the
-    geometry-derived wheel + over-travel ``delta`` stay valid. If a BINDING
-    higher-precedence override on the departure -- a per-edge ``direction_override``
-    or a non-``DEFAULT`` pipeline default (:func:`resolve_direction` steps 1-2) --
-    resolves to a DIFFERENT direction, the pivot would run mis-trimmed, so both the
-    offline validator (statically) and the firmware (at runtime) reject it rather
-    than silently override the pin. Ordinary AUTO / builder-override rungs never
-    contradict: force-SAME simply pins the departure's AUTO rung.
+    geometry-derived wheel + over-travel ``delta`` stay valid. If a BINDING override
+    on the departure -- any of :func:`resolve_direction`'s four non-AUTO rungs: a
+    per-edge ``direction_override`` (step 1), a non-``DEFAULT`` pipeline default
+    (step 2), the builder ARRIVAL override on the last hop (step 3), or the builder
+    ROUTE override on every hop (step 4) -- resolves to a DIFFERENT direction, the
+    pivot would run mis-trimmed and the maneuver is rejected rather than silently
+    overriding the pin. The per-edge / pipeline rungs (1-2) are statically visible,
+    so the offline validator rejects them ahead of time; the builder arrival / route
+    rungs (3-4) are runtime-only overrides the validator cannot see, so the firmware
+    fault (and this sim mirror) is their ONLY backstop -- ADR-072 canonizes builder
+    route/arrival as binding. Only the AUTO heuristic (step 5) never contradicts:
+    force-SAME simply pins the departure's AUTO rung to the approach direction.
 
     The sim has no latched-fault FSM state to mirror, so it surfaces the refusal as
     a raised exception the caller can assert on (like :class:`UnreachableGoalError`
@@ -1918,28 +1923,49 @@ def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
 def _binding_override_direction(
     edge_dir_override: DirectionMode,
     pipeline_default: DirectionMode,
+    builder_arrival: "Direction",
+    builder_route: "Direction",
+    is_last_hop: bool,
 ) -> Optional["Direction"]:
     """Return the direction a BINDING override pins a hop to, or ``None``.
 
-    A "binding" override is one of :func:`resolve_direction`'s two
-    highest-precedence, statically-visible rungs (steps 1-2): a per-edge
-    ``direction_override`` or a non-``DEFAULT`` pipeline direction default. The
-    builder route / arrival overrides (steps 3-4) and the AUTO heuristic (step 5)
-    are NOT binding -- force-SAME overrides those on a pivot departure.
+    A "binding" override is any of :func:`resolve_direction`'s FOUR
+    highest-precedence rungs (steps 1-4) -- every rung that resolves a hop's
+    direction WITHOUT consulting the AUTO turn-saving heuristic (step 5). In
+    precedence order: a per-edge ``direction_override`` (step 1), a non-``DEFAULT``
+    pipeline direction default (step 2), the builder ARRIVAL override on the last
+    hop (step 3), then the builder ROUTE override on every hop (step 4). ONLY the
+    AUTO heuristic (step 5) is non-binding -- force-SAME is free to pin that rung to
+    the pivot's approach direction.
 
     This is the force-SAME contradiction test (#54 / ADR-072, mirror of the C++
-    ``PathTracker._onPlanNextHop`` block): a pivot's departure hop is forced to the
-    pivot's committed approach direction, UNLESS a binding override on that hop
-    resolves to a different direction -- in which case the pivot would run
-    mis-trimmed and :class:`PivotDirectionMismatchError` is raised (the validator
-    rejects the same case offline).
+    ``PathTracker._onPlanNextHop`` ``bindingDir`` cascade): a pivot's departure hop
+    is forced to the pivot's committed approach direction, UNLESS a binding override
+    on that hop resolves to a DIFFERENT direction -- in which case the pivot would
+    run mis-trimmed and :class:`PivotDirectionMismatchError` is raised. The per-edge
+    and pipeline rungs (1-2) are statically visible, so the offline validator
+    rejects those contradictions ahead of time; the builder arrival / route rungs
+    (3-4) are runtime-only overrides the validator cannot see, so this check is
+    their ONLY guard -- exactly as the firmware runtime fault is the sole backstop
+    for a builder-level override (ADR-072 "Faults / rejects", canonizing arrival/
+    route as binding).
+
+    The short-circuit order below mirrors :func:`resolve_direction` steps 1-4
+    exactly, so this "would a rung force a contradicting direction?" test matches
+    what :func:`resolve_direction` actually returns for the departure hop.
 
     :param edge_dir_override: the hop's per-edge ``direction_override``.
     :param pipeline_default: the pipeline-wide direction default
         (:data:`PIPELINE_CONFIG` ``.direction``).
+    :param builder_arrival: the builder arrival override (``.setArrivalDirection``);
+        :attr:`Direction.AUTO` means no override. Binds only on the last hop.
+    :param builder_route: the builder route override (``.setRouteDirection``);
+        :attr:`Direction.AUTO` means no override. Binds on every hop.
+    :param is_last_hop: True iff this departure hop terminates at the route's final
+        destination (gates the builder arrival rung, mirroring step 3).
     :return: :attr:`Direction.FRONT` / :attr:`Direction.REAR` when a binding
-        override pins the hop; ``None`` when neither binds (defer to the AUTO /
-        builder rungs).
+        override pins the hop; ``None`` when none binds (defer to the AUTO rung,
+        which force-SAME is free to pin).
     """
     if edge_dir_override == DirectionMode.FORCE_FORWARD:
         return Direction.FRONT
@@ -1949,6 +1975,10 @@ def _binding_override_direction(
         return Direction.FRONT
     if pipeline_default == DirectionMode.FORCE_REVERSE:
         return Direction.REAR
+    if is_last_hop and builder_arrival != Direction.AUTO:
+        return builder_arrival
+    if builder_route != Direction.AUTO:
+        return builder_route
     return None
 
 
@@ -3385,18 +3415,29 @@ class PathTrackerSim:
             # directions, so a naive skip-on-mismatch would silently degrade every
             # sharp AUTO pivot to a center turn; force-SAME makes them RUN coherently.
             #
-            # A BINDING higher-precedence override on the departure (a per-edge
-            # ``direction_override``, or a non-DEFAULT pipeline default --
-            # ``resolve_direction`` steps 1-2) that truly contradicts the committed
-            # approach direction cannot be silently overridden: it raises
-            # ``PivotDirectionMismatchError`` (the firmware hard-faults
-            # ``PIVOT_DIRECTION_MISMATCH``; the validator rejects the same case
-            # offline). Ordinary AUTO / builder rungs never contradict -- force-SAME
-            # just pins the departure's AUTO rung.
+            # A BINDING higher-precedence override on the departure -- a per-edge
+            # ``direction_override`` (step 1), a non-DEFAULT pipeline default
+            # (step 2), the builder ARRIVAL override on the last hop (step 3), or
+            # the builder ROUTE override on every hop (step 4) -- that truly
+            # contradicts the committed approach direction cannot be silently
+            # overridden: it raises ``PivotDirectionMismatchError`` (the firmware
+            # hard-faults ``PIVOT_DIRECTION_MISMATCH``). The per-edge / pipeline
+            # rungs are statically visible so the validator rejects them offline;
+            # the builder route / arrival rungs are runtime-only (a pivot whose goal
+            # is ``w`` has its departure ``v->w`` as the last hop, so a
+            # ``.setArrivalDirection`` / ``.setRouteDirection`` can genuinely resolve
+            # the departure to a contradicting direction the validator never sees --
+            # ADR-072 canonizes them as binding, and this is their ONLY guard). Only
+            # the AUTO heuristic (step 5) never contradicts -- force-SAME just pins
+            # that rung to the approach direction.
             if self._departing_pivot is not None:
                 committed_dir = self._departing_pivot.dir
                 binding_dir = _binding_override_direction(
-                    _read_edge_dir_override(edge), cfg.direction
+                    _read_edge_dir_override(edge),
+                    cfg.direction,
+                    arrival_direction,
+                    route_direction,
+                    is_last_hop,
                 )
                 if binding_dir is not None and binding_dir != committed_dir:
                     raise PivotDirectionMismatchError(

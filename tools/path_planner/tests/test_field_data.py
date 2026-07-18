@@ -2322,6 +2322,86 @@ def test_pivot_turn_rejects_reverse_reachable_reset_node_pivot() -> None:
         validate(fd)
 
 
+# -- W2: the pipeline direction default folds into the pivot direction analysis ---
+#
+# `_static_direction_pin` folds the field-wide `PIPELINE_DIRECTION_MODE` under any
+# per-edge `direction` override (the same per-edge-beats-pipeline precedence
+# `resolve_direction` applies), so the pipeline default drives BOTH the
+# reverse-reachability budget selection AND the binding-contradiction check. These
+# two tests pin that fold: a FORCE_FORWARD default makes an otherwise
+# reverse-reachable sensor approach FRONT-pinned (larger 12.02 budget -> validates),
+# and a pipeline default that contradicts a per-edge pin on the other leg rejects.
+# Deltas are derived from the parsed REAR/FRONT budgets, never literals.
+
+
+def test_pivot_turn_pipeline_forward_default_folds_sensor_approach_front() -> None:
+    """W2(a): a FORCE_FORWARD pipeline default folds an unpinned sensor approach FRONT.
+
+    Same reverse-reachable LINE-incoming geometry as
+    ``test_pivot_turn_line_incoming_over_rear_budget_rejected`` -- the incoming
+    ``A->B`` LINE leg carries NO per-edge direction pin, and its over-travel
+    ``delta`` lands in the (REAR, FRONT] budget band (over the REAR offset, under
+    the FRONT offset). Unpinned it budgets against the smaller REAR offset and
+    REJECTS. Adding a field-wide ``PIPELINE_DIRECTION_MODE = FORCE_FORWARD`` folds
+    the approach to a statically FRONT-pinned direction, so it budgets against the
+    larger FRONT offset and VALIDATES -- proving the pipeline default participates
+    in the FRONT-pinned determination exactly as a per-edge ``direction:'front'``
+    pin does. The inline contrast (same geometry, no pipeline default -> rejects)
+    makes the fold load-bearing.
+    """
+    edges = [
+        {"type": EDGE_LINE, "u": "A", "v": "B",
+         "distance_cm": 100.0, "heading_deg": 0.0},
+        {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+         "heading_deg": _outgoing_heading_for_delta(_DELTA_OVER_REAR_UNDER_FRONT)},
+    ]
+    node_types = {"A": "line", "B": "line", "C": "blind", "D": "blind"}
+
+    # With the pipeline default FORCE_FORWARD the approach is FRONT-pinned -> the
+    # 12.02 cm FRONT budget accommodates the delta -> validates.
+    fd = _pivot_field(edges=edges, pivot_turns=[("A", "B", "C")], node_types=node_types)
+    fd.PIPELINE_DIRECTION_MODE = "FORCE_FORWARD"
+    assert validate(fd) is None
+
+    # Contrast: the SAME geometry with the default DIRECTION_MODE is
+    # reverse-reachable -> budgets the smaller REAR offset -> rejects. The pipeline
+    # fold is the only thing that flipped the outcome.
+    fd_unpinned = _pivot_field(
+        edges=edges, pivot_turns=[("A", "B", "C")], node_types=node_types
+    )
+    with pytest.raises(FieldDataError, match=r"REAR sensor-to-axle offset"):
+        validate(fd_unpinned)
+
+
+def test_pivot_turn_pipeline_default_contradicting_per_edge_pin_rejected() -> None:
+    """W2(b): a pipeline direction default contradicting a per-edge pivot-leg pin rejects.
+
+    The pivot's incoming ``A->B`` leg is UNPINNED, so the field-wide
+    ``PIPELINE_DIRECTION_MODE = FORCE_FORWARD`` folds it to a statically FRONT
+    approach, while the outgoing ``B->C`` leg carries a per-edge
+    ``direction:'rear'`` pin (per-edge beats pipeline). The two legs therefore
+    resolve to OPPOSITE binding directions -- force-SAME cannot reconcile them, so
+    the validator rejects the statically-visible contradiction (the same reject as
+    ``test_pivot_turn_rejects_binding_direction_contradiction``, but with the
+    conflicting FRONT side supplied by the pipeline default rather than a per-edge
+    pin). Proves the pipeline default is folded into the binding-contradiction
+    check, not only the budget determination.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_WITHIN_REAR),
+             "direction": "rear"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    fd.PIPELINE_DIRECTION_MODE = "FORCE_FORWARD"
+    with pytest.raises(FieldDataError, match=r"OPPOSITE directions"):
+        validate(fd)
+
+
 # -- TC13..TC15: the NEW seek triggers exempt a pivot leg from the trim --------
 #
 # A blind pivot leg is SENSOR-terminated (no over-travel trim) whenever it
