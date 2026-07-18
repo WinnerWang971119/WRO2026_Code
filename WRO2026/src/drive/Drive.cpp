@@ -16,6 +16,8 @@
 #include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
 #include "TurnPDPolicy.h"      // Per-tick turn PD control law: wrap / pdStep / slew / creep /
                                // settle (host-tested; ADR-068). Consumed by _updateTurnProfile.
+#include "GyroHoldPolicy.h"    // GYRO straight heading-hold PD: clamped correction + wheel mix
+                               // (host-tested; ADR-072). Consumed by _emitGyroHold.
 #include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
                                     // math (host-tested + golden-pinned; issue #130).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
@@ -61,13 +63,12 @@ bool DriveClass::begin()
         return false;
     }
 
-    // Best-effort PID push — the library already retries once internally on failure.
+    // Best-effort PID push — the library already retries once internally on failure. No
+    // gyro-move PID push to the STM32: that write path is retired — GYRO straights run the
+    // R4-side heading-hold PD (`_emitGyroHold`, ADR-072) tuned by Config::GYRO_HOLD_KP/KD.
     MiniR4.DriveDC.setMoveSyncPID(Config::MOVESYNC_KP,
                                   Config::MOVESYNC_KI,
                                   Config::MOVESYNC_KD);
-    MiniR4.DriveDC.setMoveGyroPID(Config::MOVEGYRO_KP,
-                                  Config::MOVEGYRO_KI,
-                                  Config::MOVEGYRO_KD);
     MiniR4.DriveDC.setTurnGyroPID(Config::TURNGYRO_KP,
                                   Config::TURNGYRO_KI,
                                   Config::TURNGYRO_KD);
@@ -103,12 +104,12 @@ void DriveClass::update()
     // refer to a *prior* bounded MMLower task, falsely flipping _turnDone mid-turn.
     //
     // And again for an in-flight stopAtLine seek: `_updateStopAtLine` owns `_moveDone` for the
-    // duration of the continuous, event-terminated seek. The seek commands MoveSync/MoveGyro/Move
+    // duration of the continuous, event-terminated seek. The seek commands MoveSync/Move
     // continuously (which do NOT raise the lower-MCU task-done bit), but a *prior* bounded task's
     // stale done bit could still flip `_moveDone` mid-seek — skip the drain while seeking (W1).
     //
     // Same guard for an in-flight wallStop push: `_updateWallStop` owns `_moveDone` for the
-    // duration of the continuous, stall-terminated push (which also commands MoveSync/MoveGyro/Move
+    // duration of the continuous, stall-terminated push (which also commands MoveSync/Move
     // continuously) — skip the drain while pushing (W1).
     // -------------------------------------------------------------------------------------
     if (_profileState == ProfileState::IDLE
@@ -172,15 +173,6 @@ uint8_t DriveClass::setSpeedSync(int16_t L, int16_t R)
     // shared PWM cap/deadband floor so this continuous path clamps uniformly with the RAW path
     // and the profile emitter (finding #14) — the library documents the power range as -100..100.
     return MiniR4.DriveDC.MoveSync(deadbandSnap(L), deadbandSnap(R));
-}
-
-uint8_t DriveClass::forwardGyro(int16_t power)
-{
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the power through the
-    // shared PWM cap/deadband floor for uniform clamping (finding #14).
-    // GYRO precondition (ADR-045): _heldYaw is an app-frame (CCW-positive) heading; toHwHeading
-    // converts it to the STM32 raw frame. NEVER pass a raw heading here — it would double-correct.
-    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), YawSource.toHwHeading(_heldYaw));
 }
 
 uint8_t DriveClass::stop(bool brake)
@@ -257,26 +249,6 @@ uint8_t DriveClass::_execDriveDistSync(int16_t power, float cm, bool brake, bool
     return rc;
 }
 
-uint8_t DriveClass::_execDriveDistGyro(int16_t power,
-                                       float   cm,
-                                       int16_t yaw,
-                                       bool    brake,
-                                       bool    blocking)
-{
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
-    // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
-    // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
-    const uint16_t encDeg = cmToEncDeg(cm);
-    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
-    const uint8_t  rc =
-        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), YawSource.toHwHeading(yaw), encDeg, brake, !blocking);
-    if (!blocking && rc == 0x00)    // W3 guard
-    {
-        _moveDone = false;
-    }
-    return rc;
-}
-
 // -----------------------------------------------------------------------------------------
 // Time-bounded executors (called from DriveTimeBuilder::~DriveTimeBuilder)
 // -----------------------------------------------------------------------------------------
@@ -304,24 +276,6 @@ uint8_t DriveClass::_execDriveTimeSync(int16_t power, float sec, bool brake, boo
     // #14) — the library documents the power range as -100..100.
     const int16_t snapped = deadbandSnap(power);
     const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(snapped, snapped, sec, brake, !blocking);
-    if (!blocking && rc == 0x00)    // W3 guard
-    {
-        _moveDone = false;
-    }
-    return rc;
-}
-
-uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
-                                       float   sec,
-                                       int16_t yaw,
-                                       bool    brake,
-                                       bool    blocking)
-{
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
-    // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
-    // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
-    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
-    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), YawSource.toHwHeading(yaw), sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -388,9 +342,8 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnProfileBrakeOnDone = brake;
     _turnProfileState       = TurnProfileState::ACTIVE;
     _turnDone               = false;
-    // `_heldYaw` is the coarse int16_t GYRO-hold heading (a separate `forwardGyro`/`*Gyro` member,
-    // ADR-045). The FLOAT PD target lives in `_turnTargetYaw`; storing a rounded heading here is
-    // not a control-error truncation.
+    // `_heldYaw` is the coarse int16_t GYRO-mode heading member (ADR-045). The FLOAT PD target
+    // lives in `_turnTargetYaw`; storing a rounded heading here is not a control-error truncation.
     _heldYaw                = _normalizeYaw((int32_t) target);
 
     // Seed the PD controller state (ADR-068). All read by `_updateTurnProfile()` on its first tick.
@@ -714,10 +667,14 @@ void DriveClass::_applyBias(int16_t& L, int16_t& R) const
 
 void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading, int16_t floorMag)
 {
-    // Shared continuous-emit path for both `_updateProfile` and `_updateStopAtLine`. Reads NO
-    // instance state — every input is a parameter — so the two callers cannot cross-contaminate
-    // through it. RAW applies the motor bias + deadband snap (open loop); SYNC / GYRO do NOT — the
-    // STM32 closes the loop and a feedforward scalar would fight its inner PID (see DECISIONS.md).
+    // Shared continuous-emit path for `_updateProfile`, `_updateStopAtLine`, and
+    // `_updateWallStop`. The RAW / SYNC branches read NO instance state — every input is a
+    // parameter — so the callers cannot cross-contaminate through them. The GYRO branch
+    // delegates to the STATEFUL `_emitGyroHold` (per-tick R4 heading-hold PD, ADR-072); its
+    // `_gyroHoldPrev*` state is keyed to the MEASURED yaw only, never the target or the caller,
+    // so the three GYRO channels still cannot cross-contaminate. RAW applies the motor bias +
+    // deadband snap (open loop); SYNC does NOT — the STM32 closes the loop and a feedforward
+    // scalar would fight its inner PID (see DECISIONS.md).
     switch (mode)
     {
     case DriveMode::RAW:
@@ -735,14 +692,82 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading, i
         MiniR4.DriveDC.MoveSync(deadbandSnap(mag, floorMag), deadbandSnap(mag, floorMag));
         break;
     case DriveMode::GYRO:
-        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        // GYRO precondition (ADR-045): `heading` is app-frame (CCW-positive); toHwHeading
-        // converts to raw. All three GYRO channels feeding this (_profileHeading / _stopHeading
-        // / _wallHeading) carry app-frame values, so this single wrap covers straight-line,
-        // stop-at-line, and wall-stop alike.
-        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag, floorMag), YawSource.toHwHeading(heading));
+        // No _applyBias here — the R4 heading-hold PD is the steering authority (ADR-072,
+        // faithful to the mentor's bias-free gyro_move); a base feedforward would be a second
+        // interacting surface. `heading` is app-frame (CCW-positive) END-TO-END and is compared
+        // directly against `YawSource.readYawDeg` inside the hold — the app→STM32 frame
+        // conversion no longer exists on this path. All three GYRO channels feeding this
+        // (_profileHeading / _stopHeading / _wallHeading) carry app-frame values, so this single
+        // call covers straight-line, stop-at-line, and wall-stop alike. `_emitGyroHold` snaps
+        // the base itself (with the live `floorMag`) BEFORE mixing the correction.
+        _emitGyroHold(mag, heading, floorMag);
         break;
     }
+}
+
+void DriveClass::_emitGyroHold(int16_t base, int16_t headingApp, int16_t floorMag)
+{
+    // Floor the BASE first, pre-mix. `floorMag` is LIVE (the profile's decel tail passes the
+    // kinetic floor via `_decelTailFloorMag`), and the snap happens exactly once, on the base —
+    // never per-wheel after the mix, which would destroy the differential
+    // (`gotcha-deadbandsnap-tshape-floor`).
+    base = deadbandSnap(base, floorMag);
+
+    // Skip-and-hold on a failed yaw read: emit the CURRENT base symmetrically (straight, zero
+    // correction) and leave `_gyroHoldPrev*` untouched so the next good read's dt spans the
+    // missed samples. Re-issuing stale per-wheel values could drive the PREVIOUS segment's
+    // direction on the first tick of a new (e.g. reverse) segment — the symmetric
+    // `Move(base, base)` on the CURRENT base is boundary-safe. No dedicated watchdog needed
+    // (unlike the turn's async, which is unbounded and grew its own IMU-stall watchdog): every
+    // GYRO move is bounded by a non-IMU terminator — the profile's encoder distance / duration,
+    // the seek's line detect + stall watchdog, or the wall push's stall watchdog — so a stuck
+    // gyro degrades to an uncorrected-but-completing straight, never an unbounded skip loop.
+    double yaw = 0.0;
+    if (!YawSource.readYawDeg(yaw))
+    {
+        MiniR4.DriveDC.Move(base, base);
+        return;
+    }
+
+    const uint32_t now = millis();
+
+    // App-frame error: positive = target CCW of the current yaw.
+    const float errNew = turnWrap180((float) headingApp - (float) yaw);
+
+    // Fold-safe derivative-on-measurement. With a FRESH prev sample, synthesize
+    // `errOld = errNew + turnWrap180(yaw - prevYaw)` so `turnPdStep`'s derivative collapses to
+    // `-turnWrap180(yaw - prevYaw) / dt` — a PURE measured yaw-rate, independent of the target:
+    // a heading step between chained GYRO segments injects ZERO derivative kick, and the single
+    // wrap keeps an error near ±180 from straddling the fold into a spurious −360 jerk. On the
+    // first tick or after a dropout (stale prev), `errOld = errNew` ⇒ the D term is exactly 0
+    // regardless of what `dtSec` computes to.
+    const bool fresh =
+        _gyroHoldHasPrev
+        && (uint32_t) (now - _gyroHoldPrevMs) <= (uint32_t) Config::GYRO_HOLD_STALE_MS;
+    const float errOld =
+        fresh ? errNew + turnWrap180((float) yaw - (float) _gyroHoldPrevYaw) : errNew;
+    const float dtSec = (float) (now - _gyroHoldPrevMs) / 1000.0f;
+
+    // Dynamic never-reverse clamp: |corr| ≤ min(GYRO_HOLD_MAX_CORR_PWM, |base|). `base` shrinks
+    // through the decel tail below any static knob, so the limit tracks |base| tick by tick — a
+    // static-only clamp would flip the inner wheel exactly when the chassis is slowest.
+    const int16_t baseMag   = (int16_t) abs((int) base);
+    const int16_t corrLimit =
+        (Config::GYRO_HOLD_MAX_CORR_PWM < baseMag) ? Config::GYRO_HOLD_MAX_CORR_PWM : baseMag;
+
+    const float corr = gyroHoldCorrection(
+        errNew, errOld, dtSec, Config::GYRO_HOLD_KP, Config::GYRO_HOLD_KD, corrLimit);
+
+    // Wheel mix — chassis handedness comes from `turnWheelPattern(+1, ...)` INSIDE
+    // `gyroHoldWheels` (the bench-verified turn convention); do NOT re-sign the correction here
+    // (`gotcha-gyro-inverted-motor-mapping`: the mentor's literal power±corr is inverted vs this
+    // chassis's `Move(30, 0) curves forward-right` contract).
+    const GyroHoldWheels wheels = gyroHoldWheels(base, (int16_t) lroundf(corr), Config::PWM_MAX);
+    MiniR4.DriveDC.Move(wheels.left, wheels.right);
+
+    _gyroHoldPrevYaw = yaw;
+    _gyroHoldPrevMs  = now;
+    _gyroHoldHasPrev = true;
 }
 
 void DriveClass::_updateProfile()
@@ -1280,8 +1305,8 @@ void DriveClass::_updateTurnProfile()
 //
 // CONTINUOUS, event-terminated seek. Unlike `_updateProfile()` there is no known total distance
 // to plan a ramp-down against — the stop point is unknown until a `T_OR_CROSS` line is detected.
-// Each tick this commands a continuous primitive (Move / MoveSync / MoveGyro) per `_stopMode` and
-// walks SEEK → ARMED → OVERSHOOT → DONE:
+// Each tick this commands a continuous primitive (Move / MoveSync / the R4 GYRO heading-hold)
+// per `_stopMode` and walks SEEK → ARMED → OVERSHOOT → DONE:
 //   - SEEK      cruise flat; arm detection once within the arm window of the expected endpoint.
 //   - ARMED     keep cruising; debounce `LineArray.getJunctionType() == T_OR_CROSS`. On confirm,
 //               latch `_isLineFound`, capture the detect encoder, enter OVERSHOOT. On reaching the
@@ -1478,8 +1503,8 @@ void DriveClass::_endStopAtLine(bool brake)
 //
 // CONTINUOUS, STALL-terminated push. Unlike `_updateProfile()` there is no known total distance to
 // plan a ramp-down against — the stop point is unknown until the wheels stall against the wall. Each
-// tick this commands a continuous primitive (Move / MoveSync / MoveGyro) per `_wallMode` in the push
-// direction (`_wallReverse`) and walks PUSH → BACK_OFF → DONE:
+// tick this commands a continuous primitive (Move / MoveSync / the R4 GYRO heading-hold) per
+// `_wallMode` in the push direction (`_wallReverse`) and walks PUSH → BACK_OFF → DONE:
 //   - PUSH      drive flat at the low push PWM; REUSE the stop-at-line no-progress watchdog
 //               (`stopAtLineProgressed` / `stopAtLineStalled` over STOP_AT_LINE_STALL_TIMEOUT_MS).
 //               A stall here is SUCCESS (wall reached) — the INVERSE of the seek, where a stall is
@@ -1764,7 +1789,20 @@ void DriveClass::_dispatchNext()
             rc = _execDriveDistSync(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::GYRO:
-            rc = _execDriveDistGyro(cmd.power, cmd.cm, cmd.heading, cmd.brake, /*blocking*/ false);
+            // Dispatcher lowering (ADR-072): a flat/short GYRO move runs as a cooperative FLAT
+            // profile (startSpeed = cruise ⇒ no ramp-up; endSpeed = 0 ⇒ decel + brake at the
+            // commanded distance) so the R4 heading hold owns the wheels every tick. `accel`
+            // MUST be explicit — cmd.accel defaults to 0.0f, which _execProfileMove rejects.
+            rc = _execProfileMove(DriveMode::GYRO,
+                                  /*isTime*/ false,
+                                  cmd.cm,
+                                  /*totalSec*/ 0.0f,
+                                  /*cruise*/ cmd.power,
+                                  /*startSpeed*/ cmd.power,
+                                  /*endSpeed*/ 0,
+                                  Config::TSHAPE_ACCEL_PWM_PER_CM,
+                                  cmd.brake,
+                                  cmd.heading);
             break;
         }
         break;
@@ -1779,7 +1817,18 @@ void DriveClass::_dispatchNext()
             rc = _execDriveTimeSync(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::GYRO:
-            rc = _execDriveTimeGyro(cmd.power, cmd.sec, cmd.heading, cmd.brake, /*blocking*/ false);
+            // Same dispatcher lowering as DRIVE_DIST/GYRO above — flat time profile under the
+            // R4 heading hold, with the explicit accel cmd.accel (0.0f) would fail on.
+            rc = _execProfileMove(DriveMode::GYRO,
+                                  /*isTime*/ true,
+                                  /*totalCm*/ 0.0f,
+                                  cmd.sec,
+                                  /*cruise*/ cmd.power,
+                                  /*startSpeed*/ cmd.power,
+                                  /*endSpeed*/ 0,
+                                  Config::TSHAPE_ACCEL_PWM_PER_CM,
+                                  cmd.brake,
+                                  cmd.heading);
             break;
         }
         break;
