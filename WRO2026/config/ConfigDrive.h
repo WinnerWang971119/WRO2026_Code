@@ -103,9 +103,6 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.02f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.04f;
-        static constexpr float    MOVEGYRO_KP = 6.01f;
-        static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 2.15f;
         static constexpr float    TURNGYRO_KP = 22.75f;
         static constexpr float    TURNGYRO_KI = 0.08f;
         static constexpr float    TURNGYRO_KD = 0.25f;
@@ -123,12 +120,6 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
-        /**
-         * Move GYRO PID is configured with Battery at ~11.5V
-         */
-        static constexpr float    MOVEGYRO_KP = 9.0f;
-        static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 1.0f;
         static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
         static constexpr float    TURNGYRO_KI = 0.02f;
         static constexpr float    TURNGYRO_KD = 1.54f;
@@ -153,9 +144,6 @@ namespace Config
     constexpr float    MOVESYNC_KP  = ActiveMotor::MOVESYNC_KP;
     constexpr float    MOVESYNC_KI  = ActiveMotor::MOVESYNC_KI;
     constexpr float    MOVESYNC_KD  = ActiveMotor::MOVESYNC_KD;
-    constexpr float    MOVEGYRO_KP  = ActiveMotor::MOVEGYRO_KP;
-    constexpr float    MOVEGYRO_KI  = ActiveMotor::MOVEGYRO_KI;
-    constexpr float    MOVEGYRO_KD  = ActiveMotor::MOVEGYRO_KD;
     constexpr float    TURNGYRO_KP  = ActiveMotor::TURNGYRO_KP;
     constexpr float    TURNGYRO_KI  = ActiveMotor::TURNGYRO_KI;
     constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;

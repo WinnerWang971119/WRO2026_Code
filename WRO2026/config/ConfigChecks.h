@@ -351,16 +351,9 @@ namespace Config
     // -----------------------------------------------------------------------------------------
     // Localization / IMU checks (ConfigNav.h)
     //
-    // COUPLED SITES: Config::IMU_YAW_SIGN is the per-chassis CW->CCW yaw sign applied by
-    // YawSource::readYawDeg (raw STM32 read -> app frame) and YawSource::toHwHeading (app
-    // heading -> STM32 gyro-PID target). It is a PURE SIGN, never a scale factor: every read
-    // and every gyro-heading write multiplies by it exactly once, so any magnitude other than
-    // +/-1 would silently scale all heading math. Pin it here next to the coupled call sites.
-    // -----------------------------------------------------------------------------------------
-    static_assert(IMU_YAW_SIGN == 1.0f || IMU_YAW_SIGN == -1.0f,
-                  "Config::IMU_YAW_SIGN must be exactly 1.0f or -1.0f -- it is the pure "
-                  "CW-to-CCW sign applied by YawSource::readYawDeg and YawSource::toHwHeading, "
-                  "not a scale factor. See config/ConfigNav.h.");
+    // Config::IMU_YAW_SIGN and its tripwire were RETIRED in issue #169 (ADR-072): the STM32
+    // gyro-PID write path (YawSource::toHwHeading) is gone, so nothing applies an app->STM32 yaw
+    // sign anymore. The surviving read-path sign is Config::GYRO_YAW_SIGN, checked below.
 
     // -----------------------------------------------------------------------------------------
     // External gyro checks (ConfigNav.h, ADR-071)
