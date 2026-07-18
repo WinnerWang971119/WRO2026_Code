@@ -7,6 +7,7 @@ PR3 schema removals: PROJECTIONS, GOAL_APPROACH.
 from __future__ import annotations
 
 import copy
+import math
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,11 +22,13 @@ from tools.path_planner.pipeline_config import (
     SpeedTier,
     StopAtLineMode,
 )
+from tools.path_planner.planner import parse_track_cm_from_config
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
     BLIND_DECAY_EXPONENT_MAX,
     FieldDataError,
     parse_line_sensor_axle_offset_cm,
+    parse_line_sensor_rear_axle_offset_cm,
     parse_pivot_min_turn_deg_from_config,
     parse_pivot_trim_min_drive_cm_from_config,
     validate,
@@ -1208,20 +1211,21 @@ def test_tc20_override_only_pivot_leg_resolves_stop_at_line() -> None:
     """TC20 (override resolves): a geometry-less pivot leg honors stop_at_line.
 
     An override-only incoming leg ``A->B`` (no geometry) carrying
-    ``stop_at_line: "on"`` must be derived AND have its seek override honored:
-    the leg classifies SENSOR-terminated (takes no approach trim), so a 90 deg
-    pivot onto a derived-100cm leg validates, AND with the trigger removed the
-    short-distance gate would not even apply here -- so to prove the override is
-    read on a derived edge, the outgoing leg is pinned SHORT via a geometry-
-    bearing entry that would reject a 'distance' incoming. Simpler: the incoming
-    is derived-100cm and seeking; we assert it validates with the override and
-    REJECTS the FRONT-only rear guard when direction:'rear' is added -- pinning
-    that direction/stop_at_line resolve on the geometry-derived leg.
+    ``stop_at_line: "on"`` AND ``direction: "rear"`` must have BOTH overrides
+    resolved off the geometry-DERIVED edge: ``stop_at_line`` classifies it
+    SENSOR-terminated, and ``direction: "rear"`` pins it REAR so its overshoot
+    budgets against the 7.68 cm REAR offset (#54, ADR-071). A 90 deg pivot's
+    delta = 9.0 cm overflows that REAR budget, so the field is REJECTED with a
+    ``REAR sensor-to-axle offset`` diagnostic -- proving the ``direction`` /
+    ``stop_at_line`` overrides were read on the derived edge, not dropped. (An
+    absolute-snap over the FRONT budget, 12.02 cm, would have wrongly accepted
+    it.)
     """
-    # Incoming leg is override-only (geometry derived) + stop_at_line on -> the
-    # pivot validator must read the override off the DERIVED edge. A 'rear'
-    # direction on that same derived leg trips the FRONT-only guard, proving the
-    # directional overrides are resolved on the derived edge, not dropped.
+    # Incoming leg is override-only (geometry derived) + stop_at_line on + rear:
+    # the pivot validator must read BOTH overrides off the DERIVED edge. The REAR
+    # direction selects the smaller REAR overshoot budget, which the 9.0 cm delta
+    # overflows -- so the reject naming the REAR offset proves the derived edge's
+    # overrides were resolved.
     fd = _pivot_field(
         edges=[
             {"type": EDGE_BLIND, "u": "A", "v": "B",
@@ -1231,7 +1235,7 @@ def test_tc20_override_only_pivot_leg_resolves_stop_at_line() -> None:
         pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
-        FieldDataError, match=r"direction:'rear' on its incoming edge"
+        FieldDataError, match=r"REAR sensor-to-axle offset"
     ):
         validate(fd)
 
@@ -1911,16 +1915,22 @@ def test_pivot_turn_accepts_line_incoming_within_overshoot_budget() -> None:
     """TC7 (pass counterpart): a LINE-incoming pivot within budget validates.
 
     Same LINE incoming edge, but a 90 deg turn gives delta = 9.0 cm <= 12.02 cm
-    budget, so the overshoot-budget gate does not trip and the outgoing BLIND
-    edge (100 cm) easily clears its dead-reckon gate. Proves the budget
+    FRONT budget, so the overshoot-budget gate does not trip and the outgoing
+    BLIND edge (100 cm) easily clears its dead-reckon gate. Proves the budget
     rejection is about the over-large delta, not the LINE incoming edge per se.
+
+    Post-#54 (ADR-071) the incoming leg is FRONT-pinned (``direction:'front'``)
+    so it budgets against the 12.02 cm FRONT offset -- an unpinned sensor/LINE
+    approach on the 2-board default budgets against the smaller REAR offset
+    (7.68 cm), which delta = 9.0 cm overflows (that reverse-reachable reject is
+    covered by ``test_pivot_turn_line_incoming_over_rear_budget_rejected``).
     """
     fd = _pivot_field(
         edges=[
             {"type": EDGE_LINE, "u": "A", "v": "B",
-             "distance_cm": 100.0, "heading_deg": 0.0},
+             "distance_cm": 100.0, "heading_deg": 0.0, "direction": "front"},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
-             "distance_cm": 100.0, "heading_deg": 90.0},
+             "distance_cm": 100.0, "heading_deg": 90.0, "direction": "front"},
         ],
         pivot_turns=[("A", "B", "C")],
         node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
@@ -1974,8 +1984,13 @@ def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_defau
 
     fd = _pivot_field(
         edges=[
+            # FRONT-pin the incoming leg (#54): under the STOP_AT_LINE pipeline
+            # default it too classifies sensor, so an unpinned approach would
+            # budget its 9.0 cm delta against the 7.68 cm REAR offset and reject.
+            # This test targets the OUTGOING sensor exemption, so pin the approach
+            # to the FRONT budget to isolate it.
             {"type": EDGE_BLIND, "u": "A", "v": "B",
-             "distance_cm": 100.0, "heading_deg": 0.0},
+             "distance_cm": 100.0, "heading_deg": 0.0, "direction": "front"},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 2.0, "heading_deg": 90.0},  # no mode override
         ],
@@ -2011,8 +2026,12 @@ def test_pivot_turn_incoming_blind_seeks_under_stop_at_line_pipeline_default(
 
     fd = _pivot_field(
         edges=[
+            # FRONT-pin the incoming leg (#54): a sensor approach on the 2-board
+            # default budgets its 9.0 cm delta against the 7.68 cm REAR offset and
+            # would reject; this test targets the sensor exemption from the
+            # DISTANCE gate, so pin to the FRONT budget to isolate it.
             {"type": EDGE_BLIND, "u": "A", "v": "B",
-             "distance_cm": 2.0, "heading_deg": 0.0},  # no mode override
+             "distance_cm": 2.0, "heading_deg": 0.0, "direction": "front"},  # no mode override
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
@@ -2098,13 +2117,16 @@ def test_pivot_turn_rejects_chained_pivots_over_trimming_shared_edge() -> None:
         validate(fd)
 
 
-def test_pivot_turn_rejects_authored_rear_on_pivot_adjacent_edge() -> None:
-    """TC12: an authored direction:'rear' on a pivot-adjacent edge is rejected.
+def test_pivot_turn_accepts_authored_rear_on_dead_reckon_leg() -> None:
+    """#54 (ADR-071): an authored direction:'rear' on a pivot leg is now accepted.
 
-    Single-wheel pivots are FRONT-only in v1 (reverse pivots are tracked by
-    #54). A ``direction:'rear'`` override on the exact incoming ``A->B`` leg of
-    a pivot is rejected with a precise FRONT-only diagnostic naming the
-    offending edge.
+    The old FRONT-only guard is gone -- a single-wheel pivot may run in reverse.
+    Here the incoming ``A->B`` leg is a dead-reckon BLIND edge (DISTANCE-
+    terminated) pinned ``direction:'rear'``: a reverse dead-reckon needs no rear
+    line board and the 9.0 cm delta trims its 100 cm drive well clear of the
+    floor, so the field validates. (A REAR-pinned SENSOR approach on a 1-board
+    chassis is still rejected -- see
+    ``test_pivot_turn_rejects_rear_pinned_sensor_leg_on_one_board``.)
     """
     fd = _pivot_field(
         edges=[
@@ -2115,9 +2137,188 @@ def test_pivot_turn_rejects_authored_rear_on_pivot_adjacent_edge() -> None:
         ],
         pivot_turns=[("A", "B", "C")],
     )
-    with pytest.raises(
-        FieldDataError, match=r"direction:'rear' on its incoming edge"
-    ):
+    assert validate(fd) is None
+
+
+# -- #54 / ADR-071: reverse-pivot direction-resolved budget + new rejects ------
+#
+# The reverse-pivot validator branches a sensor-terminated APPROACH's overshoot
+# budget on reverse-reachability -- the 2-board default with no FRONT pin budgets
+# against the smaller REAR offset (the conservative worst case, since the runtime
+# may resolve the approach REAR); a FRONT-pinned or 1-board sensor approach budgets
+# against the FRONT offset -- and adds three new rejects: a binding direction
+# CONTRADICTION, a REAR-pinned sensor approach on <2 boards, and a
+# reverse-reachable RESET-node pivot that is not FRONT-pinned.
+#
+# Every test delta is DERIVED from the parsed Config budgets +- the trim floor,
+# never hardcoded, so a bench remeasure of the placeholder REAR offset reddens
+# only the drive-constant surfaces, not these literals (plan symbolic-budget rule).
+
+_PIVOT_TRACK_CM = parse_track_cm_from_config()
+_REAR_BUDGET_CM = parse_line_sensor_rear_axle_offset_cm()
+_FRONT_BUDGET_CM = parse_line_sensor_axle_offset_cm()
+_PIVOT_TRIM_FLOOR_CM = parse_pivot_trim_min_drive_cm_from_config()
+
+# A delta that OVERFLOWS the REAR budget (rejects a reverse-reachable approach)
+# but FITS inside the FRONT budget (validates a FRONT-pinned approach): exactly
+# the REAR offset, so REAR - delta = 0 < floor while FRONT - delta > floor.
+_DELTA_OVER_REAR_UNDER_FRONT = _REAR_BUDGET_CM
+# A delta comfortably WITHIN the REAR budget (validates a reverse-reachable
+# approach): a full trim floor below the REAR-budget boundary.
+_DELTA_WITHIN_REAR = _REAR_BUDGET_CM - _PIVOT_TRIM_FLOOR_CM - 1.0
+
+
+def _outgoing_heading_for_delta(
+    target_delta_cm: float, incoming_heading: float = 0.0
+) -> float:
+    """Return an outgoing edge heading whose pivot over-travel == target_delta_cm.
+
+    Inverts the validator's closed form ``delta = (track/2) * tan(|theta|/2)``:
+    ``|theta| = 2 * atan(target_delta / (track/2))``. With the incoming heading at
+    0 deg (the default) the outgoing heading equals ``theta``, so the validator
+    recomputes exactly ``target_delta_cm`` from the two headings -- keeping the
+    test's delta pinned to the parsed budgets, never a hardcoded angle.
+    """
+    theta_deg = math.degrees(
+        2.0 * math.atan(target_delta_cm / (_PIVOT_TRACK_CM / 2.0))
+    )
+    return incoming_heading + theta_deg
+
+
+def test_pivot_turn_line_incoming_over_rear_budget_rejected() -> None:
+    """AC5: a reverse-reachable LINE-incoming pivot over the REAR budget rejects.
+
+    The incoming ``A->B`` LINE leg is unpinned on the 2-board default, so it is
+    reverse-reachable and budgets its over-travel against the smaller REAR offset.
+    The derived delta overflows that REAR budget (but would fit the FRONT budget),
+    so ``validate`` rejects and the error names the ``REAR sensor-to-axle offset``
+    -- the counterpart to
+    ``test_pivot_turn_accepts_line_incoming_within_overshoot_budget`` (which
+    FRONT-pins the same geometry to reach the larger FRONT budget).
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_OVER_REAR_UNDER_FRONT)},
+        ],
+        pivot_turns=[("A", "B", "C")],
+        node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
+    )
+    with pytest.raises(FieldDataError, match=r"REAR sensor-to-axle offset"):
+        validate(fd)
+
+
+def test_pivot_turn_accepts_authored_rear_sensor_within_rear_budget() -> None:
+    """AC5: an authored-REAR sensor pivot with delta inside the REAR budget validates.
+
+    Both legs are pinned ``direction:'rear'`` and the incoming leg SEEKS
+    (``stop_at_line:'on'``), so it is sensor-terminated and budgets against the
+    REAR offset. The derived delta stays a trim floor below the REAR budget, so
+    the reverse pivot validates on the 2-board chassis.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0, "stop_at_line": "on", "direction": "rear"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_WITHIN_REAR),
+             "direction": "rear"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_front_pinned_sensor_in_rear_front_band_validates() -> None:
+    """AC6: a FRONT-pinned sensor pivot in the (REAR, FRONT] band validates.
+
+    Same seek-triggered incoming geometry as
+    ``test_pivot_turn_line_incoming_over_rear_budget_rejected``'s delta, but BOTH
+    legs are pinned ``direction:'front'`` -- so the approach is statically FRONT
+    and budgets against the larger FRONT offset, which the delta fits. The pin is
+    the documented escape for a pivot whose delta lands in the (REAR, FRONT] band.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0, "stop_at_line": "on", "direction": "front"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_OVER_REAR_UNDER_FRONT),
+             "direction": "front"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_rejects_binding_direction_contradiction() -> None:
+    """AC7c: a pivot whose two legs are pinned to OPPOSITE directions is rejected.
+
+    The incoming ``A->B`` leg is pinned FRONT and the outgoing ``B->C`` leg REAR.
+    Force-SAME forces the departure to the approach direction, so this binding
+    contradiction would hard-fault ``PIVOT_DIRECTION_MISMATCH`` at runtime; the
+    validator catches the statically-visible case and names the escape.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0, "direction": "front"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_WITHIN_REAR),
+             "direction": "rear"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(FieldDataError, match=r"OPPOSITE directions"):
+        validate(fd)
+
+
+def test_pivot_turn_rejects_rear_pinned_sensor_leg_on_one_board(monkeypatch) -> None:
+    """AC7a: a REAR-pinned sensor approach on a 1-board chassis is rejected.
+
+    With ``LINE_BOARD_COUNT`` monkeypatched to 1 (before the validator's lazy
+    import), a sensor-terminated incoming leg pinned ``direction:'rear'`` cannot
+    seek a line in reverse -- it would fault ``REVERSE_UNAVAILABLE`` at runtime,
+    not degrade to FRONT -- so ``validate`` rejects it up front.
+    """
+    import tools.path_planner.sim.runtime as rt
+
+    monkeypatch.setattr(rt, "LINE_BOARD_COUNT", 1)
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0, "stop_at_line": "on", "direction": "rear"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_WITHIN_REAR),
+             "direction": "rear"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(FieldDataError, match=r"REVERSE_UNAVAILABLE"):
+        validate(fd)
+
+
+def test_pivot_turn_rejects_reverse_reachable_reset_node_pivot() -> None:
+    """AC7b: a reverse-reachable reset-node pivot that is not FRONT-pinned rejects.
+
+    The pivot node ``B`` is a wall-zero ``"reset"`` node and the unpinned approach
+    ``A->B`` is reverse-reachable, so a REAR departure would sweep the untested
+    tail arc near the wall (the interlude clearance is sized for the FRONT sweep).
+    The validator rejects it before the reset-geometry pass runs.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 100.0,
+             "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C", "distance_cm": 100.0,
+             "heading_deg": _outgoing_heading_for_delta(_DELTA_WITHIN_REAR)},
+        ],
+        pivot_turns=[("A", "B", "C")],
+        node_types={"A": "blind", "B": "reset", "C": "blind", "D": "blind"},
+    )
+    with pytest.raises(FieldDataError, match=r"reset \(wall-zero\) node"):
         validate(fd)
 
 
@@ -2146,8 +2347,12 @@ def test_pivot_turn_incoming_stop_at_line_override_on_is_sensor_exempt() -> None
     """
     fd = _pivot_field(
         edges=[
-            {"type": EDGE_BLIND, "u": "A", "v": "B",
-             "distance_cm": 2.0, "heading_deg": 0.0, "stop_at_line": "on"},
+            # FRONT-pin the incoming leg (#54) so its 9.0 cm delta budgets against
+            # the 12.02 cm FRONT offset, not the 7.68 cm REAR offset an unpinned
+            # sensor approach would use -- this test targets the sensor exemption
+            # from the DISTANCE gate, isolated here from the overshoot budget.
+            {"type": EDGE_BLIND, "u": "A", "v": "B", "distance_cm": 2.0,
+             "heading_deg": 0.0, "stop_at_line": "on", "direction": "front"},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
@@ -2192,8 +2397,12 @@ def test_pivot_turn_incoming_blind_into_projection_node_auto_seeks_sensor() -> N
     """
     fd = _pivot_field(
         edges=[
+            # FRONT-pin the incoming leg (#54): the Blind->Proj auto-seek makes it
+            # sensor, and an unpinned sensor approach budgets its 9.0 cm delta
+            # against the 7.68 cm REAR offset. This test targets the sensor
+            # exemption from the DISTANCE gate, so pin to the FRONT budget.
             {"type": EDGE_BLIND, "u": "A", "v": "B",
-             "distance_cm": 2.0, "heading_deg": 0.0},
+             "distance_cm": 2.0, "heading_deg": 0.0, "direction": "front"},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],

@@ -56,13 +56,22 @@ from tools.path_planner.validator import FieldDataError, validate
 def test_sensor_autorule_pivot_within_budget_validates() -> None:
     """TC11: the BLIND->PROJECTION auto-rule sensor-incoming pivot validates.
 
-    ``A -> B`` is a plain BLIND hop whose continuation ``B -> C`` is a
-    PROJECTION, so with ``BLIND_PROJECTION_AUTO_SEEK`` on (the default) the
-    incoming leg seeks a line and classifies ``"sensor"``. The 90 deg pivot's
-    delta = 9.0 cm <= the 12.02 cm FRONT overshoot budget, so the
-    sensor-incoming overshoot reduction fits and ``validate`` returns ``None``.
+    ``A -> B`` is a plain BLIND hop whose destination ``B`` is a PROJECTION node,
+    so with ``BLIND_PROJECTION_AUTO_SEEK`` on (the default) the incoming leg seeks
+    a line and classifies ``"sensor"``. The 90 deg pivot's delta = 9.0 cm fits the
+    12.02 cm FRONT overshoot budget.
+
+    Post-#54 (ADR-071) the incoming leg is FRONT-pinned so it budgets against that
+    FRONT offset -- an unpinned sensor approach on the 2-board default budgets
+    against the smaller 7.68 cm REAR offset, which delta = 9.0 cm overflows. The
+    ``EDGES`` override is a matching-type overlay on the fixture's ``A->B``
+    BLIND edge (the shared fixture stays untouched for T9's reverse-pivot work).
     """
-    assert validate(make_sensor_autorule_pivot_field()) is None
+    field = make_sensor_autorule_pivot_field()
+    field.EDGES = list(getattr(field, "EDGES", [])) + [
+        {"type": "BLIND", "u": "A", "v": "B", "direction": "front"},
+    ]
+    assert validate(field) is None
 
 
 def test_sensor_authored_pivot_within_budget_validates() -> None:
@@ -184,6 +193,12 @@ def test_chained_pivot_shared_sensor_edge_not_double_budgeted() -> None:
                 "distance_cm": _TC12_SHARED_EDGE_CM,
                 "heading_deg": 0.0,
                 "stop_at_line": "on",  # forces the seek -> sensor-terminated
+                # FRONT-pin the shared sensor edge (#54): the second pivot's
+                # approach over B->C would otherwise budget its 9.0 cm delta
+                # against the 7.68 cm REAR offset and reject before this test's
+                # chained-sum exclusion is exercised. Pinning to the 12.02 cm
+                # FRONT budget isolates the double-budget behavior under test.
+                "direction": "front",
             }
         ],
     )
