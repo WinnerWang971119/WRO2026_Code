@@ -265,7 +265,7 @@ namespace Config
                   "not a scale factor. See config/ConfigNav.h.");
 
     // -----------------------------------------------------------------------------------------
-    // External gyro checks (ConfigNav.h, ADR-070)
+    // External gyro checks (ConfigNav.h, ADR-071)
     //
     // COUPLED SITES: Config::GYRO_YAW_SIGN and Config::GYRO_SCALE are applied together, exactly
     // once, inside GyroDecodePolicy.h::decodeGyroYawDeg (called from YawSource) to convert the

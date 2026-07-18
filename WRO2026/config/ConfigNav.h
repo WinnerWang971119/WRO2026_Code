@@ -223,7 +223,7 @@ namespace Config
     constexpr float IMU_YAW_SIGN = IMU_YAW_SIGN_DEFAULT;
 
     // =========================================================================================
-    // External gyro (MatrixColor board) raw-read config (ADR-070).
+    // External gyro (MatrixColor board) raw-read config (ADR-071).
     //
     // The external gyro is a THIRD, physically independent I2C board masquerading as an MXColor
     // device (addr 0x22) that packs a signed 16-bit heading into its G/R registers. `YawSource`

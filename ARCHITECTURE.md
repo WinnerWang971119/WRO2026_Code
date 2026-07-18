@@ -107,7 +107,7 @@ WRO2026.ino
                     GyroDecodePolicy.h and Config::GYRO_YAW_SIGN — plus the STM32 gyro-PID write
                     sign Config::IMU_YAW_SIGN (toHwHeading, unchanged); no longer reads the STM32
                     IMU for yaw; read by Drive — turn loop + gyro-straight writes — and
-                    Localization — heading; ADR-045, extended by ADR-070)
+                    Localization — heading; ADR-045, extended by ADR-071)
   EncoderSource ── (util layer, sits BELOW Drive / LineFollower / ManipBelt; sole owner of
                     lower-MCU per-motor encoder + drive task-done reads, surfacing the MMLower
                     RESULT the vendor read paths discard; readDegrees (surfacing) / readDegreesOr
@@ -147,7 +147,7 @@ writer module does not.
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |
-| `YawSource` | sole owner of the EXTERNAL GYRO yaw read (MXColor board, I2C3) — decodes the board's raw 16-bit heading via `GyroDecodePolicy.h` and applies `Config::GYRO_YAW_SIGN` once — plus the app→STM32 gyro-PID write sign `Config::IMU_YAW_SIGN` (`toHwHeading`, unchanged); no longer reads the STM32 IMU for yaw (ADR-045, extended by ADR-070); read by `Drive` + `Localization` | `begin() → bool`, `update()`, `zeroHardware()`, `isHealthy() → bool`, `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
+| `YawSource` | sole owner of the EXTERNAL GYRO yaw read (MXColor board, I2C3) — decodes the board's raw 16-bit heading via `GyroDecodePolicy.h` and applies `Config::GYRO_YAW_SIGN` once — plus the app→STM32 gyro-PID write sign `Config::IMU_YAW_SIGN` (`toHwHeading`, unchanged); no longer reads the STM32 IMU for yaw (ADR-045, extended by ADR-071); read by `Drive` + `Localization` | `begin() → bool`, `update()`, `zeroHardware()`, `isHealthy() → bool`, `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
 | `EncoderSource` | sole owner of lower-MCU per-motor encoder + drive task-done reads; surfaces the `MMLower` RESULT the vendor read paths discard (ADR-066); surfacing vs last-good policy + per-motor last-good cache; read by `Drive` (profile / seek / wall-push / calibration / `getEncL`/`getEncR` / task-done) + `ManipBelt` (belt position); `LineFollower` reaches it via `Drive.getEncL`/`getEncR` | `readDegrees(id,int32_t&) → bool`, `readDegreesOr(id,fallback) → int32_t`, `resetCache(id)`, `isPrevTaskDone() → bool` |
 | `Localization` | current node + IMU-yaw offset (single writer); reads its raw yaw through `YawSource` | `zeroHeadingFromCurrent()`, `getCurrentNode()`, `getHeadingDeg()`, `toImuYaw(world)`, `onIntersection(advanceTo)`, `onDeadReckonedAdvance(advanceTo)`, `reanchorAtWall(axis,coord,heading)` (wall-zero re-anchor, ADR-043) |
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |

@@ -1,5 +1,5 @@
 // =========================================================================================
-// Host unit test for the YawSource external-gyro read adapter (YawSource.cpp, ADR-070).
+// Host unit test for the YawSource external-gyro read adapter (YawSource.cpp, ADR-071).
 //
 // YawSource is the SOLE owner of the external MXColor-protocol gyro board's yaw I/O and the
 // SOLE applier of `Config::GYRO_YAW_SIGN` (read) / `Config::IMU_YAW_SIGN` (write, unchanged).

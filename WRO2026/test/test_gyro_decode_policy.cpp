@@ -1,6 +1,6 @@
 // =========================================================================================
 // Host unit test for the external gyro wire-decode + wrap + plausibility math
-// (GyroDecodePolicy.h, ADR-070, TC1-TC12).
+// (GyroDecodePolicy.h, ADR-071, TC1-TC12).
 //
 // `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` / `gyroShortestDelta`
 // / `gyroReadPlausible` are header-only inline free functions with NO Arduino / Config

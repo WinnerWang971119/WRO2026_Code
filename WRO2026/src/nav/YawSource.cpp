@@ -6,7 +6,7 @@
  * @details
  * Owns the external MXColor-protocol gyro board (I2C addr 0x22 on `Wire1`), the tick-scoped yaw
  * cache, and the per-read dead-byte gate. The pure wire decode + dead-byte math lives in
- * `GyroDecodePolicy.h` (scale/sign passed as params, ADR-070); this file is only the transport,
+ * `GyroDecodePolicy.h` (scale/sign passed as params, ADR-071); this file is only the transport,
  * the cache, and the health flag around that math. The SDK (`MatrixColor`, `Wire1`) is
  * confined here so `YawSource.h` stays `<stdint.h>`-only for `Drive.h` / `Localization.cpp`.
  */

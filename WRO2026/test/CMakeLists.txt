@@ -1575,7 +1575,7 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
-# Test executable — GyroDecodePolicy math (ADR-070, T6, TC1-TC12).
+# Test executable — GyroDecodePolicy math (ADR-071, T6, TC1-TC12).
 #
 # `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` /
 # `gyroShortestDelta` / `gyroReadPlausible` are header-only inline policies
@@ -1593,7 +1593,7 @@ target_include_directories(test_gyro_decode_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME gyro_decode_policy COMMAND test_gyro_decode_policy)
 
 # =========================================================================================
-# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-070, TC22 / AC9, compile-fail).
+# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-071, TC22 / AC9, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::GYRO_YAW_SIGN` is not
 # exactly +/-1. Built with `-DGYRO_YAW_SIGN_DEFAULT=0.5f` (the `#ifndef`-guarded override
@@ -2658,7 +2658,7 @@ target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
 
 # =========================================================================================
-# External-gyro bridge pins (T3b, issue #163 / ADR-070).
+# External-gyro bridge pins (T3b, issue #163 / ADR-071).
 #
 # Every host target that links `src/nav/YawSource.cpp` also pulls the `MatrixColor` gyro mock,
 # whose `getColor` bridge synthesizes bytes from `mmL.mockYawDeg` so `readYawDeg` round-trips to

@@ -7,7 +7,7 @@
  * @details
  * `YawSourceClass` is the single owner of the robot's yaw READ. The heading is now sourced from
  * an external MXColor-protocol gyro board (I2C addr 0x22 on `Wire1`) rather than the on-board
- * STM32 IMU (ADR-070). That board packs a signed 16-bit heading into two colour registers;
+ * STM32 IMU (ADR-071). That board packs a signed 16-bit heading into two colour registers;
  * `YawSource` owns the I2C transport, a tick-scoped cache, and a per-read dead-byte gate, and
  * hands every consumer an app-frame (CCW-positive), wrapped-to-`(-180, 180]` heading through the
  * UNCHANGED `readYawDeg` / `readYawDegOr` contract. Reads are gated ONLY by dead-byte detection
@@ -15,7 +15,7 @@
  * omits — is deferred to bench verification.
  *
  * Two PHYSICALLY INDEPENDENT frame-crossing signs live at this boundary, each applied exactly
- * once (ADR-070, extending ADR-045's one-place rule to per-frame):
+ * once (ADR-071, extending ADR-045's one-place rule to per-frame):
  *
  *  - **external gyro -> app** (`readYawDeg` / `readYawDegOr`): the read path decodes the raw
  *    bytes via `GyroDecodePolicy.h::decodeGyroYawDeg`, which folds `Config::GYRO_YAW_SIGN` into
@@ -53,7 +53,7 @@
  * @note Single global instance `YawSource` (declared `extern` below, defined in the .cpp).
  *       Construct nothing else; all consumers share this instance.
  * @note No other module performs gyro yaw I/O or applies either yaw sign — see the file header
- *       and ADR-070 / ADR-045.
+ *       and ADR-071 / ADR-045.
  */
 class YawSourceClass
 {
@@ -154,7 +154,7 @@ public:
      * @return The raw-frame (CW-positive) heading: `IMU_YAW_SIGN * appHeadingDeg`, computed as a
      *         float multiply before the cast back to `int16_t`.
      * @note `static` — depends only on `Config::IMU_YAW_SIGN`, not on instance state. This is the
-     *       UNCHANGED app->STM32 write path (the gyro read migration, ADR-070, does not touch it);
+     *       UNCHANGED app->STM32 write path (the gyro read migration, ADR-071, does not touch it);
      *       replacing this write path is tracked separately (issue #169).
      */
     static int16_t toHwHeading(int16_t appHeadingDeg);
