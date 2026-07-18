@@ -2204,6 +2204,52 @@ void PathTrackerClass::_onPlanNextHop()
         return;
     }
 
+    // ------------------------------------------------------------------------
+    // Pivot-scoped REAR-seek serviceability (issue #54, ADR-072).
+    //
+    // A REAR stop-at-line SEEK on the APPROACH leg of a pivot re-anchors the
+    // axle short of the pivot node on the crossing line with the REAR board
+    // (ADR-027). On a <2-board chassis that rear board is absent, so
+    // `resolveStopAtLine`'s `boardOK` gate silently forces `seek = false` and
+    // the leg would classify BLIND_DEAD_RECKON — degrading to an open-loop
+    // dead-reckon reverse that fires the pivot off-target instead of
+    // hard-faulting (ADR-039: no silent seek degradation).
+    //
+    // This check MUST run HERE — pre-turn, keyed off the RESOLVED direction —
+    // rather than inside the STOP_AT_LINE_SEEK dispatch case: the board gate
+    // degrades the primitive to BLIND_DEAD_RECKON BEFORE it can ever classify
+    // as a seek, so a dispatch-case guard is unreachable (the T10 KNOWN GAP).
+    // "Seek requested" is asked directly of the SAME resolver with the board
+    // gate forced OPEN (`lineBoardCount = 2` => `boardOK` always true =>
+    // `seek == requested`), NOT read back from the post-degrade primitive.
+    //
+    // Scoped to `_approachingPivot.active` (this hop APPROACHES a pivot) and to
+    // a BLIND edge (the only edge type a seek dispatches on; a REAR LINE
+    // approach on <2 boards is already caught by the LINE guard above), so it
+    // does NOT widen the documented NON-pivot forced-REAR STOP_AT_LINE ->
+    // dead-reckon-reverse degrade — a legitimate open-loop reverse on 1 board.
+    // ------------------------------------------------------------------------
+    if (_approachingPivot.active && resolved == Direction::REAR
+        && Config::LINE_BOARD_COUNT < 2 && edge.type == Routes::EdgeType::BLIND)
+    {
+        const bool seekAutoRule =
+            Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(nxt);
+        const StopAtLineQuery seekRequestQuery{
+            _activeStopAtLine,
+            edge.stop_at_line_override,
+            _resolveBlindMode(edge),
+            Routes::PIPELINE_CONFIG.blind,
+            resolved,
+            (uint8_t) 2,    // force boardOK open: seek == requested (boardOK is >= 2)
+            seekAutoRule};
+        if (resolveStopAtLine(seekRequestQuery).seek)
+        {
+            _printReverseUnavailable(cur, nxt, F("pivot REAR-seek"));
+            _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
+            return;
+        }
+    }
+
     float bodyTarget = edge.heading_deg;
     if (resolved == Direction::REAR)
     {
@@ -3039,21 +3085,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
         case DispatchPrimitive::STOP_AT_LINE_SEEK:
         {
-            // Pivot-scoped REAR-seek serviceability (issue #54, ADR-072). A REAR
-            // stop-at-line seek INTO a pivot re-anchors on the crossing line with the
-            // REAR board (ADR-027); on a <2-board chassis that board is absent, so the
-            // seek cannot land the axle δ-short and the pivot would fire off-target.
-            // Fault here rather than seek forward-blind. Scoped to `_approachingPivot`
-            // so it does NOT widen `reverseUnavailable` (which keys on EdgeType::LINE),
-            // preserving the documented NON-pivot forced-REAR STOP_AT_LINE ->
-            // dead-reckon-reverse degrade (a BLIND path legitimately runs open-loop
-            // reverse on 1 board).
-            if (_approachingPivot.active && decision.reverse && Config::LINE_BOARD_COUNT < 2)
-            {
-                _printReverseUnavailable(cur, _nextHop, F("pivot REAR-seek"));
-                _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
-                return;
-            }
+            // Pivot-scoped REAR-seek serviceability is enforced UPSTREAM in
+            // `_onPlanNextHop` (issue #54, ADR-072), keyed off the resolved direction
+            // and the "seek requested" rungs BEFORE `resolveStopAtLine`'s board gate can
+            // silently degrade a 1-board REAR seek to BLIND_DEAD_RECKON. A guard here
+            // would be dead: that degrade re-classifies the primitive away from
+            // STOP_AT_LINE_SEEK before this case is ever reached (the T10 KNOWN GAP).
 
             // BLIND + seek (ADR-027). A pass-through LINE->BLIND handoff leaves the
             // LineFollower enabled (T5's brake-on-gate=false path); release it WITHOUT

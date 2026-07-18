@@ -23,6 +23,7 @@ from tools.path_planner.compiler import (
     ACT_FORWARD,
     ACT_TURN_REL,
 )
+from tools.path_planner.config_parse import parse_config_int
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.sim import VirtualChassis, PathTrackerSim
 from tools.path_planner.sim import runtime as _runtime
@@ -567,16 +568,22 @@ def test_tc14c_line_board_count_config_parity():
         f"ConfigLine.h not found at {_CONFIG_LINE_H}. "
         "Ensure the test is run from within the WRO2026_Code repo."
     )
-    config_h = _CONFIG_LINE_H.read_text(encoding="utf-8")
-    match = re.search(
-        r"constexpr\s+uint8_t\s+LINE_BOARD_COUNT\s*=\s*([12])\s*;",
-        config_h,
+    # T10 (issue #54) refactored LINE_BOARD_COUNT to the `#ifndef LINE_BOARD_COUNT_DEFAULT`
+    # / `#define LINE_BOARD_COUNT_DEFAULT 2` / `constexpr uint8_t LINE_BOARD_COUNT =
+    # LINE_BOARD_COUNT_DEFAULT;` override idiom (so a host test can pin it at compile time,
+    # mirroring LINE_JUNCTION_T_MIN_ON_DEFAULT). The RHS is no longer a bare literal, so parse
+    # it the macro-aware way: `parse_config_int` resolves the `#define`->`constexpr` indirection
+    # one hop deep, exactly as the other X_DEFAULT constants are parsed. This still pins the
+    # effective value (a deliberate tripwire on the LINE_BOARD_COUNT value/parity) without
+    # hard-coding the literal spelling of the declaration.
+    config_value = parse_config_int(
+        "LINE_BOARD_COUNT",
+        config_path=_CONFIG_LINE_H,
+        search_headers=(_CONFIG_LINE_H,),
     )
-    assert match is not None, (
-        "ConfigLine.h missing 'constexpr uint8_t LINE_BOARD_COUNT = <1|2>;' "
-        "(anchored pattern)"
+    assert config_value in (1, 2), (
+        f"ConfigLine.h LINE_BOARD_COUNT resolved to {config_value}; expected 1 or 2."
     )
-    config_value = int(match.group(1))
     assert _runtime.LINE_BOARD_COUNT == config_value, (
         f"runtime.LINE_BOARD_COUNT ({_runtime.LINE_BOARD_COUNT}) "
         f"!= ConfigLine.h ({config_value})"
