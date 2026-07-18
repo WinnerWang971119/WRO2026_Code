@@ -474,6 +474,159 @@ void test_TC4b_abort_cascade_clears_drive_fault_and_redispatches()
 }
 
 // ===========================================================================
+// TC2 / TC11 / TC12 — Anticipatory approach ramp on the `Drive.stopAtLine` seek
+// (2026-07-17 line-approach-ramp plan, T11). Drives the REAL `Drive.cpp`
+// SEEK/ARMED/OVERSHOOT state machine over the SAME `Start -> Inter1` seek
+// TC-SL1 exercises, sampling the lower-MCU `MoveSync` magnitude at chosen
+// traveled distances instead of jumping straight to a confirmed crossing (the
+// `expectStopAtLine` black-box handshake) — reuses `driveToSeekInFlight`
+// (above) for the dispatch + in-flight precondition.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// TC2 — SEEK/ARMED magnitude ramps `_stopCruise` -> floor by the SENSOR-frame
+// crossing (`_stopExpectedCm - axleOffsetCm`, the pinned seek prediction
+// frame), instead of holding constant cruise until detection (AC2).
+// ---------------------------------------------------------------------------
+
+static void test_TC2_seek_ramps_from_cruise_toward_floor_by_sensor_crossing()
+{
+    TEST_SCOPE("TC2: seek SEEK/ARMED magnitude ramps cruise->floor by the sensor-frame crossing (AC2)");
+
+    const float expectedCm = driveToSeekInFlight("Start", "Inter1");
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, 0u);
+
+    // `driveToSeekInFlight` already ticked once to dispatch the seek — `traveled ~= 0` (M2
+    // has not moved since dispatch), well before the ramp: full cruise.
+    const int16_t cruiseMag = MiniR4.DriveDC.lastMoveSyncL;
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, MiniR4.DriveDC.lastMoveSyncR);
+
+    // Advance to just past the SENSOR-frame crossing distance's floor-hold boundary
+    // (`predictedCm - LINE_APPROACH_MARGIN_CM`), landing strictly inside the schedule's
+    // FLOOR_HOLD phase regardless of the exact tuned ramp geometry — `LINE_APPROACH_MARGIN_CM
+    // > 0` and `LINE_APPROACH_MAX_MARGIN_CM > 0` are ConfigChecks-enforced invariants, so
+    // `floorStartCm < predictedCm < overrunLimitCm` always holds. `Start -> Inter1` is a
+    // FORWARD (front-board) seek, so the axle offset is the FRONT constant.
+    const int32_t baseline          = MiniR4.M2.getDegrees();
+    const float   axleOffsetCm      = Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    const float   predictedSensorCm = expectedCm - axleOffsetCm;
+    const float   floorEntryCm      = predictedSensorCm - Config::LINE_APPROACH_MARGIN_CM + 0.5f;
+    ASSERT_GT(floorEntryCm, 0.0f);    // sanity: the fixture hop must be long enough to ramp at all
+
+    LineArray.mockSetJunctionType(JunctionType::NONE);    // no crossing yet — pure ramp sampling
+    MiniR4.M2.mockSetDegrees(baseline + (int32_t) cmToEncDeg(floorEntryCm));
+    MiniR4.M3.mockSetDegrees(baseline + (int32_t) cmToEncDeg(floorEntryCm));
+    cooperativeTick();
+
+    const int16_t floorMag = MiniR4.DriveDC.lastMoveSyncL;
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, MiniR4.DriveDC.lastMoveSyncR);
+
+    // Ramped DOWN toward the floor, not held at full cruise (AC2): strictly below cruise and
+    // at/near the static deadband floor (the seek's `_emitContinuous` snap floor).
+    ASSERT_TRUE(floorMag < cruiseMag);
+    ASSERT_TRUE(floorMag <= Config::PWM_MIN_MAGNITUDE);
+
+    // Not yet detected / faulted — this is a pure ramp sample, not a crossing.
+    ASSERT_FALSE(Drive.isLineFound());
+    ASSERT_FALSE(Drive.hasFault());
+
+    // Teardown: retire this in-flight seek (no crossing was ever scripted) so it does not leak
+    // into the NEXT test's fresh `driveToSeekInFlight` dispatch — `Drive::begin()` resets
+    // `_moveDone`/`_turnDone` but NOT `_stopState`, so a dangling SEEK/ARMED would otherwise
+    // make every subsequent seek dispatch hang (`Drive.isIdle()` never true). Drive past the
+    // max-margin fault gate with the marker held NONE; `resetWorld()` (called by the next
+    // `driveToSeekInFlight`) clears both fault surfaces.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !Drive.hasFault(); ++i)
+    {
+        MiniR4.M2.mockSetDegrees(
+            baseline + (int32_t) cmToEncDeg(expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM + 5.0f));
+        MiniR4.M3.mockSetDegrees(
+            baseline + (int32_t) cmToEncDeg(expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM + 5.0f));
+        cooperativeTick();
+    }
+    ASSERT_TRUE(Drive.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// TC11 / TC12 — the `OVERSHOOT` leg seeds its ramp from the LAST COMMANDED
+// SEEK/ARMED magnitude (`_stopLastCommandedMag`), NOT `_stopCruise` (TC11), so
+// the commanded magnitude is non-increasing across the confirm tick (TC12,
+// AC3 seek side).
+// ---------------------------------------------------------------------------
+
+static void test_TC11_TC12_seek_overshoot_seeds_from_last_commanded_and_is_monotonic()
+{
+    TEST_SCOPE("TC11/TC12: seek OVERSHOOT seeds from the last commanded magnitude, non-increasing (AC3 seek)");
+
+    const float expectedCm = driveToSeekInFlight("Start", "Inter1");
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, 0u);
+
+    // Drive well into the floor BEFORE arming/detecting (same floor-entry point as TC2), so the
+    // pre-detect magnitude is genuinely reduced — this is the scenario TC11 targets: seeding
+    // from a reduced magnitude, not from full `_stopCruise`.
+    const int32_t baseline     = MiniR4.M2.getDegrees();
+    const float   axleOffsetCm = Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    const float   floorEntryCm =
+        (expectedCm - axleOffsetCm) - Config::LINE_APPROACH_MARGIN_CM + 0.5f;
+
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+    MiniR4.M2.mockSetDegrees(baseline + (int32_t) cmToEncDeg(floorEntryCm));
+    MiniR4.M3.mockSetDegrees(baseline + (int32_t) cmToEncDeg(floorEntryCm));
+    cooperativeTick();
+    const int16_t preDetectFloorMag = MiniR4.DriveDC.lastMoveSyncL;
+    ASSERT_TRUE(preDetectFloorMag <= Config::PWM_MIN_MAGNITUDE);
+
+    // Advance into the arm window (>= expected - armWithin) so SEEK -> ARMED; marker still
+    // absent so the arming tick itself does not also see a crossing (mirrors
+    // `expectStopAtLine`'s scripting idiom).
+    MiniR4.M2.mockSetDegrees(baseline + (int32_t) cmToEncDeg(expectedCm));
+    MiniR4.M3.mockSetDegrees(baseline + (int32_t) cmToEncDeg(expectedCm));
+    cooperativeTick();
+
+    // Present a debounced T_OR_CROSS WITHOUT advancing the encoder further, ticking until
+    // `Drive.isLineFound()` flips — the ARMED -> OVERSHOOT confirm tick. That tick's OWN
+    // dispatched magnitude is still the SEEK/ARMED `driveSeekApproach()` value (the AC3 seed
+    // source, `_stopLastCommandedMag`), because the state flips to OVERSHOOT only AFTER this
+    // tick's `driveSeekApproach()` call already ran.
+    LineArray.mockSetJunctionType(JunctionType::T_OR_CROSS);
+    bool    confirmed    = false;
+    int16_t lastArmedMag = preDetectFloorMag;
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !confirmed; ++i)
+    {
+        cooperativeTick();
+        lastArmedMag = MiniR4.DriveDC.lastMoveSyncL;
+        confirmed    = Drive.isLineFound();
+    }
+    ASSERT_TRUE(confirmed);
+
+    // First OVERSHOOT-leg tick (rolled ~= 0, frac ~= 0 — no encoder advance since the confirm
+    // tick): the AC3 seed is `_stopLastCommandedMag`, NOT `_stopCruise` — assert it directly by
+    // comparing against the LAST armed magnitude just captured (TC11), and that the handoff
+    // is non-increasing (TC12).
+    cooperativeTick();
+    const int16_t overshootFirstMag = MiniR4.DriveDC.lastMoveSyncL;
+    ASSERT_TRUE(overshootFirstMag <= lastArmedMag);
+
+    // A second overshoot tick (still no further travel) stays flat too — no delayed jolt.
+    cooperativeTick();
+    ASSERT_TRUE(MiniR4.DriveDC.lastMoveSyncL <= lastArmedMag);
+
+    // Teardown: roll the remaining overshoot distance to DONE so this in-flight seek does not
+    // leak `_stopState` into the next test's fresh `driveToSeekInFlight` dispatch (see the
+    // matching teardown note in TC2 above).
+    const int32_t confirmEnc       = baseline + (int32_t) cmToEncDeg(expectedCm);
+    const int32_t overshootDoneEnc =
+        confirmEnc + (int32_t) cmToEncDeg(Config::LINE_SENSOR_AXLE_OFFSET_CM + 10.0f);
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !Drive.isIdle(); ++i)
+    {
+        MiniR4.M2.mockSetDegrees(overshootDoneEnc);
+        MiniR4.M3.mockSetDegrees(overshootDoneEnc);
+        cooperativeTick();
+    }
+    ASSERT_TRUE(Drive.isIdle());
+}
+
+// ===========================================================================
 // TC-SL4 (resolver truth-table — KEPT, not a mirror).
 //
 // Direct calls to the real frozen `resolveStopAtLine` (StopAtLinePolicy.h) and
@@ -1045,6 +1198,10 @@ int main()
     // --- TC4 (#145 / ADR-067): Drive fault-clear cascade (clearFault + abort) ---
     test_TC4_clearFault_cascade_clears_drive_fault_and_redispatches();
     test_TC4b_abort_cascade_clears_drive_fault_and_redispatches();
+
+    // --- T11: anticipatory approach ramp on the stopAtLine seek (TC2, TC11, TC12) ---
+    test_TC2_seek_ramps_from_cruise_toward_floor_by_sensor_crossing();
+    test_TC11_TC12_seek_overshoot_seeds_from_last_commanded_and_is_monotonic();
 
     // --- TC-SL4: frozen resolver truth table (KEPT — direct calls, not mirrors) ---
     // resolveStopAtLine: TC1-TC7, the kept representative in-FSM subset (full

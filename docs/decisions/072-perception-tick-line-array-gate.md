@@ -1,4 +1,4 @@
-# ADR-071: Gate LineArray/LineFollower/Intersection tick updates on line-follow-or-seek liveness
+# ADR-072: Gate LineArray/LineFollower/Intersection tick updates on line-follow-or-seek liveness
 
 **Status:** Implemented
 **Date decided:** 2026-07 (issue #164)
@@ -64,7 +64,7 @@ detection moves off the follow/seek liveness signal entirely.
 - ADR-027 (`Drive.stopAtLine()` / the seek FSM this gate keys off).
 - The `LineArray` tick-cache (PR #20, `LINE_ARRAY_TICK_CACHE_ENABLED`).
 - Issue #164.
-- The `feat/line-approach-ramp` branch (line-approach ramp; ADR number assigned when it
-  merges, per the ADR-collision rule the unmerged branch renumbers): touches the same
-  SEEK/ARMED states with schedule/ramp math but does not change `_stopState` IDLE/non-IDLE
-  transitions, so this gate's predicate stays valid alongside it.
+- ADR-071 (anticipatory line-approach ramp; merged first, so this ADR took the next number
+  per the ADR-collision rule the unmerged branch renumbers): touches the same SEEK/ARMED
+  states with schedule/ramp math but does not change `_stopState` IDLE/non-IDLE transitions,
+  so this gate's predicate stays valid alongside it.

@@ -788,6 +788,39 @@ private:
     bool _evaluateProjectionPassThrough() const;
 
     /**
+     * @brief `line(A)–line(B)–line(C)` intersection-gated pass-through eligibility for the
+     *        LINE→line (junction) hop being dispatched (F3 — evaluate-once hoist).
+     *
+     * The dispatch-time twin of the peek the `LINE_FOLLOW` state historically ran at
+     * intersection-detect. Called from `_dispatchEdgeAfterTurn`'s
+     * `LINE_FOLLOW_INTERSECTION` arm (B == `_nextHop`, `_resolvedBodyHeading` /
+     * `_resolvedDirection` already resolved for the A→B hop). Peeks the hop AFTER
+     * `_nextHop` toward `_destinationNode` (`_peekNextNextHop`) and applies the SAME
+     * three-part test the detection site used: (1) `Config::PATH_PASS_THROUGH_ENABLED`
+     * leads so the NEXT_HOP lookup is skipped when pass-through is compiled out, (2) the
+     * outbound edge B→C exists (`type != NONE` — a BLIND B→C is a valid pass-through
+     * target, unlike the projection collapse which requires a LINE flank), and (3) the
+     * shared ADR-023 `_passThroughHeadingOk(outbound, C)` collinear + same-direction
+     * predicate.
+     *
+     * Pure over headings/geometry (no live yaw, no FSM mutation) — identical inputs at
+     * dispatch and at the later detection tick (the FSM never re-plans between the two),
+     * so latching the result at dispatch and consuming it at detection is behaviour-
+     * identical to the old recompute, while giving the approach-ramp arm at dispatch the
+     * pass-through answer it needs BEFORE the leading sensor sees the marker.
+     *
+     * @return `true` iff the A→B→C triple is collinear + same-direction — i.e. the hop
+     *         passes THROUGH `_nextHop` and must keep full cruise (approach ramp
+     *         suppressed).
+     *
+     * @note Distinct from `_evaluateProjectionPassThrough()` (the distance-gated
+     *       `line–proj–line` collapse), which additionally requires the outbound edge to
+     *       be LINE and C to be a LINE junction node. This intersection-gated variant
+     *       gates only on edge existence + heading, exactly as the old detection peek.
+     */
+    bool _evaluateLineFollowPassThrough() const;
+
+    /**
      * @brief ADR-059 blind-chain walk-ahead: try to fold the BLIND dead-reckon hop being
      *        dispatched (hop 0: `cur -> _nextHop`) plus the collinear BLIND hops beyond it
      *        into ONE chained run, filling the fixed `_chain` run buffer.
@@ -1085,6 +1118,23 @@ private:
     /// this one fires off the DISTANCE gate at a projection node, NEVER
     /// `Intersection.isAtIntersection()`. See ADR-023 and issue #64.
     bool _projPassThrough = false;
+
+    /// @brief Dispatch-time pass-through latch for the in-flight LINE→line (junction) hop
+    ///        (F3 — evaluate-once hoist for the anticipatory approach ramp).
+    ///
+    /// Set in `_dispatchEdgeAfterTurn`'s `LINE_FOLLOW_INTERSECTION` arm from
+    /// `_evaluateLineFollowPassThrough()` — the collinear `line(A)–line(B)–line(C)` peek
+    /// that historically ran at intersection-detect in the `LINE_FOLLOW` state. Hoisting
+    /// it to dispatch lets the arm decide whether THIS hop TERMINATES at `_nextHop` (arm
+    /// the approach ramp) or PASSES THROUGH it (keep full cruise — ramp suppressed), a
+    /// decision the ramp needs BEFORE the leading sensor sees the marker. The `LINE_FOLLOW`
+    /// state consumes this SAME latch into `_passThrough` at detection instead of
+    /// recomputing, so the schedule armed at dispatch always agrees with the branch taken
+    /// at detection (the peek is pure over headings/geometry and the FSM never re-plans
+    /// between the two, so the value is identical). Reset on begin/abort/fault, mirroring
+    /// `_projPassThrough`. Distinct from `_passThrough` (the intersection-detect flag
+    /// consumed by `LINE_OVERSHOOT` and the next dispatch). See ADR-023.
+    bool _lineFollowPassThrough = false;
 
     /// @brief Resolved direction (FRONT/REAR) for the current hop.
     ///

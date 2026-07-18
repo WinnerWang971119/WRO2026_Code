@@ -115,10 +115,15 @@ from tools.path_planner.ctps.config import (
     KEYFRAME_COUNT_CEILING,
     LINE_FOLLOW_OFFSET_DISPLAY_CM,
     MANIP_NOMINAL_S,
+    RAMP_SAMPLE_STEP_CM,
     ROBOT_FRAME_CM,
+    SCALE_CM_S_PER_PWM,
 )
 from tools.path_planner.ctps.profile import (
+    ApproachSchedule,
+    approach_speed_at,
     default_config,
+    resolve_approach_schedule,
     resolve_drive_profile,
     resolve_effective_speed,
     resolve_turn_profile,
@@ -842,6 +847,187 @@ def _densify_drive(
 
 
 # ---------------------------------------------------------------------------
+# Anticipatory line-approach ramp rendering (T10, ADR-058 display layer)
+# ---------------------------------------------------------------------------
+#
+# A terminating LINE hop (a non-pass-through ``ACT_LINE_OVERSHOOT`` roll onto
+# the node) firmware-side ramps cruise -> the kinetic floor (``PWM_MOVING_MIN``)
+# over a zone that bottoms out ``LINE_APPROACH_MARGIN_CM`` BEFORE the predicted
+# sensor-crossing distance, holds the floor through detection, then the
+# overshoot roll re-arms its OWN (unchanged, existing) floor -> 0 brake — see
+# the 2026-07-17 anticipatory-line-approach-ramp plan (T2/T4/T6/T8). CTPS
+# renders this PURELY from the run's own geometry + the parsed firmware Config
+# (never a per-hop velocity read off the sim, matching every other primitive
+# this module renders): the follow leg immediately preceding a terminal
+# ``ACT_LINE_OVERSHOOT`` IS the predicted sensor-crossing distance (the sim
+# already lands its END pose one axle-offset short of the node, by
+# construction — no separate offset subtraction is needed here).
+#
+# The render below reuses the golden-pinned :func:`resolve_approach_schedule` /
+# :func:`approach_speed_at` kernel (T2/T4) for the schedule and its per-distance
+# magnitude, but does NOT hand the whole terminating edge to
+# :func:`resolve_drive_profile` in one call: that kernel's half-of-total-distance
+# ramp cap (:func:`resolve_tshape_ramps`) is scoped to treat its ``dist_cm`` as
+# the WHOLE move, which would misfit a decel ramp that is deliberately confined
+# to a SUB-window of the follow leg (bottoming out short of the crossing, then
+# holding). Three phases are stitched instead, each independently well-behaved:
+# (A) any leading collinear-pass-through prefix plus the follow leg's own
+# ramp-up/cruise, rendered via the EXISTING whole-run mechanism clipped to
+# ``schedule.ramp_start_cm`` (an unbraked ``end_pwm == cruise`` sub-profile, so
+# the cap only ever bounds the legitimate ramp-up); (B) the dense RAMP +
+# FLOOR_HOLD deceleration, sampled directly off ``approach_speed_at``; (C) the
+# overshoot roll's own floor -> 0 brake, seeded AT the floor magnitude (AC3's
+# monotonic detect-handoff), via the same kernel the plain path already uses.
+
+
+def _resolve_line_approach_schedule(
+    predicted_cm: float, cfg
+) -> Optional["ApproachSchedule"]:
+    """Resolve the anticipatory approach-ramp schedule for a terminating LINE hop.
+
+    Thin wrapper around :func:`~tools.path_planner.ctps.profile.resolve_approach_schedule`
+    (the T2/T4 cross-language-pinned kernel): feeds the parsed firmware Config
+    (the SAME ``TSHAPE_*`` / ``LINE_APPROACH_*`` / ``PWM_MOVING_MIN`` values the
+    real robot runs with) plus the LineFollower cruise
+    (``ConfigLine::CRUISE_SPEED``) as the cruise/floor magnitudes.
+
+    :param predicted_cm: the follow leg's own chord distance (cm) — the CTPS
+        stand-in for the firmware's ``predictedCm = _pivotTrimDistance(edge) -
+        axleOffsetCm``. The sim's follow-leg advance is ALREADY that
+        axle-offset-adjusted quantity by construction (it stops one axle
+        offset short of the node so the separate overshoot roll can land on
+        it), so no separate offset subtraction is needed here.
+    :param cfg: the parsed :class:`~tools.path_planner.ctps.profile.ProfileConfig`.
+    :return: the active :class:`ApproachSchedule`, or ``None`` when the
+        resolved schedule is degenerate (``active == False`` — a short hop
+        below the engage threshold, AC7's documented flat fallback) so the
+        caller renders the ordinary flat/braked trapezoid unchanged.
+    """
+    schedule = resolve_approach_schedule(
+        predicted_cm,
+        cfg.approach_margin_cm,
+        cfg.approach_max_margin_cm,
+        int(cfg.line_cruise),
+        int(cfg.pwm_moving_min),
+        cfg.accel,
+        cfg.ramp_min,
+        cfg.ramp_max,
+        cfg.no_ramp_eps,
+        cfg.min_move_cm,
+    )
+    return schedule if schedule.active else None
+
+
+def _lerp_pose(
+    p0: Tuple[float, float, float], p1: Tuple[float, float, float], frac: float
+) -> Tuple[float, float, float]:
+    """Linear-interpolate a pose ``frac`` of the way from ``p0`` to ``p1``.
+
+    x/y lerp linearly; heading takes the shortest arc (:func:`wrap_pm180`),
+    matching every other pose interpolation in this module and
+    :func:`~tools.path_planner.ctps.profile.sample_drive`. ``frac`` is not
+    clamped — callers pass values already known to lie in ``[0, 1]``.
+
+    :param p0: ``(x, y, heading_deg)`` at ``frac == 0``.
+    :param p1: ``(x, y, heading_deg)`` at ``frac == 1``.
+    :param frac: interpolation fraction.
+    :return: the interpolated ``(x, y, heading_deg)``.
+    """
+    x0, y0, h0 = p0
+    x1, y1, h1 = p1
+    dh = wrap_pm180(h1 - h0)
+    return (x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, (h0 + dh * frac) % 360.0)
+
+
+def _sample_approach_ramp_keyframes(
+    follow_seg: "_RunSegment",
+    schedule: "ApproachSchedule",
+    predicted_cm: float,
+    t0: float,
+    cfg,
+) -> List[Dict[str, Any]]:
+    """Dense-sample the RAMP + FLOOR_HOLD phases of an active approach schedule.
+
+    Renders the anticipatory deceleration AC12/TC15 ask CTPS to show: the
+    follow leg's interior from ``schedule.ramp_start_cm`` (where the caller's
+    leading cruise/ramp-up prefix already lands — the CRUISE -> RAMP
+    handoff) through ``predicted_cm`` (the sensor-crossing point;
+    ``schedule.floor_start_cm``'s FLOOR_HOLD tail is included), sampled every
+    ``RAMP_SAMPLE_STEP_CM`` (bounded by ``KEYFRAME_COUNT_CEILING``) via
+    :func:`~tools.path_planner.ctps.profile.approach_speed_at` directly — the
+    T2/T4-pinned kernel, not a re-derivation.
+
+    Poses are lerped along the follow leg's own straight chord by fraction of
+    ``predicted_cm`` (matching this module's general drive-densification
+    convention). Timestamps are a trapezoidal-average Euler integration of
+    ``ds/v`` — display-only, deliberately bypassing the ``DriveProfile``
+    kernel's exact closed-form timing here: that kernel's half-of-total-distance
+    ramp cap is scoped to treat its argument as a WHOLE move and would misfit
+    this sub-window (see the section banner above).
+
+    :param follow_seg: the run segment for the LINE-follow leg immediately
+        PRECEDING the terminal ``ACT_LINE_OVERSHOOT`` roll; its ``dist_cm``
+        MUST equal ``predicted_cm``.
+    :param schedule: the ACTIVE schedule from
+        :func:`_resolve_line_approach_schedule`.
+    :param predicted_cm: the follow leg's own length (== ``follow_seg.dist_cm``).
+    :param t0: the running clock at ``schedule.ramp_start_cm`` (after the
+        caller already rendered the leading cruise/ramp-up prefix).
+    :param cfg: the parsed :class:`~tools.path_planner.ctps.profile.ProfileConfig`
+        (kinetic floor + cruise).
+    :return: dense keyframes strictly AFTER ``t0``, ending at ``predicted_cm``
+        (``follow_seg.end_pose``, byte-exact); empty if the window is
+        zero-length (never expected on an ``active`` schedule, guarded
+        defensively).
+    """
+    lo = schedule.ramp_start_cm
+    hi = predicted_cm
+    length = hi - lo
+    if length <= _TRANSLATION_EPS_CM:
+        return []
+
+    n_steps = max(1, ceil(length / RAMP_SAMPLE_STEP_CM))
+    n_steps = min(n_steps, KEYFRAME_COUNT_CEILING - 1)
+    step = length / n_steps
+    sample_distances = [lo + step * i for i in range(1, n_steps)]
+    sample_distances.append(hi)
+
+    kinetic_floor = float(cfg.pwm_moving_min)
+
+    x0, y0, h0 = follow_seg.start_pose
+    x1, y1, h1 = follow_seg.end_pose
+    dh = wrap_pm180(h1 - h0)
+
+    def _velocity_at(d: float) -> float:
+        speed = approach_speed_at(schedule, d)
+        return SCALE_CM_S_PER_PWM * max(float(speed.pwm_mag), kinetic_floor)
+
+    d_prev = lo
+    v_prev = _velocity_at(lo)
+    t_running = t0
+
+    keyframes: List[Dict[str, Any]] = []
+    for d in sample_distances:
+        v = _velocity_at(d)
+        t_running += (d - d_prev) / ((v + v_prev) / 2.0)
+        frac = d / predicted_cm
+        keyframes.append(
+            {
+                "t": t_running,
+                "x": x0 + (x1 - x0) * frac,
+                "y": y0 + (y1 - y0) * frac,
+                "h": (h0 + dh * frac) % 360.0,
+            }
+        )
+        d_prev, v_prev = d, v
+
+    # Pin the last sample byte-exact to the follow leg's own snapshot pose (the
+    # TC7 boundary-pose invariant every other densifier in this module upholds).
+    keyframes[-1] = {"t": keyframes[-1]["t"], "x": x1, "y": y1, "h": h1}
+    return keyframes
+
+
+# ---------------------------------------------------------------------------
 # Collinear run-grouper (CTPS truth-fix, T3)
 # ---------------------------------------------------------------------------
 #
@@ -892,6 +1078,13 @@ class _RunSegment:
         LineFollower window-fit). Always ``False`` on a blind-chain segment —
         a chained final hop is a Drive dead-reckon stop, not a LineFollower
         distance-gated one.
+    :param approach_predicted_cm: set ONLY on a terminating (non-pass-through)
+        ``ACT_LINE_OVERSHOOT`` roll segment (T10, ADR-058 display layer), to
+        the chord distance of the follow leg immediately PRECEDING it — the
+        CTPS-computed "predicted sensor-crossing distance"
+        (:func:`_resolve_line_approach_schedule`'s input). ``None`` for every
+        other segment kind (pass tags, blind, stop-at-line, projection follow)
+        — those keep today's plain whole-run trapezoid unchanged.
     """
 
     start_pose: Tuple[float, float, float]
@@ -901,6 +1094,7 @@ class _RunSegment:
     chain_start_pwm: Optional[int] = None
     chain_end_pwm: Optional[int] = None
     rear_led: bool = False
+    approach_predicted_cm: Optional[float] = None
 
 
 def _build_run_profile(
@@ -1656,6 +1850,19 @@ def build(trace: Trace, field_data) -> Track:
                     segs, "pass tag with no following braked stop"
                 )
                 return
+            # T10 (ADR-058 display layer): a terminating (non-pass-through)
+            # LINE hop's run carries a predicted sensor-crossing distance on
+            # its terminal segment (set only for ACT_LINE_OVERSHOOT). Render
+            # the anticipatory approach-ramp deceleration instead of the plain
+            # whole-run trapezoid when the resolved schedule is active; a
+            # degenerate schedule (short hop / disabled) falls through to the
+            # ordinary render below, unmodified (AC7 flat fallback).
+            approach_predicted_cm = (
+                segs[-1].approach_predicted_cm if braked else None
+            )
+            if approach_predicted_cm is not None and len(segs) >= 2:
+                if _emit_line_approach_run(segs, speed, approach_predicted_cm):
+                    return
             cruise, start, _end_seed, profiled = speed
             total_cm = sum(seg.dist_cm for seg in segs)
             # AC8 LineFollower window-fit: a run ending on a REAR-led braked
@@ -1679,6 +1886,103 @@ def build(trace: Trace, field_data) -> Track:
         for sub in sliced:
             _extend(sub)
 
+    def _emit_line_approach_run(
+        segs: List["_RunSegment"],
+        speed: Tuple[int, int, int, bool],
+        predicted_cm: float,
+    ) -> bool:
+        """Render a terminating LINE hop's run with the anticipatory approach ramp.
+
+        Replaces the ordinary whole-run trapezoid (T10, ADR-058 display layer)
+        for a run whose LAST segment is a non-pass-through
+        ``LINE_FOLLOW_INTERSECTION`` roll (``segs[-1].approach_predicted_cm``
+        set) with three profile-timed phases, chained onto the running clock:
+
+        (A) any leading collinear-pass-through prefix plus the follow leg's own
+        ramp-up/cruise, rendered via the EXISTING whole-run mechanism clipped
+        to ``schedule.ramp_start_cm`` within the follow leg (an unbraked
+        ``end_pwm == cruise`` sub-profile carries no decel ramp of its own, so
+        the half-of-total-distance cap only ever bounds the legitimate
+        ramp-up);
+        (B) the dense RAMP + FLOOR_HOLD deceleration, sampled directly off
+        ``approach_speed_at`` (:func:`_sample_approach_ramp_keyframes`);
+        (C) the overshoot roll's own floor -> 0 brake, seeded AT the floor
+        magnitude (AC3's monotonic detect-handoff), via the SAME T-shape
+        kernel the plain path already uses.
+
+        Falls through (returns ``False``, appending nothing) when the resolved
+        schedule is degenerate (AC7 — a short hop below the engage threshold):
+        the caller then renders the ordinary flat/braked trapezoid unchanged.
+
+        :param segs: the buffered run's segments; ``segs[-1]`` is the terminal
+            ``ACT_LINE_OVERSHOOT`` roll and ``segs[-2]`` its paired follow leg
+            (guaranteed by the sim's own follow-then-roll emission pairing —
+            the only way ``segs[-1].approach_predicted_cm`` is set at all).
+        :param speed: the run's ``(cruise, start, end_seed, profiled)`` seed.
+        :param predicted_cm: ``segs[-1].approach_predicted_cm`` — the follow
+            leg's own chord distance.
+        :return: ``True`` iff the approach-ramp render fired (keyframes
+            already appended); ``False`` to fall through to the ordinary
+            whole-run render.
+        """
+        overshoot_seg = segs[-1]
+        follow_seg = segs[-2]
+        cfg = default_config()
+        schedule = _resolve_line_approach_schedule(predicted_cm, cfg)
+        if schedule is None:
+            return False
+
+        cruise, start, _end_seed, profiled = speed
+        prefix_segs = segs[:-2]
+        prefix_total_cm = sum(s.dist_cm for s in prefix_segs)
+
+        # -- Phase A: prefix (if any) + ramp-up + cruise, clipped to
+        #    schedule.ramp_start_cm within the follow leg (the CRUISE -> RAMP
+        #    handoff). end_pwm == cruise, so this sub-profile carries no decel
+        #    ramp of its own.
+        ramp_start_local = schedule.ramp_start_cm
+        clip_frac = ramp_start_local / predicted_cm
+        clip_pose = _lerp_pose(follow_seg.start_pose, follow_seg.end_pose, clip_frac)
+        profile_a = resolve_drive_profile(
+            prefix_total_cm + ramp_start_local,
+            cruise_pwm=cruise,
+            start_pwm=start,
+            end_pwm=cruise,
+            profiled=profiled,
+        )
+        boundaries_a = [(s.start_pose, s.end_pose, s.dist_cm) for s in prefix_segs]
+        boundaries_a.append((follow_seg.start_pose, clip_pose, ramp_start_local))
+        for sub in sample_drive_run(profile_a, boundaries_a, keyframes[-1]["t"]):
+            _extend(sub)
+
+        # -- Phase B: dense RAMP + FLOOR_HOLD deceleration off approach_speed_at.
+        _extend(
+            _sample_approach_ramp_keyframes(
+                follow_seg, schedule, predicted_cm, keyframes[-1]["t"], cfg
+            )
+        )
+
+        # -- Phase C: the overshoot roll's own floor -> 0 crawl-then-brake (AC3
+        #    handoff: seeded AT the floor magnitude, never re-accelerating to
+        #    cruise). The commanded magnitude decreases from the floor toward
+        #    0, but DriveProfile's decel-region display convention ALREADY
+        #    floors velocity at the KINETIC floor (PWM_MOVING_MIN) — and this
+        #    leg starts AT that floor by construction — so the whole leg
+        #    renders as a constant-velocity floor-crawl, ending with an
+        #    (implicit, zero-duration) terminal brake at the snapshot pose.
+        #    Deliberately NOT routed through resolve_drive_profile: that
+        #    kernel's CRUISE-phase display floor is the STATIC breakaway floor
+        #    (PWM_MIN_MAGNITUDE), which sits ABOVE the kinetic floor by design
+        #    — feeding it cruise_pwm == floor_mag would inflate the displayed
+        #    speed above the true floor speed for the leg's leading portion
+        #    (caught by the TC2 collinear-run-grouper monotonicity regression).
+        floor_mag = int(cfg.pwm_moving_min)
+        crawl_speed = SCALE_CM_S_PER_PWM * floor_mag
+        dt = overshoot_seg.dist_cm / crawl_speed if crawl_speed > 0.0 else 0.0
+        x1, y1, h1 = overshoot_seg.end_pose
+        _extend([{"t": keyframes[-1]["t"] + dt, "x": x1, "y": y1, "h": h1}])
+        return True
+
     def append_run_segment(
         x_new: float,
         y_new: float,
@@ -1687,6 +1991,7 @@ def build(trace: Trace, field_data) -> Track:
         braked: bool,
         chain_speeds: Optional[Tuple[int, int]] = None,
         rear_led: bool = False,
+        approach_predicted_cm: Optional[float] = None,
     ) -> None:
         """Buffer one geometry drive primitive into the open collinear run.
 
@@ -1707,6 +2012,12 @@ def build(trace: Trace, field_data) -> Track:
         (:data:`_REAR_LED_STOP_TAGS`); it rides onto the segment so
         ``flush_run`` applies the AC8 LineFollower window-fit when this segment
         terminates the run.
+
+        ``approach_predicted_cm`` — set ONLY by the caller for a terminating
+        (non-pass-through) ``ACT_LINE_OVERSHOOT`` roll (T10, ADR-058 display
+        layer), to the immediately-preceding follow leg's own chord distance.
+        It rides onto the segment so ``flush_run`` renders the anticipatory
+        approach-ramp deceleration instead of the plain whole-run trapezoid.
 
         A zero-length segment (the primitive did not translate) is dropped — it
         contributes no distance and does not open/extend a run — but if it is
@@ -1739,6 +2050,7 @@ def build(trace: Trace, field_data) -> Track:
                 chain_start_pwm=chain_start,
                 chain_end_pwm=chain_end,
                 rear_led=rear_led,
+                approach_predicted_cm=approach_predicted_cm,
             )
         )
         if braked:
@@ -2227,6 +2539,26 @@ def build(trace: Trace, field_data) -> Track:
                                     hop_speed_tier = resolve_speed(
                                         graph.edges[prev_node, cur_node], pipeline_cfg
                                     )
+                                # T10 (ADR-058 display layer): a terminating
+                                # (non-pass-through) LINE hop's roll-onto-node
+                                # is ALWAYS the primitive immediately following
+                                # its own paired follow leg (ACT_FOLLOW_INT /
+                                # ACT_LINE_REVERSE), which the run buffer holds
+                                # as its own last segment right now (BEFORE this
+                                # overshoot segment is appended below) — so its
+                                # own chord distance IS the predicted
+                                # sensor-crossing distance the schedule needs
+                                # (already axle-offset-adjusted by the sim's own
+                                # follow-leg geometry; see the section banner
+                                # above _resolve_line_approach_schedule).
+                                # ``ACT_LINE_PASS`` (a collinear pass-through)
+                                # is deliberately excluded (AC5): it never
+                                # reaches here with ``braked``.
+                                approach_predicted_cm = (
+                                    run_segments[-1].dist_cm
+                                    if tag == ACT_LINE_OVERSHOOT and run_segments
+                                    else None
+                                )
                                 append_run_segment(
                                     snap.x_cm,
                                     snap.y_cm,
@@ -2234,6 +2566,7 @@ def build(trace: Trace, field_data) -> Track:
                                     _primitive_drive_speed(tag, pipeline_cfg, hop_speed_tier),
                                     braked,
                                     rear_led=tag in _REAR_LED_STOP_TAGS,
+                                    approach_predicted_cm=approach_predicted_cm,
                                 )
                                 # dwell-1 (Settle-fire matrix): post-stop, before
                                 # the next maneuver — fires on every settle-

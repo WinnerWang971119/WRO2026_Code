@@ -243,7 +243,19 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
       inbound velocity at each equals the follow cruise, NEVER the deadband
       floor (no per-node dip),
     * NO intra-run stop keyframe (no interior keyframe at rest / zero velocity),
-    * a single ramp-down/stop into the goal ``D``.
+    * a NON-INCREASING descent into the goal ``D``.
+
+    Since the 2026-07-17 anticipatory-line-approach-ramp plan (T10), the C->D
+    hop's own 50 cm edge is well above the engage threshold, so the descent
+    into ``D`` is no longer a single monotonic ramp straight to rest: it ramps
+    cruise -> the kinetic floor (``PWM_MOVING_MIN``) BEFORE the arrival, holds
+    that floor through the (idealized, zero-error) detection point, then
+    brakes — see :func:`test_tc15_line_hop_renders_anticipatory_approach_ramp`
+    for a dedicated assertion on that shape. This test only asserts the
+    descent is NON-INCREASING (a floor-hold plateau is flat, not a dip) —
+    :data:`_VEL_TOL` absorbs sub-ULP floating-point noise where two
+    independently-timed constant-floor spans meet, not a real velocity
+    increase.
 
     TC7 invariant: each node boundary pose (``B`` / ``C`` / ``D``) appears
     byte-exact among the keyframes, in order — only timing/velocity between the
@@ -320,13 +332,20 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
     assert plateau_lo < b_idx <= plateau_hi + 1
     assert plateau_lo < c_idx <= plateau_hi + 1
 
-    # Single ramp-up (before the plateau) then single ramp-down (after it):
-    # velocities strictly rise into the plateau and strictly fall out of it. No
-    # interior segment returns to rest between the ramps.
+    # Single ramp-up (before the plateau) then a NON-INCREASING descent (after
+    # it): velocities strictly rise into the plateau and never re-accelerate
+    # out of it. No interior segment returns to rest between the ramps. The
+    # descent tolerance (_VEL_TOL) absorbs the T10 anticipatory approach-ramp's
+    # floor-hold plateau (flat, not decreasing) and the sub-ULP noise where its
+    # two independently-timed constant-floor spans (FLOOR_HOLD's tail, then the
+    # overshoot roll's own crawl) meet — a genuine re-acceleration would be
+    # orders of magnitude larger than this tolerance.
     ramp_up = vels[:plateau_lo]
     ramp_down = vels[plateau_hi + 1 : d_idx]  # up to (not incl.) the terminal brake
-    assert all(b >= a for a, b in zip(ramp_up, ramp_up[1:])), "ramp-up not monotonic"
-    assert all(b <= a for a, b in zip(ramp_down, ramp_down[1:])), "ramp-down not monotonic"
+    assert all(b >= a - _VEL_TOL for a, b in zip(ramp_up, ramp_up[1:])), "ramp-up not monotonic"
+    assert all(
+        b <= a + _VEL_TOL for a, b in zip(ramp_down, ramp_down[1:])
+    ), "ramp-down not monotonic"
 
     # ZERO intra-run stop keyframes: no interior keyframe (between the run start
     # and the terminal D arrival) sits at rest — a stop keyframe would be a
@@ -338,6 +357,93 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
     assert all(v > _VEL_TOL for v in interior), (
         "an intra-run stop keyframe (interior zero velocity) was emitted"
     )
+
+
+# ===========================================================================
+# TC15 / AC12 — the anticipatory line-approach ramp renders (T10, ADR-058)
+# ===========================================================================
+
+
+def test_tc15_line_hop_renders_anticipatory_approach_ramp():
+    """TC15 / AC12: a terminating line->line hop shows the anticipatory decel.
+
+    Reuses the same ``collinear_4node`` A->B->C->D chain as
+    :func:`test_tc2_collinear_line_chain_renders_one_trapezoid` — the C->D hop
+    is a genuine terminating ``LINE_FOLLOW_INTERSECTION`` roll (50 cm, well
+    above the ~28-29 cm forward engage threshold the 2026-07-17
+    anticipatory-line-approach-ramp plan documents) — but asserts the NEW
+    shape the plan's T10 (CTPS render) adds: the descent into ``D`` reaches the
+    kinetic floor (``PWM_MOVING_MIN``) a measurable distance BEFORE the
+    arrival and HOLDS there (the FLOOR_HOLD plateau), rather than a single
+    ramp that only touches the floor at the very last instant. That
+    floor-before-arrival hold is the visible signature distinguishing the
+    anticipatory ramp from the plain single-ramp-to-rest shape
+    :func:`test_tc2_collinear_line_chain_renders_one_trapezoid` already pins.
+    """
+    field_data = collinear_4node.make_ctps_field_data()
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": field_data.START_NODE,
+            "start_heading_deg": 0.0,
+            "build_error": False,
+            "commands": [
+                {"seq": 0, "op": "goto", "target": "A"},
+                {"seq": 1, "op": "goto", "target": "D"},
+            ],
+        }
+    )
+    track = _build_quiet(trace, field_data)
+
+    cfg = default_config()
+    cruise_speed = SCALE_CM_S_PER_PWM * cfg.line_cruise
+    floor_speed = SCALE_CM_S_PER_PWM * cfg.pwm_moving_min
+    assert cruise_speed > floor_speed + 1.0
+
+    kfs = track.keyframes
+    d_xy = collinear_4node.NODES["D"]
+    a_run_start = _last_index_at(kfs, *collinear_4node.NODES["A"])
+    run = kfs[a_run_start:]
+
+    d_arrival_idx = _first_index_at(run, *d_xy)
+    vels = _inbound_velocities(run)
+
+    # The braked ARRIVAL boundary itself is the terminal (near-instantaneous)
+    # brake span; exclude it and look at the span immediately BEFORE it, which
+    # is the last leg of the overshoot roll's own floor -> 0 crawl (still
+    # holding the floor, per AC3's monotonic detect-handoff).
+    pre_arrival = vels[: d_arrival_idx - 1]
+    assert pre_arrival, "no interior velocity samples before the D arrival"
+    assert pre_arrival[-1] == pytest.approx(floor_speed, abs=_VEL_TOL), (
+        "the leg immediately before arrival is not holding the kinetic floor "
+        "(the overshoot roll should hand off from the floor, not cruise)"
+    )
+
+    # The anticipatory signature: the kinetic floor is reached and HELD for a
+    # real span of distance strictly BEFORE the arrival — not merely touched
+    # in the last instant. Find the FIRST interior sample that already sits at
+    # the floor speed, then require at least one MORE floor-speed sample after
+    # it but still before the arrival (i.e. a plateau, not a single point).
+    floor_hits = [
+        i for i, v in enumerate(pre_arrival) if abs(v - floor_speed) <= _VEL_TOL
+    ]
+    assert len(floor_hits) >= 2, (
+        "no floor-hold plateau found before D — expected the anticipatory "
+        "ramp to reach and HOLD the kinetic floor before the sensor crossing, "
+        "not just touch it once at the very last instant"
+    )
+    assert floor_hits == list(range(floor_hits[0], floor_hits[-1] + 1)), (
+        "floor-hold samples are not contiguous"
+    )
+
+    # Cruise is still held earlier in the run (through B and C, unaffected by
+    # the terminal hop's own ramp) and is strictly ABOVE the floor speed, so
+    # the ramp genuinely descends rather than starting at the floor.
+    b_idx = _last_index_at(run, *collinear_4node.NODES["B"])
+    assert _velocity_into(run, vels, *collinear_4node.NODES["B"]) == pytest.approx(
+        cruise_speed, abs=_VEL_TOL
+    )
+    assert b_idx < floor_hits[0] + 1, "the floor-hold plateau precedes B — geometry is wrong"
 
 
 # ===========================================================================
