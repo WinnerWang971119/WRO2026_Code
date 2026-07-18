@@ -111,6 +111,7 @@ from tools.path_planner.sim.runtime import (
     resolve_blind_mode,
     resolve_edge_dispatch,
     resolve_line_follow_mode,
+    resolve_pivot_wheel,
     resolve_speed,
     resolve_stop_at_line,
     walk_next_hop,
@@ -624,14 +625,26 @@ class _HopResolution:
     departing: Any
     approaching: Any
 
-    def wheel(self, cfg: PipelineConfig) -> TurnMode:
+    def wheel(self, cfg: PipelineConfig, direction: Direction = Direction.FRONT) -> TurnMode:
         """Resolve the pre-edge turn wheel (departing pivot, else pipeline turn).
 
         Mirror of the C++ ``resolvedTurnMode = _departingPivot.active ?
-        _departingPivot.wheel : PIPELINE_CONFIG.turn``.
+        resolvePivotWheel(_departingPivot.wheel, _departingPivot.dir) :
+        PIPELINE_CONFIG.turn`` (#54, ADR-072). For a REAR departure the stored
+        FORWARD-sense wheel is L<->R flipped via the shared
+        :func:`~tools.path_planner.sim.runtime.resolve_pivot_wheel` twin -- the
+        same single-source flip firmware/sim/CTPS consume -- so the departing
+        pivot's turn label matches the direction force-SAME resolved for it.
+        ``direction`` is :attr:`Direction.FRONT` for a forward pivot (the flip is
+        then a no-op) or :attr:`Direction.REAR` for a reverse pivot.
+
+        :param cfg: the pipeline config (supplies the non-pivot ``turn`` default).
+        :param direction: the departure hop's resolved direction (the pivot's
+            force-SAME direction). ``FRONT`` by default so a non-reverse caller
+            is unaffected.
         """
         if self.departing is not None:
-            return self.departing.wheel
+            return resolve_pivot_wheel(self.departing.wheel, direction)
         return cfg.turn
 
     def blind_decision(self, reverse: bool, cfg: PipelineConfig, graph, field):
@@ -718,6 +731,54 @@ def _resolve_hops(
             )
         )
     return hops
+
+
+# Drive-primitive tags carrying a FRONT/REAR sense (turns, wall ops, and return
+# moves have none). A pre-edge PIVOT turn's stored wheel is reverse-corrected for
+# a REAR departure (force-SAME runs the departure in the pivot's approach
+# direction, #54/ADR-072), so the turn label must key off the SAME direction the
+# hop's drive primitive dispatches -- read straight off that primitive's tag.
+_REVERSE_DRIVE_TAGS: frozenset = frozenset(
+    {
+        ACT_LINE_REVERSE,
+        ACT_PROJECTION_REVERSE,
+        ACT_PROJECTION_REVERSE_PASS,
+        ACT_STOP_AT_LINE_REVERSE,
+        ACT_BLIND_REVERSE,
+    }
+)
+_FORWARD_DRIVE_TAGS: frozenset = frozenset(
+    {
+        ACT_FOLLOW_INT,
+        ACT_FOLLOW_DIST,
+        ACT_FOLLOW_DIST_PASS,
+        ACT_STOP_AT_LINE,
+        ACT_FORWARD,
+    }
+)
+
+
+def _departure_hop_reverse(stream: List[Any], turn_index: int) -> bool:
+    """Return the FRONT/REAR sense of the hop whose pre-edge turn sits at ``turn_index``.
+
+    A pivot's pre-edge turn is immediately followed by that hop's drive
+    primitive, whose tag encodes the direction force-SAME resolved for the pivot
+    (the departure runs the pivot's approach direction). Scanning forward to the
+    first direction-bearing drive tag reads that resolution straight off the
+    sim's emitted stream -- never a re-derivation. Returns ``False`` (forward)
+    when no drive primitive follows (a defensive tail case) or on a FRONT hop.
+
+    :param stream: the sim's ``(primitive, snapshot)`` emission list.
+    :param turn_index: the index of the ``ACT_TURN_REL`` primitive.
+    :return: ``True`` iff this hop dispatches a REAR drive primitive.
+    """
+    for j in range(turn_index + 1, len(stream)):
+        tag = stream[j][0][0]
+        if tag in _REVERSE_DRIVE_TAGS:
+            return True
+        if tag in _FORWARD_DRIVE_TAGS:
+            return False
+    return False
 
 
 def _make_turn(kind: str, body_heading_deg: float, wheel: TurnMode) -> TraceRecord:
@@ -943,8 +1004,19 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
                     _make_turn("return_turn", snap.heading_deg, cfg.turn)
                 )
             else:
+                # The departing pivot's wheel is reverse-corrected off the
+                # direction its DEPARTURE hop dispatches (force-SAME), read from
+                # the following drive primitive's tag -- mirroring the C++
+                # ``resolvePivotWheel(_departingPivot.wheel, _departingPivot.dir)``.
+                turn_dir = (
+                    Direction.REAR
+                    if _departure_hop_reverse(stream, i)
+                    else Direction.FRONT
+                )
                 records.append(
-                    _make_turn("turn", snap.heading_deg, hops[hop_idx].wheel(cfg))
+                    _make_turn(
+                        "turn", snap.heading_deg, hops[hop_idx].wheel(cfg, turn_dir)
+                    )
                 )
 
         elif tag == ACT_RETURN_STOP_AT_LINE:

@@ -347,6 +347,14 @@ def _make_chained_seek_field():
                 "distance_cm": 60.0,
                 "heading_deg": 90.0,
                 "stop_at_line": "on",    # force the middle hop to seek
+                # FRONT-pin the sensor-terminated approach of pivot (B, C, D)
+                # (issue #54, T7): B->C is the SEEK that approaches pivot C, and an
+                # unpinned reverse-reachable sensor approach is now budgeted against
+                # the smaller REAR offset (7.68 cm), which this 90 deg turn's
+                # delta = 9 cm exceeds. This was a pre-#54 forward-only chain, so the
+                # FRONT pin is behavior-preserving (the seek still dispatches FRONT
+                # and both pivots still land clean) and restores the FRONT budget.
+                "direction": "front",
             },
             {
                 "type": "LINE",
@@ -756,6 +764,15 @@ def _make_short_seek_into_pivot_field():
                 "distance_cm": 5.0,
                 "heading_deg": 0.0,
                 "stop_at_line": "on",    # force the short hop to seek
+                # FRONT-pin the sensor-terminated approach of pivot (A, B, C)
+                # (issue #54, T7): A->B is the SEEK approaching pivot B, and an
+                # unpinned reverse-reachable sensor approach is now budgeted against
+                # the smaller REAR offset (7.68 cm), which this 90 deg turn's
+                # delta = 9 cm exceeds. The FRONT pin restores the 12.02 cm FRONT
+                # budget this fixture's docstring already gates on -- behavior-
+                # preserving (the seek still dispatches FRONT), so the degenerate
+                # short-edge clamp this test exercises is unchanged.
+                "direction": "front",
             }
         ],
     )
