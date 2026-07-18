@@ -1078,6 +1078,78 @@ def resolve_sensor_overshoot_trim(
     return overshoot_cm, clamped
 
 
+# ---------------------------------------------------------------------------
+# Reverse-pivot policy twin (mirror of WRO2026/src/nav/ReversePivotPolicy.h)
+# ---------------------------------------------------------------------------
+# Single source of truth for the reverse (REAR-traversal) correction of a
+# single-wheel pivot (ADR-071, issue #54). Function-identical Python twins of the
+# C++ ``ReversePivotPolicy.h`` free functions:
+#
+#     resolve_pivot_wheel       <-> resolvePivotWheel
+#     pivot_overshoot_budget_cm <-> pivotOvershootBudgetCm
+#
+# The generated ``PivotTurn[]`` table stores the FORWARD-sense wheel and a
+# direction-invariant over-travel ``delta`` (ADR-036). Under force-SAME both legs
+# of a REAR pivot are traversed REAR, so the chassis body rotation ``theta`` is
+# unchanged (the two ``+180`` body-heading offsets cancel in ``h_out - h_in``) but
+# the driven wheel rolls BACKWARD, so achieving that same ``theta`` plants the
+# OPPOSITE wheel: PIVOT_LEFT <-> PIVOT_RIGHT (derived in the C++ file header from
+# ADR-036's forward mapping). ``delta`` is direction-invariant. FRONT and AUTO
+# keep the stored forward wheel; a non-pivot TurnMode is never flipped.
+#
+# Both implementations MUST stay step-for-step identical: the frozen-table parity
+# test tools/path_planner/tests/test_reverse_pivot_policy_parity.py (TC1, AC10)
+# feeds every (wheel, direction) input through these twins and asserts they match
+# the recorded C++ output (the pytest job has no C++ toolchain).
+
+
+def resolve_pivot_wheel(
+    stored_forward_wheel: "_pipeline_config.TurnMode",
+    direction: "Direction",
+) -> "_pipeline_config.TurnMode":
+    """Reverse-correct a single-wheel pivot's stored forward wheel.
+
+    Function-identical Python twin of the C++
+    ``ReversePivotPolicy.h::resolvePivotWheel``. The flip is a pure L<->R swap of
+    ADR-036's forward mapping: a REAR traversal rolls the driven wheel backward,
+    so the same body ``theta`` plants the opposite wheel (see the C++ file
+    header derivation). ``delta`` is unchanged.
+
+    :param stored_forward_wheel: the FORWARD-sense wheel latched in the pivot
+        record (:attr:`TurnMode.PIVOT_LEFT` / :attr:`TurnMode.PIVOT_RIGHT`).
+    :param direction: the direction the pivot's approach hop resolved to.
+    :return: ``PIVOT_LEFT`` <-> ``PIVOT_RIGHT`` flipped when ``direction`` is
+        :attr:`Direction.REAR`; the input unchanged for :attr:`Direction.FRONT`
+        / :attr:`Direction.AUTO`, or for any non-pivot ``TurnMode`` (returned
+        untouched regardless of ``direction``).
+    """
+    turn_mode = _pipeline_config.TurnMode
+    if direction == Direction.REAR:
+        if stored_forward_wheel == turn_mode.PIVOT_LEFT:
+            return turn_mode.PIVOT_RIGHT
+        if stored_forward_wheel == turn_mode.PIVOT_RIGHT:
+            return turn_mode.PIVOT_LEFT
+    return stored_forward_wheel
+
+
+def pivot_overshoot_budget_cm(direction: "Direction") -> float:
+    """Select a pivot approach's post-detect overshoot budget by direction.
+
+    Function-identical Python twin of the C++
+    ``ReversePivotPolicy.h::pivotOvershootBudgetCm``. A REAR approach leads with
+    the rear board, whose sensor-to-axle offset differs from the front board's,
+    so it budgets against the rear offset instead of the front one.
+
+    :param direction: the direction the pivot's approach hop resolved to.
+    :return: :data:`LINE_SENSOR_AXLE_OFFSET_REAR_CM` when ``direction`` is
+        :attr:`Direction.REAR`; :data:`LINE_SENSOR_AXLE_OFFSET_CM` otherwise
+        (:attr:`Direction.FRONT` / :attr:`Direction.AUTO`).
+    """
+    if direction == Direction.REAR:
+        return LINE_SENSOR_AXLE_OFFSET_REAR_CM
+    return LINE_SENSOR_AXLE_OFFSET_CM
+
+
 def walk_next_hop(
     next_hop: NextHopTable,
     source: str,
