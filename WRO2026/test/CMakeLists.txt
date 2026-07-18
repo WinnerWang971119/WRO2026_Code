@@ -2608,6 +2608,7 @@ add_test(NAME encoder_source COMMAND test_encoder_source)
 add_executable(test_drive_seek_predicate
     ${TEST_DIR}/test_drive_seek_predicate.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
