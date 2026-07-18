@@ -644,3 +644,82 @@ def test_tc21_uploaded_mosaic_layout_ingests_into_the_mosaic_free_emitted_page(t
     )
     assert vision_js in reembedded
     assert 'id="ctps-editor-mosaic-panel"' in reembedded
+
+
+# ---------------------------------------------------------------------------
+# TC11 -- axle->body offset plan (T9): editor_io.js source-text pin for the
+# robot.axle_offset round-trip (issue #165, AC7)
+# ---------------------------------------------------------------------------
+
+#: Isolate a top-level function's body from ``function <name>(`` to its
+#: closing brace at the file's 4-space top-level indent (mirrors the
+#: isolate-the-function-body technique the sibling player-html axle tests use
+#: for ``cargo.js``'s resolution functions).
+def _isolate_function_body(source: str, name: str) -> str:
+    match = re.search(
+        r"function\s+" + re.escape(name) + r"\s*\([\s\S]*?\n    \}", source
+    )
+    assert match is not None, f"could not isolate {name}'s function body"
+    return match.group(0)
+
+
+def test_tc11_editor_io_round_trips_axle_offset_source_pin():
+    """TC11: source-text pin -- ``editor_io.js`` round-trips ``robot.axle_offset``.
+
+    Key assertion (AC7's automated leg; no JS runner exists here, so this is a
+    text pin, not a behavioral round-trip -- the behavioral leg is T10's
+    editor eyeball): mirrors the vision-cone round-trip T6 modeled
+    ``_parseAxleOffset``/``_axleOffsetDict`` on.
+
+    * **Serialize side:** ``_serialize``'s body gates the emit on
+      ``E.state.axleOffset`` (a top-level state field, matching
+      ``E.state.vision``) and calls ``_axleOffsetDict(...)`` to build
+      ``robotDict.axle_offset``; ``_axleOffsetDict`` itself emits
+      ``forward_cm``/``lateral_cm`` -- key-for-key with Python
+      ``AxleOffset.to_dict()``.
+    * **Ingest side:** the ingest path reads ``robot.axle_offset`` (via
+      ``robotSection.axle_offset``, the same ``data.robot`` unwrap
+      ``_parseVision`` uses) through ``_parseAxleOffset(...)`` and stores the
+      result to the top-level ``E.state.axleOffset`` -- NOT inside
+      ``E.state.robot``/``_parseRobot`` (a sanity check isolates
+      ``_parseRobot``'s body and confirms it never mentions
+      ``axleOffset``/``axle_offset``, so a regression that folds the offset
+      back into the robot dict -- the exact drop T6 fixes -- fails loud here).
+    * **Tolerance:** ``_parseAxleOffset``'s malformed branches use
+      ``console.warn`` (never ``throw``), matching how the file already
+      tolerates a malformed ``robot.vision`` block in ``_parseVision``.
+    """
+    editor_io_js = next(p for p in _ASSET_JS if p.name == "editor_io.js").read_text(
+        encoding="utf-8"
+    )
+
+    # --- Serialize side: emit gated on E.state.axleOffset -------------------
+    serialize_body = _isolate_function_body(editor_io_js, "_serialize")
+    assert "E.state.axleOffset" in serialize_body
+    assert "robotDict.axle_offset" in serialize_body
+    assert "_axleOffsetDict(E.state.axleOffset)" in serialize_body
+
+    axle_offset_dict_body = _isolate_function_body(editor_io_js, "_axleOffsetDict")
+    assert "forward_cm: a.forward_cm" in axle_offset_dict_body
+    assert "lateral_cm: a.lateral_cm" in axle_offset_dict_body
+
+    # --- Ingest side: robot.axle_offset -> _parseAxleOffset -> E.state.axleOffset
+    ingest_body = _isolate_function_body(editor_io_js, "_ingest")
+    assert "robotSection.axle_offset" in ingest_body
+    assert "_parseAxleOffset(robotSection.axle_offset)" in ingest_body
+    assert "E.state.axleOffset = axleOffset" in ingest_body
+
+    # NOT hoisted inside E.state.robot / _parseRobot -- the exact data-loss
+    # shape T6 fixes for `vision` and mirrors here for `axle_offset`.
+    parse_robot_body = _isolate_function_body(editor_io_js, "_parseRobot")
+    assert "axleOffset" not in parse_robot_body
+    assert "axle_offset" not in parse_robot_body
+
+    # --- Tolerance: malformed input warns, never throws ---------------------
+    parse_axle_offset_body = _isolate_function_body(editor_io_js, "_parseAxleOffset")
+    assert "console.warn" in parse_axle_offset_body
+    assert "throw" not in parse_axle_offset_body
+    # Mirrors the tri-state contract _parseVision already establishes:
+    # undefined (absent key) is distinct from null (present but malformed).
+    assert "return undefined;" in parse_axle_offset_body
+    assert "return null;" in parse_axle_offset_body
