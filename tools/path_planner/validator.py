@@ -226,6 +226,26 @@ def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> floa
     return parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", config_path)
 
 
+def parse_line_sensor_rear_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> float:
+    """Return ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` (the REAR offset) in cm.
+
+    Mirrors :func:`parse_line_sensor_axle_offset_cm` for the REAR line-sensor
+    board. A pivot's sensor-terminated approach that is reverse-reachable
+    (#54) budgets its over-travel ``delta`` against this offset instead of
+    the FRONT one -- see ``ReversePivotPolicy::pivotOvershootBudgetCm``
+    (ADR-071).
+
+    The value is an UNMEASURED placeholder pending a bench measurement of the
+    wired rear board (`ConfigDrive.h` TODO); single-sourced from Config.h so a
+    chassis remeasure cannot silently desync the offline check from the
+    firmware and sim (parity test TC26).
+
+    :param config_path: path to ``Config.h`` (defaults to the firmware header).
+    :return: the REAR sensor-to-axle offset in centimetres.
+    """
+    return parse_config_float("LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path)
+
+
 def parse_pivot_trim_min_drive_cm_from_config(
     config_path: Path = _CONFIG_H_PATH,
 ) -> float:
