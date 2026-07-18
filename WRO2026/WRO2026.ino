@@ -178,13 +178,17 @@ static bool lineArrayNeededThisTick()
  * `Drive.update()` (between LineArray and the follower) and everything from
  * `Localization.update()` onward stay UNCONDITIONAL.
  *
- * Reopen drain: the gate's closed->open edge arms a countdown of
- * `Config::INTERSECTION_DEBOUNCE_TICKS` open ticks; on each, after
- * `Intersection.update()` produced that tick's fresh sample, a read-and-clear
- * discards any departure-junction latch so PathTracker cannot consume it as a
- * phantom arrival. A window (not a one-shot) is required because the debounced
- * edge fires up to `INTERSECTION_DEBOUNCE_TICKS` ticks AFTER reopen (Error
- * Handling -> phantom junction on gate reopen).
+ * Reopen drain: the gate's closed->open edge arms a state-keyed drain that
+ * read-and-clears any departure-junction latch every open tick (after
+ * `Intersection.update()` produced that tick's fresh sample) until the marker
+ * has stably RELEASED (`Intersection.isJunctionActive()` == false), so
+ * PathTracker cannot consume it as a phantom arrival. Keying off the debounced
+ * marker state -- rather than a fixed tick count -- closes the flicker residual
+ * where sensor noise (e.g. NONE, T, T) delays the debounced edge past a
+ * fixed-count window. A settle floor of `Config::INTERSECTION_DEBOUNCE_TICKS`
+ * bridges a tick-1 dropout and bounds the no-marker case (an axle-offset arrival
+ * whose sensor sits past the node never sees the marker) so the drain still ends
+ * promptly (Error Handling -> phantom junction on gate reopen).
  *
  * Order: [LineArray] -> Drive -> [LineFollower -> Intersection] -> Manipulator
  *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace
@@ -203,7 +207,8 @@ void cooperativeTick()
 
     // Reopen-drain + gate observable state (see the doxygen block above).
     static bool     s_prevLineNeeded   = true;   // prev-tick gate state; init true so a disabled gate never drains
-    static uint8_t  s_reopenDrainTicks = 0;      // open ticks left in the reopen-drain window
+    static bool     s_reopenDraining   = false;  // reopen-drain state machine active (drains until marker releases)
+    static uint8_t  s_reopenSettle     = 0;      // settle-floor ticks left before a released drain may end
     static uint32_t s_tickCount        = 0;      // total cooperativeTick() calls
     static uint32_t s_lineUpdateCount  = 0;      // ticks LineArray.update() ran
     static uint32_t s_lastGateHbMs     = 0;      // last gate-heartbeat timestamp
@@ -238,23 +243,38 @@ void cooperativeTick()
         // _validStreak was frozen below Config::INTERSECTION_DEBOUNCE_TICKS, so
         // the rising edge for that junction does NOT latch on the reopen tick —
         // Intersection.update() latches it only once the streak reaches the
-        // threshold, up to INTERSECTION_DEBOUNCE_TICKS open ticks after reopen.
-        // A one-shot drain on the reopen tick alone therefore fired one debounce
-        // window too early and missed the phantom. Instead, arm a countdown on
-        // the closed->open edge and drain (read-and-clear) on EACH of the first
-        // INTERSECTION_DEBOUNCE_TICKS open ticks, after Intersection.update()
-        // produced that tick's fresh sample — the latest possible departure-
-        // marker edge lands on the last drained tick. A genuine NEXT-node
-        // arrival cannot physically occur within one debounce window of follow
-        // start, so no real edge is ever clipped.
+        // threshold, and sensor flicker (e.g. NONE, T, T over the first open
+        // ticks) can push that latch past any fixed-count window. Instead of
+        // guessing a tick count, drive a state machine off the debounced marker:
+        // on the closed->open edge, arm a drain that read-and-clears the latch
+        // (after Intersection.update() produced this tick's fresh sample) EVERY
+        // open tick until the departure marker has stably RELEASED
+        // (isJunctionActive() == false). A settle floor of
+        // INTERSECTION_DEBOUNCE_TICKS keeps the drain armed across a leading
+        // tick-1 dropout before the marker asserts AND bounds the no-marker case
+        // (an axle-offset arrival whose sensor sits past the node never sees the
+        // marker) so the drain still ends promptly. A genuine NEXT-node arrival
+        // cannot physically occur within one debounce window of follow start, so
+        // no real edge is ever clipped.
         if (!s_prevLineNeeded)
         {
-            s_reopenDrainTicks = Config::INTERSECTION_DEBOUNCE_TICKS;
+            s_reopenDraining = true;
+            s_reopenSettle   = Config::INTERSECTION_DEBOUNCE_TICKS;
         }
-        if (s_reopenDrainTicks > 0)
+        if (s_reopenDraining)
         {
-            (void) Intersection.isAtIntersection();
-            --s_reopenDrainTicks;
+            (void) Intersection.isAtIntersection();   // read-and-clear any departure latch
+            if (s_reopenSettle > 0)
+            {
+                --s_reopenSettle;
+            }
+            // End the drain only once past the settle floor AND the marker has
+            // released; until then keep draining so a leading dropout before the
+            // marker asserts is still covered.
+            if (s_reopenSettle == 0 && !Intersection.isJunctionActive())
+            {
+                s_reopenDraining = false;
+            }
         }
     }
 

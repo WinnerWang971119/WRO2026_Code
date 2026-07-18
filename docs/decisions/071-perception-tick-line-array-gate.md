@@ -31,10 +31,17 @@ that budget without touching any consumer's internals.
   after the seek sub-FSM has already run, so it consumes no line sample until the following
   tick — whose tick-top predicate is by then true and refreshes first. Do not reorder this;
   the T5 host test asserts it.
-- **Reopen drain.** On the gate's closed→open edge, read-and-clear `Intersection` for the
-  first `Config::INTERSECTION_DEBOUNCE_TICKS` open ticks, discarding a departure-junction
-  latch that would otherwise surface as a phantom PathTracker arrival. A one-shot drain is
-  not enough — the debounced edge can fire up to that many ticks after reopen.
+- **Reopen drain (state-keyed).** On the gate's closed→open edge, arm a drain that
+  read-and-clears `Intersection` every open tick until the departure marker has stably
+  released (`Intersection.isJunctionActive()` == `false`), discarding a departure-junction
+  latch that would otherwise surface as a phantom PathTracker arrival. Keying off the
+  debounced marker state — not a fixed tick count — closes the flicker case where sensor
+  noise (e.g. NONE→T→T over the first open ticks) delays the debounced edge past a
+  fixed-count window. A settle floor of `Config::INTERSECTION_DEBOUNCE_TICKS` keeps the drain
+  armed across a leading tick-1 dropout before the marker asserts and bounds the no-marker
+  case (an axle-offset arrival whose sensor sits past the node) so the drain still ends
+  promptly. The residual now needs ≥`INTERSECTION_DEBOUNCE_TICKS` consecutive leading
+  dropouts at the exact reopen instant — not physically the departure geometry.
 - **Reclaimed budget** is exactly the single `LineArray` I2C read; `LineFollower.update()`
   already no-ops when disabled, and the `Intersection` saving is a cheap cache-read skip, not
   an I2C cost.
@@ -52,6 +59,8 @@ detection moves off the follow/seek liveness signal entirely.
 
 ## See also
 - `DriveClass::isSeekingLine()` (T1) — the seek-liveness predicate input.
+- `IntersectionClass::isJunctionActive()` — the non-consuming debounced-marker query the
+  reopen drain keys "drain until released" off.
 - ADR-027 (`Drive.stopAtLine()` / the seek FSM this gate keys off).
 - The `LineArray` tick-cache (PR #20, `LINE_ARRAY_TICK_CACHE_ENABLED`).
 - Issue #164.
