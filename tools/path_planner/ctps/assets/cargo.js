@@ -593,7 +593,9 @@
         if (!robotCfg) {
             return;
         }
-        var pose = CTPS.engine.poseAt(state.t);
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(CTPS.engine.poseAt(state.t), state.robotCfg)
+            : CTPS.engine.poseAt(state.t);
         OBJ.drawZones(ctx, view, pose, robotCfg, OBJ.project);
     }
 
@@ -750,7 +752,9 @@
         if (!mask.grab && !mask.box && !mask.dump) {
             return;
         }
-        var pose = CTPS.engine.poseAt(state.t);
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(CTPS.engine.poseAt(state.t), state.robotCfg)
+            : CTPS.engine.poseAt(state.t);
         OBJ.drawDeployedZones(ctx, view, pose, robotCfg, OBJ.project, mask);
     }
 
