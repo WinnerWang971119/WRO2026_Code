@@ -1214,7 +1214,7 @@ def test_tc20_override_only_pivot_leg_resolves_stop_at_line() -> None:
     ``stop_at_line: "on"`` AND ``direction: "rear"`` must have BOTH overrides
     resolved off the geometry-DERIVED edge: ``stop_at_line`` classifies it
     SENSOR-terminated, and ``direction: "rear"`` pins it REAR so its overshoot
-    budgets against the 7.68 cm REAR offset (#54, ADR-071). A 90 deg pivot's
+    budgets against the 7.68 cm REAR offset (#54, ADR-072). A 90 deg pivot's
     delta = 9.0 cm overflows that REAR budget, so the field is REJECTED with a
     ``REAR sensor-to-axle offset`` diagnostic -- proving the ``direction`` /
     ``stop_at_line`` overrides were read on the derived edge, not dropped. (An
@@ -1919,7 +1919,7 @@ def test_pivot_turn_accepts_line_incoming_within_overshoot_budget() -> None:
     BLIND edge (100 cm) easily clears its dead-reckon gate. Proves the budget
     rejection is about the over-large delta, not the LINE incoming edge per se.
 
-    Post-#54 (ADR-071) the incoming leg is FRONT-pinned (``direction:'front'``)
+    Post-#54 (ADR-072) the incoming leg is FRONT-pinned (``direction:'front'``)
     so it budgets against the 12.02 cm FRONT offset -- an unpinned sensor/LINE
     approach on the 2-board default budgets against the smaller REAR offset
     (7.68 cm), which delta = 9.0 cm overflows (that reverse-reachable reject is
@@ -2118,7 +2118,7 @@ def test_pivot_turn_rejects_chained_pivots_over_trimming_shared_edge() -> None:
 
 
 def test_pivot_turn_accepts_authored_rear_on_dead_reckon_leg() -> None:
-    """#54 (ADR-071): an authored direction:'rear' on a pivot leg is now accepted.
+    """#54 (ADR-072): an authored direction:'rear' on a pivot leg is now accepted.
 
     The old FRONT-only guard is gone -- a single-wheel pivot may run in reverse.
     Here the incoming ``A->B`` leg is a dead-reckon BLIND edge (DISTANCE-
@@ -2140,7 +2140,7 @@ def test_pivot_turn_accepts_authored_rear_on_dead_reckon_leg() -> None:
     assert validate(fd) is None
 
 
-# -- #54 / ADR-071: reverse-pivot direction-resolved budget + new rejects ------
+# -- #54 / ADR-072: reverse-pivot direction-resolved budget + new rejects ------
 #
 # The reverse-pivot validator branches a sensor-terminated APPROACH's overshoot
 # budget on reverse-reachability -- the 2-board default with no FRONT pin budgets

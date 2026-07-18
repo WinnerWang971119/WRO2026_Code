@@ -96,7 +96,8 @@ repeating it here.
 
 ## Trigger to revisit
 
-- Reverse pivots (REAR traversal) are needed — #54.
+- Reverse pivots (REAR traversal) are needed — #54. **Implemented by
+  [ADR-072](./072-reverse-pivots.md) (#54).**
 - A chained sequence longer than two consecutive pivots is needed (the latch carries one
   hop; longer chains would stack more records).
 - Hardware bench B3.8 shows residual scrub error after `δ` is applied — apply a measured
@@ -111,5 +112,6 @@ repeating it here.
 - [ADR-027 — `Drive.stopAtLine()` re-anchors localization; arm-window rule](./027-drive-stop-at-line.md) — the arm-window the approach trim adjusts on `STOP_AT_LINE` blind edges.
 - [ADR-028 — FieldMap accessors bounds-check every index](./028-fieldmap-accessor-bounds.md) — `findPivotTurn` follows this on out-of-range indices.
 - [ADR-029 — The validator is the single anti-ambiguity gate](./029-validator-anti-ambiguity.md) — extended with the per-turn fail-fasts (replacing the #36 out-degree check).
+- [ADR-072 — Reverse (REAR-traversal) single-wheel pivots](./072-reverse-pivots.md) — lifts the FRONT-only restriction below via force-SAME + a runtime wheel-flip policy.
 - `docs/plans/2026-06-11-per-turn-pivot-compensation.md` — the originating plan.
-- Issues #44 (closed by this), #54 (reverse pivots), #52 (editor authoring).
+- Issues #44 (closed by this), #54 (reverse pivots, closed by ADR-072), #52 (editor authoring).

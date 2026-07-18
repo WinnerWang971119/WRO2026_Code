@@ -1056,7 +1056,7 @@ void PathTrackerClass::_stepFsm()
                 // hop tracked with the front board's offset lands off-node and feeds that
                 // error into the next dead-reckoned hop, so a reverse overshoot uses the
                 // rear board's own offset. Single-sourced through the shared policy
-                // (ADR-071, #54) so this LINE-overshoot budget cannot drift from the seek
+                // (ADR-072, #54) so this LINE-overshoot budget cannot drift from the seek
                 // budget, the offline validator, or the sim.
                 const float overshootAxleOffsetCm =
                     pivotOvershootBudgetCm(_resolvedDirection);
@@ -2081,7 +2081,7 @@ void PathTrackerClass::_onPlanNextHop()
 
     // -----------------------------------------------------------------------
     // Force-SAME: a pivot commits to the direction it APPROACHED in (issue #54,
-    // ADR-071, supersedes the v1 force-FRONT). A single-wheel pivot is a rigid
+    // ADR-072, supersedes the v1 force-FRONT). A single-wheel pivot is a rigid
     // 3-node maneuver, so its departure `v→w` MUST leave in the same direction
     // its approach `u→v` arrived — otherwise δ and the (possibly flipped) wheel
     // are wrong. This is the direct generalization of the old force-FRONT, which
@@ -2146,7 +2146,7 @@ void PathTrackerClass::_onPlanNextHop()
 
         if (bindingDir != Direction::AUTO && bindingDir != _departingPivot.dir)
         {
-            Serial.print(F("[PathTracker] ADR-071: pivot direction mismatch at v="));
+            Serial.print(F("[PathTracker] ADR-072: pivot direction mismatch at v="));
             Serial.print(cur);
             Serial.print(F(" approach="));
             Serial.print(static_cast<uint8_t>(_departingPivot.dir));
@@ -2220,7 +2220,7 @@ void PathTrackerClass::_onPlanNextHop()
     // (0.5° by default), so the shared turn fires and the pivot wheel applies — no firmware
     // min-angle change is needed. The wheel and the δ come from the SAME resolved record, so
     // they cannot disagree.
-    // ADR-071 (#54): a REAR departure rolls the driven wheel BACKWARD, so the
+    // ADR-072 (#54): a REAR departure rolls the driven wheel BACKWARD, so the
     // stored forward-sense wheel plants the opposite side — `resolvePivotWheel`
     // flips PIVOT_LEFT<->PIVOT_RIGHT for a REAR pivot (FRONT/AUTO unchanged). The
     // table is the wheel authority; the flip is a pure function of the resolved
@@ -2232,7 +2232,7 @@ void PathTrackerClass::_onPlanNextHop()
     const uint8_t turnModeByte = _turnModeToByte(resolvedTurnMode);
 
     // ------------------------------------------------------------------------
-    // Commanded-delta sign tripwire (issue #54, ADR-071, TC16). The dispatched
+    // Commanded-delta sign tripwire (issue #54, ADR-072, TC16). The dispatched
     // pivot wheel is the stored table's authority (`resolvePivotWheel` above),
     // NEVER derived from the live delta — doing so reintroduces ADR-036
     // Blocker-1. This only ASSERTS the table and the geometry agree: a CCW body
@@ -2258,7 +2258,7 @@ void PathTrackerClass::_onPlanNextHop()
                 resolvePivotWheel(expectedForwardWheel, _departingPivot.dir);
             if (resolvedTurnMode != expectedWheel)
             {
-                Serial.print(F("[PathTracker] ADR-071: pivot commanded-delta sign "
+                Serial.print(F("[PathTracker] ADR-072: pivot commanded-delta sign "
                                "tripwire at v="));
                 Serial.print(cur);
                 Serial.print(F(" delta="));
@@ -2850,7 +2850,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     // -----------------------------------------------------------------------
 
     // Direction-aware axle offset (the seek's overshoot channel), single-sourced
-    // through the shared policy (ADR-071, #54): a REAR seek rolls the rear board's
+    // through the shared policy (ADR-072, #54): a REAR seek rolls the rear board's
     // own offset, so this seek budget cannot drift from the LINE-overshoot budget,
     // the offline validator, or the sim.
     const float axleOffsetCm = pivotOvershootBudgetCm(_resolvedDirection);
@@ -3039,7 +3039,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
         case DispatchPrimitive::STOP_AT_LINE_SEEK:
         {
-            // Pivot-scoped REAR-seek serviceability (issue #54, ADR-071). A REAR
+            // Pivot-scoped REAR-seek serviceability (issue #54, ADR-072). A REAR
             // stop-at-line seek INTO a pivot re-anchors on the crossing line with the
             // REAR board (ADR-027); on a <2-board chassis that board is absent, so the
             // seek cannot land the axle δ-short and the pivot would fire off-target.

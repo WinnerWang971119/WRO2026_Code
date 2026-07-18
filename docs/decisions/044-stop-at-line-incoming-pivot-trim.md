@@ -115,7 +115,9 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 - `LINE_SENSOR_AXLE_OFFSET_CM` changes on either chassis — the validator's δ ≤ offset
   budget must re-run against every `"line"`- and `"sensor"`-incoming pivot.
 - REAR-traversal pivots (#54) land — the FRONT-only single-offset assumption on the seek
-  path no longer holds; re-derive the offset per direction.
+  path no longer holds; re-derive the offset per direction. **Implemented by
+  [ADR-072](./072-reverse-pivots.md) (#54):** the seek overshoot budget is now
+  direction-resolved via `pivotOvershootBudgetCm`, replacing the FRONT-only offset here.
 
 ## See also
 
@@ -125,5 +127,6 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 - [ADR-039 — Auto stop-at-line fires a normal seek; a missed line is a hard fault](./039-stop-at-line-normal-seek-no-soft-fallback.md) — the seek the trim adjusts; LINE_NOT_FOUND still hard-faults.
 - [ADR-029 — The validator is the single anti-ambiguity gate](./029-validator-anti-ambiguity.md) — extended here with the δ ≤ offset budget on `"sensor"`-incoming pivots.
 - [ADR-046 — Projection is a node property, not an edge type](./046-projection-as-node-property.md) — amends this ADR; `_regime` is derived from `(edge_type, destination_node_type)` and a LINE→proj pivot trims from the follow distance.
+- [ADR-072 — Reverse (REAR-traversal) single-wheel pivots](./072-reverse-pivots.md) — direction-resolves the seek overshoot budget this ADR introduced; the REAR-reachable "sensor"-incoming pivot draws δ from `LINE_SENSOR_AXLE_OFFSET_REAR_CM` instead of the FRONT-only offset.
 - `docs/plans/2026-06-19-issue65-pivot-seek-reanchor.md` — the originating plan.
-- Issues #65 (closed by this), #75 (reverse re-seat for δ>offset), #54 (REAR pivots).
+- Issues #65 (closed by this), #75 (reverse re-seat for δ>offset), #54 (REAR pivots, closed by ADR-072).

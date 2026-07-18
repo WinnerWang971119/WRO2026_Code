@@ -1,6 +1,6 @@
 // routes_reverse_pivots.h - HAND-AUTHORED, NOT AUTO-GENERATED, NOT VALIDATOR-PASSED.
 //
-// Reverse (REAR-traversal) single-wheel pivot fixtures (issue #54, ADR-071, T9). See
+// Reverse (REAR-traversal) single-wheel pivot fixtures (issue #54, ADR-072, T9). See
 // docs/plans/2026-07-19-issue54-reverse-pivots.md, "Testing Strategy: Test data" for the six
 // triples this table mirrors from the Python side (tools/path_planner/tests/fixtures/pivot_field_data.py):
 //
@@ -100,7 +100,7 @@ namespace Routes {
     static_assert(makeEdge(EdgeType::NONE).type == EdgeType::NONE,
                   "makeEdge must be constexpr-evaluable");
 
-    // Single-wheel pivot turn (ADR-036/ADR-071). The FORWARD-sense wheel + the
+    // Single-wheel pivot turn (ADR-036/ADR-072). The FORWARD-sense wheel + the
     // direction-invariant trim; `ReversePivotPolicy::resolvePivotWheel` flips
     // the wheel at runtime for a REAR-resolved traversal -- this table never
     // changes shape for #54 (only PathTracker's runtime `PivotRef` gains `dir`).

@@ -61,7 +61,7 @@ def test_sensor_autorule_pivot_within_budget_validates() -> None:
     a line and classifies ``"sensor"``. The 90 deg pivot's delta = 9.0 cm fits the
     12.02 cm FRONT overshoot budget.
 
-    Post-#54 (ADR-071) the incoming leg is FRONT-pinned so it budgets against that
+    Post-#54 (ADR-072) the incoming leg is FRONT-pinned so it budgets against that
     FRONT offset -- an unpinned sensor approach on the 2-board default budgets
     against the smaller 7.68 cm REAR offset, which delta = 9.0 cm overflows. The
     ``EDGES`` override is a matching-type overlay on the fixture's ``A->B``

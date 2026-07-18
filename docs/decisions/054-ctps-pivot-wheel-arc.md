@@ -140,7 +140,11 @@ smuggle a behavior change into the sim, for two independent reasons:
 ## Trigger to revisit
 
 - REAR / reverse pivots (deferred to #54) need CTPS rendering — the arc geometry above
-  assumes FRONT-only traversal, matching ADR-036's v1 scope.
+  assumes FRONT-only traversal, matching ADR-036's v1 scope. **Implemented by
+  [ADR-072](./072-reverse-pivots.md) (#54):** `pivots[]` gains a `direction` field and
+  the planted-wheel side + pin flip for REAR, and the sensor-departure re-anchor uses
+  the travel-frame departure ray (`depart_rad` flipped 180°) rather than the body-frame
+  ray, which points opposite travel on REAR.
 - The real `field_data.json` gains a non-empty `PIVOT_TURNS` — this ADR's
   byte-identical-when-empty guarantee then no longer covers the shipped field, and the
   `wheel-arc` path becomes load-bearing for the competition trace, not just fixtures.
@@ -160,5 +164,6 @@ smuggle a behavior change into the sim, for two independent reasons:
 - [ADR-050 — PathTracker sim↔firmware FSM parity](./050-pathtracker-sim-parity.md) — the parity guarantee this ADR is careful not to disturb; TC7 is this issue's own parity tripwire.
 - [ADR-053 — CTPS player modular assets + extension registries](./053-ctps-player-modular-shell.md) — the `renderModes` registry `wheel-arc` registers into, and the CSS-custom-property convention the pin/arc-guide reuse (`--ctps-accent`/`--ctps-muted`), unmodified.
 - [ADR-033 — CTPS ingests a derived mission trace](./033-ctps-derived-mission-trace.md) — confirms `trace_loader.py`/the C++ recorder are untouched: the pivot is derived from `PIVOT_TURNS`, not authored in the command stream.
+- [ADR-072 — Reverse (REAR-traversal) single-wheel pivots](./072-reverse-pivots.md) — lands the REAR arc rendering this ADR deferred; the sim exposes the taken pivot's resolved direction, consumed here through the one shared `ReversePivotPolicy`.
 - `docs/plans/2026-07-05-ctps-pivot-wheel-arc.md` — the originating plan.
-- Issue #55 (closed by this), #54 (reverse pivots, deferred), #44 (per-turn pivot compensation).
+- Issue #55 (closed by this), #54 (reverse pivots, closed by ADR-072), #44 (per-turn pivot compensation).

@@ -8,7 +8,7 @@
 /**
  * @file ReversePivotPolicy.h
  * @brief Single source of truth for the reverse (REAR-traversal) correction of a
- *        single-wheel pivot (ADR-071, issue #54).
+ *        single-wheel pivot (ADR-072, issue #54).
  *
  * The generated `PivotTurn[]` table stores the FORWARD-sense pivot wheel and a
  * direction-invariant over-travel magnitude `delta` (ADR-036). When a pivot is
@@ -25,7 +25,7 @@
  * pattern (PR #34), so a host test links the SAME symbol the firmware does.
  *
  * -------------------------------------------------------------------------
- * WHY THE WHEEL FLIPS ON REVERSE -- derived, not guessed (ADR-036 -> ADR-071)
+ * WHY THE WHEEL FLIPS ON REVERSE -- derived, not guessed (ADR-036 -> ADR-072)
  * -------------------------------------------------------------------------
  * ADR-036 fixes the FORWARD wheel from the body rotation `theta`:
  *   1. `theta = wrap(h_out - h_in)` is the body turn realised at the pivot node.

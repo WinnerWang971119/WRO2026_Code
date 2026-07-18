@@ -1,4 +1,4 @@
-"""Cross-language parity golden for the reverse-pivot policy (ADR-071, #54).
+"""Cross-language parity golden for the reverse-pivot policy (ADR-072, #54).
 
 ``WRO2026/src/nav/ReversePivotPolicy.h`` and its Python twins in
 ``sim/runtime.py`` (``resolve_pivot_wheel`` / ``pivot_overshoot_budget_cm``)
