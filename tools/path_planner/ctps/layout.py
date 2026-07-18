@@ -75,6 +75,7 @@ __all__ = [
     "RectZone",
     "DropPoint",
     "VisionCone",
+    "AxleOffset",
     "RobotConfig",
     "LayoutObject",
     "Layout",
@@ -121,6 +122,9 @@ _ZONE_REQUIRED_KEYS: tuple[str, ...] = ("x_cm", "y_cm", "w_cm", "h_cm")
 
 #: Required keys on a single ``robot.drop_points[]`` entry.
 _DROP_POINT_REQUIRED_KEYS: tuple[str, ...] = ("x_cm", "y_cm")
+
+#: Required keys on the optional ``robot.axle_offset`` block.
+_AXLE_OFFSET_REQUIRED_KEYS: tuple[str, ...] = ("forward_cm", "lateral_cm")
 
 #: Authored hex color: ``#RRGGBB`` (6 hex digits), case-insensitive.
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -230,6 +234,33 @@ class VisionCone:
 
 
 @dataclass
+class AxleOffset:
+    """The axle-to-body-centre offset (``robot.axle_offset``), robot-local.
+
+    Robot-local frame — origin = axle (rotation centre), ``+x`` (``forward_cm``)
+    = heading-forward, ``+y`` (``lateral_cm``) = robot-left — matching the
+    manipulator zones / vision cone convention. The CTPS player draws the
+    robot body (chassis square + heading arrow), the vision cone, the mosaic
+    visibility HUD, and the manipulator zone overlays at the body centre —
+    the axle shifted by this vector; the axle itself stays anchored on the
+    graph node for the trajectory, trail, and node/hit anchoring. An absent
+    ``axle_offset`` is equivalent to ``{0,0}`` — today's centred render.
+
+    :param forward_cm: Robot-local +x offset; positive moves the body ahead
+        of the axle.
+    :param lateral_cm: Robot-local +y offset; positive moves the body to the
+        robot's left.
+    """
+
+    forward_cm: float
+    lateral_cm: float
+
+    def to_dict(self) -> dict[str, float]:
+        """Return the schema dict for this axle offset."""
+        return {"forward_cm": self.forward_cm, "lateral_cm": self.lateral_cm}
+
+
+@dataclass
 class RobotConfig:
     """The ``robot`` section: manipulator zones, all in the robot-local frame.
 
@@ -241,19 +272,23 @@ class RobotConfig:
         to ``drop_points[n]``).
     :param vision: Optional robot-attached forward vision cone (``robot.vision``);
         ``None`` when the layout authors no cone.
+    :param axle_offset: Optional axle-to-body-centre offset (``robot.axle_offset``);
+        ``None`` when the layout authors no offset (equivalent to ``{0,0}``).
     """
 
     grab_zone: RectZone
     box_zone: RectZone
     drop_points: list[DropPoint]
     vision: Optional[VisionCone] = None
+    axle_offset: Optional[AxleOffset] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the schema dict for the ``robot`` section.
 
-        The ``vision`` key is emitted only when a cone is configured — an absent
-        cone omits the key entirely (never ``"vision": None``), so a cone-free
-        robot round-trips byte-identically to today.
+        The ``vision`` and ``axle_offset`` keys are each emitted only when
+        configured — an absent cone/offset omits the key entirely (never
+        ``"vision": None`` / ``"axle_offset": None``), so a cone-free,
+        offset-free robot round-trips byte-identically to today.
         """
         out: dict[str, Any] = {
             "grab_zone": self.grab_zone.to_dict(),
@@ -262,6 +297,8 @@ class RobotConfig:
         }
         if self.vision is not None:
             out["vision"] = self.vision.to_dict()
+        if self.axle_offset is not None:
+            out["axle_offset"] = self.axle_offset.to_dict()
         return out
 
 
@@ -557,6 +594,7 @@ def _validate_robot(data: dict) -> None:
                 )
 
     _validate_vision(robot)
+    _validate_axle_offset(robot)
 
 
 def _validate_vision(robot: dict) -> None:
@@ -579,6 +617,39 @@ def _validate_vision(robot: dict) -> None:
         mosaic.validate_vision_cone(robot["vision"])
     except ValueError as exc:
         raise LayoutError(f"ctps.layout: {exc}") from exc
+
+
+def _validate_axle_offset(robot: dict) -> None:
+    """Validate the optional ``robot.axle_offset`` block.
+
+    The offset is optional: an absent ``axle_offset`` key returns immediately
+    (absent is equivalent to ``{0,0}`` — today's centred render). When
+    present it must be a dict carrying finite numeric ``forward_cm`` and
+    ``lateral_cm`` -- both keys are required together.
+
+    :param robot: the already-validated ``robot`` section dict.
+    :raises LayoutError: prefixed ``ctps.layout: robot.axle_offset...`` on the
+        first invalid field.
+    """
+    if "axle_offset" not in robot:
+        return
+    offset = robot["axle_offset"]
+    if not isinstance(offset, dict):
+        raise LayoutError(
+            f"ctps.layout: robot.axle_offset must be a dict; got {type(offset).__name__!r}."
+        )
+    missing = [key for key in _AXLE_OFFSET_REQUIRED_KEYS if key not in offset]
+    if missing:
+        raise LayoutError(
+            f"ctps.layout: robot.axle_offset missing required key(s) {missing!r}."
+        )
+    for key in _AXLE_OFFSET_REQUIRED_KEYS:
+        value = offset[key]
+        if not _is_finite_number(value):
+            raise LayoutError(
+                f"ctps.layout: robot.axle_offset.{key} must be a finite number; "
+                f"got {value!r}."
+            )
 
 
 def _validate_top_level_mosaic(data: dict) -> None:
@@ -668,6 +739,14 @@ def _build_vision(vision: dict) -> VisionCone:
     )
 
 
+def _build_axle_offset(offset: dict) -> AxleOffset:
+    """Build an :class:`AxleOffset` from an already-validated ``robot.axle_offset`` dict."""
+    return AxleOffset(
+        forward_cm=float(offset["forward_cm"]),
+        lateral_cm=float(offset["lateral_cm"]),
+    )
+
+
 def _build_object(obj: dict) -> LayoutObject:
     """Build a :class:`LayoutObject` from an already-validated object dict."""
     shape = obj["shape"]
@@ -691,11 +770,13 @@ def _build_layout(data: dict) -> Layout:
     """Build a fully-typed :class:`Layout` from an already-validated dict."""
     robot_data = data["robot"]
     vision_data = robot_data.get("vision")
+    axle_offset_data = robot_data.get("axle_offset")
     robot = RobotConfig(
         grab_zone=_build_zone(robot_data["grab_zone"]),
         box_zone=_build_zone(robot_data["box_zone"]),
         drop_points=[_build_drop_point(point) for point in robot_data["drop_points"]],
         vision=_build_vision(vision_data) if vision_data is not None else None,
+        axle_offset=_build_axle_offset(axle_offset_data) if axle_offset_data is not None else None,
     )
     objects = [_build_object(obj) for obj in data["objects"]]
     mosaic_data = data.get("mosaic")
