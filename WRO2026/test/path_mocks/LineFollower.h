@@ -68,6 +68,10 @@
 
 #include "Config.h"          // real — Config::SpeedPreset for the preset setters/queries.
 #include "WROLineArray.h"    // For the WROLineArrayClass type behind getArray().
+#include "../../src/drive/ApproachRampPolicy.h"    // real, header-only (T13) — brings in the
+                             // `ApproachPhase` enum for `approachPhase()` / `mockSetApproachPhase`
+                             // and `setApproachTarget(...)`'s parameter surface. Zero Arduino /
+                             // Config dependency of its own (see the file's own docstring).
 
 // Forward declaration so the builder can hold a reference to the owner type.
 class LineFollowerClass;
@@ -136,6 +140,13 @@ public:
     /** @brief Record the lateral-offset override (`lastLineFollowOffset`, issue #156). @return `*this`. */
     LineFollowerEnableBuilder& setLineFollowOffset(float offset);
 
+    /**
+     * @brief Record the predicted approach-ramp crossing distance (`lastApproachTarget`) —
+     *        T13 mirror of the real `setApproachTarget`.
+     * @return `*this`.
+     */
+    LineFollowerEnableBuilder& setApproachTarget(float predictedCm);
+
 private:
     LineFollowerClass& _owner;    ///< Owner whose capture fields each setter records into.
 };
@@ -180,6 +191,8 @@ public:
      *         `0.0f` (centred). PathTracker composes `sign * lineFollowModeToSetpoint(mode)`, so
      *         this is the signed, reverse-frame-corrected setpoint the biased leg threads in. */
     float lastLineFollowOffset = 0.0f;
+    /** @brief Last `predictedCm` value passed to `setApproachTarget(...)`. Default `0.0f`. */
+    float lastApproachTarget = 0.0f;
 
     /**
      * @brief Reset all recording + test-set fields to their initial values.
@@ -198,11 +211,13 @@ public:
         lastReverse          = false;
         lastOvershootMode    = false;
         lastLineFollowOffset = 0.0f;
+        lastApproachTarget   = 0.0f;
         _enabled           = false;
         _distanceReached   = false;
         _lineLost          = false;
         _preset            = Config::SpeedPreset::NORMAL;
         _reverse           = false;
+        _approachPhase     = ApproachPhase::CRUISE;
     }
 
     // --- lifecycle (no-op) ---
@@ -278,6 +293,13 @@ public:
     /** @brief Whether the P+D mix was frozen by a junction — always `false` on host. */
     bool isPidFrozen() const { return false; }
 
+    /**
+     * @brief Phase of the anticipatory approach-ramp evaluation (test-set) — T13 mirror.
+     * @return The `_approachPhase` field, set by `mockSetApproachPhase(...)`; defaults to
+     *         `ApproachPhase::CRUISE` (the real sentinel value when no ramp is armed).
+     */
+    ApproachPhase approachPhase() const { return _approachPhase; }
+
     /** @brief Most recent weighted error — `0.0f` on host (no controller). */
     float getRawError() const { return 0.0f; }
 
@@ -322,6 +344,8 @@ public:
     void mockSetDistanceReached(bool on) { _distanceReached = on; }
     /** @brief Set the `isLineLost()` flag. */
     void mockSetLineLost(bool on) { _lineLost = on; }
+    /** @brief Set the `approachPhase()` return value (T13). */
+    void mockSetApproachPhase(ApproachPhase phase) { _approachPhase = phase; }
 
 private:
     Config::SpeedPreset _preset          = Config::SpeedPreset::NORMAL;  ///< Active preset.
@@ -329,6 +353,7 @@ private:
     bool                _enabled         = false;                        ///< Test-set enabled state.
     bool                _distanceReached = false;                        ///< Test-set gate-trip flag.
     bool                _lineLost        = false;                        ///< Test-set lost-line flag.
+    ApproachPhase       _approachPhase   = ApproachPhase::CRUISE;         ///< Test-set approach-ramp phase.
 };
 
 // --- LineFollowerEnableBuilder setter definitions (after the owner is complete) ---
@@ -402,6 +427,12 @@ inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setBrakeOnGate(bool
 inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float offset)
 {
     _owner.lastLineFollowOffset = offset;
+    return *this;
+}
+
+inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setApproachTarget(float predictedCm)
+{
+    _owner.lastApproachTarget = predictedCm;
     return *this;
 }
 

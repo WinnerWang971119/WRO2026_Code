@@ -42,6 +42,8 @@
 
 #include "test_path_tracker_harness.h"
 
+#include <cmath>
+
 namespace
 {
 // ---------------------------------------------------------------------------
@@ -162,6 +164,36 @@ void test_passthrough_arm_and_advance_diverge_by_flag()
     ASSERT_EQ(Localization.getCurrentNode(), inter2);
     ASSERT_TRUE(LineFollower.isEnabled());
     ASSERT_FALSE(LineFollower.lastOvershootMode);
+
+    // T11 TC5 (AC5) — the anticipatory approach ramp tracks the SAME dispatch-time
+    // pass-through latch (`_lineFollowPassThrough`, F3) the brake-on-gate/ramp-down knobs
+    // above are keyed on: `LINE_FOLLOW_INTERSECTION`'s arm chains `.setApproachTarget(...)`
+    // ONLY when `!_lineFollowPassThrough` (PathTracker.cpp:2742). `driveToFirstLineFollow()`
+    // just drove through that exact arm for Inter2 -> Inter3, so `LineFollower.lastApproachTarget`
+    // — reset to 0.0 by `resetWorld()`'s `LineFollower.mockReset()` and otherwise only ever
+    // written by `setApproachTarget(...)` — is the "was it armed" observable:
+    //   - flag ON (TC-PT1): Inter3 IS a pass-through node here (Inter4 collinear beyond it),
+    //     so the ramp must be SUPPRESSED — full cruise across the node — and the arm must
+    //     NOT have chained `.setApproachTarget(...)`: `lastApproachTarget` stays exactly 0.0.
+    //   - flag OFF (TC-PT2): pass-through is globally suppressed, so this is treated as a
+    //     normal TERMINATING hop and the ramp DOES arm — a positive predicted sensor-crossing
+    //     distance (the pivot-trimmed edge length minus the front axle offset; no pivot is
+    //     latched on this hop, so it reduces to `edge.distance_cm - LINE_SENSOR_AXLE_OFFSET_CM`).
+    if (Config::LINE_APPROACH_RAMP_ENABLED)
+    {
+        const Routes::EdgeInfo& edge = FieldMap::getEdge(inter2, inter3);
+        if (Config::PATH_PASS_THROUGH_ENABLED)
+        {
+            ASSERT_TRUE(LineFollower.lastApproachTarget == 0.0f);
+        }
+        else
+        {
+            ASSERT_TRUE(LineFollower.lastApproachTarget > 0.0f);
+            ASSERT_TRUE(std::fabs(LineFollower.lastApproachTarget
+                                  - (edge.distance_cm - Config::LINE_SENSOR_AXLE_OFFSET_CM))
+                        < 1e-3f);
+        }
+    }
 
     // ---- Cross the mid junction Inter3 -------------------------------------
     // `expectLineHop()` latches `Intersection.isAtIntersection(true)` and ticks: the

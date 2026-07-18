@@ -25,6 +25,10 @@
 #include <stdint.h>
 
 #include "Config.h"    // real — Config::SpeedPreset for the preset setters
+#include "../../src/drive/ApproachRampPolicy.h"    // real, header-only (T13) — brings in the
+                             // `ApproachPhase` enum for `approachPhase()` / `mockApproachPhase`
+                             // and `setApproachTarget(...)`'s parameter surface. Zero Arduino /
+                             // Config dependency of its own.
 
 class WROLineArrayClass;    // forward decl — getArray() returns a pointer only
 
@@ -59,6 +63,7 @@ public:
     LineFollowerEnableBuilder& setOvershootMode(bool) { return *this; }
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }
     LineFollowerEnableBuilder& setLineFollowOffset(float) { return *this; }
+    LineFollowerEnableBuilder& setApproachTarget(float) { return *this; }
 };
 
 /**
@@ -67,6 +72,9 @@ public:
 class LineFollowerClass
 {
 public:
+    /** @brief Scriptable return value for `approachPhase()`; default CRUISE (T13 mirror). */
+    ApproachPhase mockApproachPhase = ApproachPhase::CRUISE;
+
     // --- lifecycle ---
     bool begin() { return true; }
     void update() {}
@@ -85,6 +93,8 @@ public:
     bool  isEnabled() const { return false; }
     bool  isLineLost() const { return false; }
     bool  isPidFrozen() const { return false; }
+    /** @brief Read `mockApproachPhase` (T13 mirror of the real approach-ramp phase query). */
+    ApproachPhase approachPhase() const { return mockApproachPhase; }
     float getRawError() const { return 0.0f; }
     bool  isDistanceReached() { return false; }
 

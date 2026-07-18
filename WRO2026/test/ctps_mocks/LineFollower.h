@@ -43,6 +43,10 @@
 
 #include "Config.h"         // Config::SpeedPreset for the chain setters
 #include "ctps_record.h"    // ctps::recordDriveMove — the lineFollowDist producer
+#include "../../src/drive/ApproachRampPolicy.h"    // real, header-only (T13) — brings in the
+                             // `ApproachPhase` enum for `approachPhase()` / `mockApproachPhase`
+                             // and `setApproachTarget(...)`'s captured predicted-distance
+                             // surface. Zero Arduino / Config dependency of its own.
 
 class LineFollowerClass;
 
@@ -242,11 +246,31 @@ public:
     LineFollowerEnableBuilder& setOvershootMode(bool) { return *this; }
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }
 
+    /**
+     * @brief Capture the predicted approach-ramp crossing distance (T13 mirror of the real
+     *        `setApproachTarget`).
+     *
+     * Not yet wired into `ctps::recordDriveMove`'s `lineFollowDist` payload — recorded here so
+     * the knob is captured (not silently dropped) rather than left as a discarding stub; a
+     * future trace-schema task can extend the JSON shape to serialize it without re-touching
+     * this builder's capture surface.
+     *
+     * @return `*this` for fluent chaining.
+     */
+    LineFollowerEnableBuilder& setApproachTarget(float predictedCm)
+    {
+        _approachTarget    = predictedCm;
+        _hasApproachTarget = true;
+        return *this;
+    }
+
 private:
     LineFollowerClass& _owner;      ///< Facade that spawned this builder; source of the fallback reverse.
     bool  _enabled;                 ///< From the ctor's targetEnabled; a disable never records.
     float _distanceTarget = 0.0f;   ///< Commanded distance from setDistanceTarget(cm).
     bool  _hasTarget      = false;  ///< True iff setDistanceTarget() was called.
+    float _approachTarget      = 0.0f;    ///< Captured by setApproachTarget(); not yet serialized.
+    bool  _hasApproachTarget   = false;   ///< True iff setApproachTarget() was called.
     bool  _reverse        = false;  ///< From setReverse(bool); valid iff _hasReverseOverride.
     bool  _hasReverseOverride = false;  ///< True iff setReverse() was chained on THIS builder.
     const char* _preset   = nullptr;    ///< Set by setPreset(); nullptr = preset unset.
@@ -278,6 +302,15 @@ static_assert(!std::is_copy_constructible<LineFollowerEnableBuilder>::value
 class LineFollowerClass
 {
 public:
+    /**
+     * @brief Scriptable return value for `approachPhase()` (T13); default `CRUISE`.
+     *
+     * Written directly by a test/dump caller (e.g. to `ApproachPhase::OVERRUN`) before
+     * exercising logic that polls the anticipatory approach-ramp phase; not driven by any
+     * scripted move on this mock.
+     */
+    ApproachPhase mockApproachPhase = ApproachPhase::CRUISE;
+
     /** @brief No-op bring-up; always reports success. */
     bool begin() { return true; }
 
@@ -313,6 +346,8 @@ public:
     bool  isEnabled() const { return false; }
     bool  isLineLost() const { return false; }
     bool  isPidFrozen() const { return false; }
+    /** @brief Read `mockApproachPhase` (T13 mirror of the real approach-ramp phase query). */
+    ApproachPhase approachPhase() const { return mockApproachPhase; }
     float getRawError() const { return 0.0f; }
     bool  isDistanceReached() { return true; }
     void  setTickCallback(void (*)()) {}
