@@ -44,8 +44,9 @@ bool LocalizationClass::begin()
 
 bool LocalizationClass::_readImuYaw(float& yawOut)
 {
-    // Single-owner IMU read (ADR-045): YawSource performs the retry-once lower-MCU read
-    // AND applies Config::IMU_YAW_SIGN, returning the corrected app-frame (CCW-positive) yaw.
+    // Single-owner yaw read (ADR-071): YawSource performs the gated external-gyro I2C read
+    // AND applies Config::GYRO_YAW_SIGN via the decode policy, returning the corrected
+    // app-frame (CCW-positive) yaw.
     // On a hard failure it leaves its out-param untouched and returns false; mirror that here by
     // NOT writing yawOut unless the read succeeded. The world-frame math below this layer is
     // unchanged — it now just operates on the corrected yaw.
