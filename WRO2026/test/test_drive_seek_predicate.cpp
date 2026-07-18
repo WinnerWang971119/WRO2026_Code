@@ -311,7 +311,20 @@ void test_TC5_dispatch_tick_consumes_no_line_sample()
     // happens in this call. So the very call that flips isSeekingLine() false -> true is the same
     // call whose _updateStopAtLine() pass could not have consumed a line sample -- proving the
     // load-bearing order.
+    //
+    // DISCRIMINATING GUARD: assert the dispatch tick emits NO motion command. Under the correct
+    // order the seek is seeded SEEK only at the END of the call, so its `driveContinuous()`
+    // (which commands Move/MoveSync/MoveGyro) does NOT run this tick. An inverted order --
+    // `_dispatchNext()` before `_updateStopAtLine()` -- would run SEEK's `driveContinuous()` on
+    // this same call, bumping the motion-emit count. This is the observable that actually
+    // discriminates the two orderings (the isSeekingLine() false->true transition alone does not,
+    // since both orderings leave it true after the call).
+    const uint32_t emitsBefore = MiniR4.DriveDC.moveCallCount + MiniR4.DriveDC.moveSyncCallCount
+                                 + MiniR4.DriveDC.moveGyroCallCount;
     tick();
+    const uint32_t emitsAfter = MiniR4.DriveDC.moveCallCount + MiniR4.DriveDC.moveSyncCallCount
+                                + MiniR4.DriveDC.moveGyroCallCount;
+    ASSERT_EQ(emitsAfter, emitsBefore);    // no cruise emitted on the dispatch tick -> correct order
 
     ASSERT_TRUE(Drive.isSeekingLine());
     ASSERT_FALSE(Drive.hasFault());
