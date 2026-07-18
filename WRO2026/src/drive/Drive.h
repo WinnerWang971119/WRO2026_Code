@@ -51,6 +51,11 @@
 
 #include "../../Config.h"
 #include "../util/WROMath.h"
+#include "ApproachRampPolicy.h"    // Anticipatory line-approach ramp schedule POD + speed-at
+                                   // lookup (T7 seek consumer). Header-only pure policy —
+                                   // <stdint.h> + TShapeProfilePolicy.h only, no Arduino/Config
+                                   // surface — needed here because `_stopApproachSchedule` is a
+                                   // by-value `ApproachSchedule` member below.
 
 // Forward declarations so DriveClass can name-friend the builders before they are defined.
 class DriveDistBuilder;
@@ -997,6 +1002,26 @@ private:
     bool _isLineFound = false;
     ///< @brief Latched result of the last `stopAtLine` (see `isLineFound()`): `true` on a
     ///<        confirmed crossing, `false` while seeking or after a `LINE_NOT_FOUND` fault.
+
+    ApproachSchedule _stopApproachSchedule{};
+    ///< @brief Anticipatory approach-ramp schedule (T7), resolved ONCE at seek dispatch from the
+    ///<        SENSOR-frame predicted crossing distance (`_stopExpectedCm - axleOffset`). SEEK and
+    ///<        ARMED feed `approachSpeedAt(this, traveled).pwmMag` to `driveContinuous`, so the
+    ///<        chassis reaches the kinetic floor (`Config::PWM_MOVING_MIN`) BEFORE the crossing
+    ///<        instead of holding flat cruise until detection. Value-initialised to all-zero
+    ///<        (`active == false`) so no stale schedule leaks before the first seek. When
+    ///<        `active == false` (short seek) OR `Config::LINE_APPROACH_RAMP_ENABLED == false`,
+    ///<        `_updateStopAtLine` falls back to constant `_stopCruise` — byte-identical to the
+    ///<        pre-feature seek. Composes `TShapeProfilePolicy.h`'s `resolveTShapeRampCm`.
+
+    int16_t _stopLastCommandedMag = 0;
+    ///< @brief Magnitude last commanded during SEEK/ARMED — the anticipatory approach-ramp value
+    ///<        when the ramp is active, else `_stopCruise`. The OVERSHOOT leg seeds its ramp-down
+    ///<        from this so PWM is NON-INCREASING across the detect→overshoot handoff (AC3 / F2):
+    ///<        with the approach ramp the robot arrives at the kinetic floor, so seeding OVERSHOOT
+    ///<        from full `_stopCruise` would jolt the chassis back to cruise on detection. Equals
+    ///<        `_stopCruise` when the approach ramp is disabled/degraded, keeping OVERSHOOT
+    ///<        byte-identical. Seeded to `_stopCruise` at dispatch; overwritten each SEEK/ARMED tick.
 
     // -------------------------------------------------------------------------------------
     // Wall-stop push state machine (`wallStop()`-driven moves) — wall-zero reset nodes (AC8)
