@@ -836,9 +836,11 @@ __all__ = [
     "OffMapFaultError",
     "OffMapGate",
     "PathTrackerSim",
+    "PivotDirectionMismatchError",
     "ReanchorKind",
     "ReturnAction",
     "StopAtLine",
+    "TakenPivot",
     "UnreachableGoalError",
     "resolve_blind_mode",
     "resolve_direction",
@@ -895,6 +897,46 @@ class OffMapFaultError(RuntimeError):
         self.node = node
         self.goal_node = goal_node
         self.offset_mag_cm = offset_mag_cm
+
+
+class PivotDirectionMismatchError(RuntimeError):
+    """Raised when a binding departure override contradicts a pivot's approach dir.
+
+    Sim mirror of the firmware ``_enterFault(Fault::PIVOT_DIRECTION_MISMATCH, ...)``
+    (#54 / ADR-071). A single-wheel pivot commits to the direction it *approached*
+    in (force-SAME) and its departure hop is forced to that same direction, so the
+    geometry-derived wheel + over-travel ``delta`` stay valid. If a BINDING
+    higher-precedence override on the departure -- a per-edge ``direction_override``
+    or a non-``DEFAULT`` pipeline default (:func:`resolve_direction` steps 1-2) --
+    resolves to a DIFFERENT direction, the pivot would run mis-trimmed, so both the
+    offline validator (statically) and the firmware (at runtime) reject it rather
+    than silently override the pin. Ordinary AUTO / builder-override rungs never
+    contradict: force-SAME simply pins the departure's AUTO rung.
+
+    The sim has no latched-fault FSM state to mirror, so it surfaces the refusal as
+    a raised exception the caller can assert on (like :class:`UnreachableGoalError`
+    / :class:`OffMapFaultError` surface the firmware's ``UNREACHABLE`` / ``OFF_NODE``
+    faults). The chassis is NOT advanced past the contradiction.
+    """
+
+    def __init__(
+        self,
+        u: str,
+        v: str,
+        w: str,
+        approach_dir: "Direction",
+        departure_dir: "Direction",
+    ) -> None:
+        super().__init__(
+            f"pivot direction mismatch: pivot ({u!r}, {v!r}, {w!r}) approached "
+            f"{approach_dir.name} but a binding departure override forces "
+            f"{departure_dir.name}; refusing to pivot mis-trimmed"
+        )
+        self.u = u
+        self.v = v
+        self.w = w
+        self.approach_dir = approach_dir
+        self.departure_dir = departure_dir
 
 
 @dataclass
@@ -1873,6 +1915,43 @@ def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
     return _normalize(edge_heading)
 
 
+def _binding_override_direction(
+    edge_dir_override: DirectionMode,
+    pipeline_default: DirectionMode,
+) -> Optional["Direction"]:
+    """Return the direction a BINDING override pins a hop to, or ``None``.
+
+    A "binding" override is one of :func:`resolve_direction`'s two
+    highest-precedence, statically-visible rungs (steps 1-2): a per-edge
+    ``direction_override`` or a non-``DEFAULT`` pipeline direction default. The
+    builder route / arrival overrides (steps 3-4) and the AUTO heuristic (step 5)
+    are NOT binding -- force-SAME overrides those on a pivot departure.
+
+    This is the force-SAME contradiction test (#54 / ADR-071, mirror of the C++
+    ``PathTracker._onPlanNextHop`` block): a pivot's departure hop is forced to the
+    pivot's committed approach direction, UNLESS a binding override on that hop
+    resolves to a different direction -- in which case the pivot would run
+    mis-trimmed and :class:`PivotDirectionMismatchError` is raised (the validator
+    rejects the same case offline).
+
+    :param edge_dir_override: the hop's per-edge ``direction_override``.
+    :param pipeline_default: the pipeline-wide direction default
+        (:data:`PIPELINE_CONFIG` ``.direction``).
+    :return: :attr:`Direction.FRONT` / :attr:`Direction.REAR` when a binding
+        override pins the hop; ``None`` when neither binds (defer to the AUTO /
+        builder rungs).
+    """
+    if edge_dir_override == DirectionMode.FORCE_FORWARD:
+        return Direction.FRONT
+    if edge_dir_override == DirectionMode.FORCE_REVERSE:
+        return Direction.REAR
+    if pipeline_default == DirectionMode.FORCE_FORWARD:
+        return Direction.FRONT
+    if pipeline_default == DirectionMode.FORCE_REVERSE:
+        return Direction.REAR
+    return None
+
+
 def _pass_through_heading_eligible(
     outbound_edge,
     outbound_is_last_hop: bool,
@@ -2506,6 +2585,81 @@ class _ChainRun:
     hop_index: int = -1
 
 
+@dataclass
+class _PivotLatch:
+    """A BY-VALUE pivot-latch copy carrying the force-SAME approach direction.
+
+    Sim mirror of the firmware ``PathTrackerClass::PivotRef`` (#54 / ADR-071): a
+    ``{ wheel, trim_cm, dir }`` snapshot of one resolved pivot turn, latched in the
+    approaching / pending / departing slots as the walk crosses a pivot node.
+
+    It is a COPY of the (frozen, shared) :class:`PivotTurnRecord` fields, NEVER a
+    reference into :attr:`PathTrackerSim._pivot_records`. The ``dir`` field is
+    stamped per-traversal after the approach hop resolves its direction; stamping
+    it onto a record shared across traversals would corrupt the table (mirror of
+    the C++ by-value ``PivotRef``). Each :meth:`from_record` call mints a fresh
+    latch, so the departing and approaching slots are always distinct objects and
+    a stamp on one never bleeds into another pivot's copy.
+
+    :ivar u: arrive-from node name.
+    :ivar v: pivot-at node name.
+    :ivar w: leave-to node name.
+    :ivar wheel: the stored FORWARD-sense pivot wheel
+        (:attr:`TurnMode.PIVOT_LEFT` / :attr:`TurnMode.PIVOT_RIGHT`); reverse-flip
+        is derived at dispatch via :func:`resolve_pivot_wheel`, never stored here.
+    :ivar trim_cm: forward over-travel ``delta`` in cm (direction-invariant).
+    :ivar dir: the direction the pivot's APPROACH hop resolved to (force-SAME
+        commits the departure to this). :attr:`Direction.AUTO` until stamped.
+    """
+
+    u: str
+    v: str
+    w: str
+    wheel: "_pipeline_config.TurnMode"
+    trim_cm: float
+    dir: "Direction" = Direction.AUTO
+
+    @classmethod
+    def from_record(cls, record: PivotTurnRecord) -> "_PivotLatch":
+        """Return a fresh by-value latch copying ``record``'s fields (``dir`` unset)."""
+        return cls(
+            u=record.u,
+            v=record.v,
+            w=record.w,
+            wheel=record.wheel,
+            trim_cm=record.trim_cm,
+        )
+
+
+@dataclass(frozen=True)
+class TakenPivot:
+    """One single-wheel pivot the sim's walk actually TOOK, with its derived state.
+
+    Exposed by :meth:`PathTrackerSim.taken_pivot` so CTPS ``track_builder`` can
+    render the pivot arc: the direction is DERIVED by the sim (force-SAME resolves
+    it on the departure hop), never recorded in the command stream (ADR-054:
+    recorder / ``trace_loader`` stay untouched). Recorded once per taken pivot,
+    keyed by the ``(u, v, w)`` turn triple, at the departure hop.
+
+    :ivar u: arrive-from node name.
+    :ivar v: pivot-at node name.
+    :ivar w: leave-to node name.
+    :ivar direction: the direction the pivot's departure was forced to
+        (== its approach direction under force-SAME).
+    :ivar wheel: the PLANTED (post-flip) pivot wheel for ``direction``, via
+        :func:`resolve_pivot_wheel` -- the single-sourced REAR L<->R flip of the
+        stored forward wheel (unchanged for FRONT).
+    :ivar trim_cm: forward over-travel ``delta`` in cm (direction-invariant).
+    """
+
+    u: str
+    v: str
+    w: str
+    direction: "Direction"
+    wheel: "_pipeline_config.TurnMode"
+    trim_cm: float
+
+
 class PathTrackerSim:
     """Mirror of ``PathTrackerClass`` (LINE + BLIND edges).
 
@@ -2585,9 +2739,23 @@ class PathTrackerSim:
         # ``_walk_hops`` (snapshot-before-overwrite). All three reset to None at
         # construction and at the start of every ``go_to`` / ``step_through`` so a
         # final-hop pivot cannot leak its trim across a goal boundary.
-        self._pending_pivot: Optional[PivotTurnRecord] = None
-        self._departing_pivot: Optional[PivotTurnRecord] = None
-        self._approaching_pivot: Optional[PivotTurnRecord] = None
+        #
+        # Each slot holds a BY-VALUE :class:`_PivotLatch` copy (#54 / ADR-071),
+        # never a reference into ``_pivot_records`` -- the copy carries a per-hop
+        # ``dir`` stamped after the approach hop resolves, and force-SAME forces the
+        # departure hop to that direction. Mirror of the firmware by-value
+        # ``PivotRef``.
+        self._pending_pivot: Optional[_PivotLatch] = None
+        self._departing_pivot: Optional[_PivotLatch] = None
+        self._approaching_pivot: Optional[_PivotLatch] = None
+
+        # Taken-pivot surface (#54 / ADR-071): each pivot the walk actually TAKES
+        # records its DERIVED direction + planted (post-flip) wheel here, keyed by
+        # the ``(u, v, w)`` turn triple, so CTPS ``track_builder`` can render the
+        # REAR arc without the direction ever entering the command stream (ADR-054).
+        # Populated at the departure hop in ``_walk_hops``; reset per goal alongside
+        # the latch so a stale cross-goal direction never lingers.
+        self._taken_pivots: Dict[Tuple[str, str, str], TakenPivot] = {}
 
         # ADR-059 blind-chain run buffer (mirror of the firmware ``_chain``).
         # Inactive until :meth:`_try_start_blind_chain` folds a >=2-hop collinear
@@ -3021,6 +3189,26 @@ class PathTrackerSim:
         """
         return self._pivot_records.get((u, v, w))
 
+    def taken_pivot(self, u: str, v: str, w: str) -> Optional[TakenPivot]:
+        """Return the DERIVED direction/wheel for a pivot the walk actually took.
+
+        Companion to :meth:`find_pivot_turn` (which returns the direction-agnostic
+        record): once the walk has passed a pivot's departure hop, this returns the
+        :class:`TakenPivot` carrying the direction force-SAME committed the pivot to
+        (#54 / ADR-071) and the PLANTED (post-flip) wheel. CTPS ``track_builder``
+        reads it to render the REAR arc -- the direction is DERIVED by the sim, never
+        recorded in the command stream (ADR-054). Populated just-in-time before the
+        departure hop's turn is yielded, so a lazy trace consumer sees a fresh entry;
+        reset per goal.
+
+        :param u: arrive-from node name.
+        :param v: pivot-at node name.
+        :param w: leave-to node name.
+        :return: the :class:`TakenPivot` for ``(u, v, w)`` if the walk took that
+            turn, else ``None`` (a not-yet-taken or non-pivot turn).
+        """
+        return self._taken_pivots.get((u, v, w))
+
     # -- ADR-036 pivot-trim (mirror of PathTracker.cpp) -----------------------
 
     def _pivot_trim_distance(self, edge) -> float:
@@ -3166,7 +3354,12 @@ class PathTrackerSim:
                 self._approaching_pivot = None
             else:
                 next_next = self._next_hop[nxt][goal_name]    # may be None
-                self._approaching_pivot = self.find_pivot_turn(current, nxt, next_next)
+                # Wrap the (frozen, shared) record in a FRESH by-value latch so the
+                # ``dir`` stamped below never mutates ``_pivot_records`` (#54).
+                record = self.find_pivot_turn(current, nxt, next_next)
+                self._approaching_pivot = (
+                    _PivotLatch.from_record(record) if record is not None else None
+                )
             self._pending_pivot = self._approaching_pivot     # carry for the NEXT hop
 
             direction = resolve_direction(
@@ -3181,24 +3374,65 @@ class PathTrackerSim:
                 line_board_count=LINE_BOARD_COUNT,
             )
 
-            # ADR-036: pivots are FRONT-only in v1 (#54). The wheel + delta are
-            # derived for forward traversal, so force FRONT on any pivot-adjacent
-            # hop -- the approach ``u->v`` (``_approaching_pivot``) or the
-            # departure ``v->w`` (``_departing_pivot``). Never silently downgrade
-            # to a counter-rotation: the author chose a single-wheel pivot for a
-            # clearance a center turn may not have. Mirrors the force-FRONT
-            # override in ``PathTracker._onPlanNextHop``.
+            # Force-SAME (#54 / ADR-071, mirror of ``PathTracker._onPlanNextHop``).
+            # A single-wheel pivot commits to the direction it APPROACHED in; its
+            # departure hop is forced to that same direction so the geometry-derived
+            # wheel + over-travel ``delta`` stay valid. This GENERALIZES the v1
+            # force-FRONT (which forced BOTH legs FRONT): the approach hop now
+            # resolves freely -- it may go REAR under ``BIDIRECTIONAL_AUTO`` -- and
+            # the departure inherits whatever the approach committed to. Under AUTO
+            # every ``|theta| > 90`` pivot resolves its two legs to OPPOSITE
+            # directions, so a naive skip-on-mismatch would silently degrade every
+            # sharp AUTO pivot to a center turn; force-SAME makes them RUN coherently.
             #
-            # This force-FRONT is the single invariant the seek/LINE overshoot
-            # trims rely on: a pivot-adjacent hop is always FRONT, so the FRONT
-            # seek branch below (and the FRONT delta-budget the validator + the
-            # firmware use) is the only one that ever sees an approaching pivot.
-            # A REAR seek therefore CANNOT carry an approaching pivot today --
-            # that is why the REAR-seek branch needs no overshoot trim. #54 (REAR
-            # pivots) must add a REAR delta-budget on the seek + LINE overshoot
-            # paths BEFORE relaxing this (ADR-044 trigger).
-            if self._departing_pivot is not None or self._approaching_pivot is not None:
-                direction = Direction.FRONT
+            # A BINDING higher-precedence override on the departure (a per-edge
+            # ``direction_override``, or a non-DEFAULT pipeline default --
+            # ``resolve_direction`` steps 1-2) that truly contradicts the committed
+            # approach direction cannot be silently overridden: it raises
+            # ``PivotDirectionMismatchError`` (the firmware hard-faults
+            # ``PIVOT_DIRECTION_MISMATCH``; the validator rejects the same case
+            # offline). Ordinary AUTO / builder rungs never contradict -- force-SAME
+            # just pins the departure's AUTO rung.
+            if self._departing_pivot is not None:
+                committed_dir = self._departing_pivot.dir
+                binding_dir = _binding_override_direction(
+                    _read_edge_dir_override(edge), cfg.direction
+                )
+                if binding_dir is not None and binding_dir != committed_dir:
+                    raise PivotDirectionMismatchError(
+                        self._departing_pivot.u,
+                        self._departing_pivot.v,
+                        self._departing_pivot.w,
+                        committed_dir,
+                        binding_dir,
+                    )
+                direction = committed_dir
+                # Taken-pivot surface: the departure hop is where the pivot
+                # ``(u, v, w)`` is actually TAKEN. Record its derived direction +
+                # PLANTED (post-flip) wheel -- ``resolve_pivot_wheel`` single-sources
+                # the REAR L<->R flip -- so CTPS ``track_builder`` can render the arc
+                # without the direction entering the command stream (ADR-054).
+                dep = self._departing_pivot
+                self._taken_pivots[(dep.u, dep.v, dep.w)] = TakenPivot(
+                    u=dep.u,
+                    v=dep.v,
+                    w=dep.w,
+                    direction=direction,
+                    wheel=resolve_pivot_wheel(dep.wheel, direction),
+                    trim_cm=dep.trim_cm,
+                )
+
+            # Stamp the (post force-SAME) resolved direction onto BOTH the approaching
+            # and pending latch copies. ``_pending_pivot = _approaching_pivot`` was
+            # taken ABOVE, before this hop's direction resolved, so both must be
+            # written -- else the departing copy stays ``AUTO`` on the next hop and
+            # force-SAME misfires (the latch-ordering trap). Stamping the FINAL
+            # resolved direction lets a CHAINED pivot inherit the forced departure
+            # direction of the pivot it shares a node with.
+            if self._approaching_pivot is not None:
+                self._approaching_pivot.dir = direction
+            if self._pending_pivot is not None:
+                self._pending_pivot.dir = direction
 
             body_heading = _body_heading_for(direction, edge_heading)
 
@@ -3250,14 +3484,12 @@ class PathTrackerSim:
                 if self._approaching_pivot is not None
                 else 0.0
             )
-            # Sensor-to-axle offset of the board that LEADS this hop; a REAR hop
-            # uses the rear board's own offset (mirrors PathTracker). Feeds the
+            # Sensor-to-axle offset (pivot overshoot budget) of the board that LEADS
+            # this hop; a REAR hop uses the rear board's own offset. Single-sourced
+            # through the ADR-071 policy twin (byte-identical to the old FRONT/REAR
+            # select -- ``direction`` is always FRONT or REAR here). Feeds the
             # classifier's seek overshoot channel.
-            axle_offset_cm = (
-                LINE_SENSOR_AXLE_OFFSET_REAR_CM
-                if direction == Direction.REAR
-                else LINE_SENSOR_AXLE_OFFSET_CM
-            )
+            axle_offset_cm = pivot_overshoot_budget_cm(direction)
 
             # `line(A)-projection(B)-line(C)` pass-through lookahead (issue #64),
             # resolved here so it is a clean classifier input (the C++ FSM hoists
@@ -3420,13 +3652,12 @@ class PathTrackerSim:
                 # next hop is already owned by the ``_pending_pivot`` latch
                 # resolved at the top of this loop. Nothing to do here.
 
-                # Dead-reckon with the axle offset of the board that LED this hop;
-                # a REAR hop uses the rear board's own offset (mirrors PathTracker).
-                overshoot_offset_cm = (
-                    LINE_SENSOR_AXLE_OFFSET_REAR_CM
-                    if direction == Direction.REAR
-                    else LINE_SENSOR_AXLE_OFFSET_CM
-                )
+                # Dead-reckon with the axle offset (pivot overshoot budget) of the
+                # board that LED this hop; a REAR hop uses the rear board's own
+                # offset. Single-sourced through the ADR-071 policy twin
+                # (byte-identical to the old FRONT/REAR select -- ``direction`` is
+                # always FRONT or REAR here).
+                overshoot_offset_cm = pivot_overshoot_budget_cm(direction)
                 # The line follower stops the chassis when the SENSOR reaches the
                 # intersection marker, but the sensor leads the wheel axle by
                 # `overshoot_offset_cm`, so the axle is still that far short of the
@@ -3567,15 +3798,18 @@ class PathTrackerSim:
                     # roll. Localization still re-anchors at the node (the seek stops
                     # ON the line; ``on_intersection`` below); only the physical
                     # displacement shrinks. This is the FRONT seek branch, so the
-                    # offset is the FRONT sensor-to-axle offset (force-FRONT guarantees
-                    # every pivot seek lands here). The ``max(0.0, ...)`` clamp mirrors
-                    # the LINE follow's degenerate-geometry guard; the firmware instead
-                    # hard-faults on ``delta > offset`` (PIVOT_TRIM_UNDERFLOW), which
-                    # the validator's delta-budget precludes for any legal sensor-regime
-                    # pivot. The approaching-pivot trim was already folded into
+                    # overshoot budget resolves to the FRONT sensor-to-axle offset via
+                    # the ADR-071 policy twin (the same ``pivot_overshoot_budget_cm``
+                    # the classifier fed its ``axle_offset_cm`` above, so the
+                    # ``offset - decision.overshoot_cm`` subtraction is self-consistent).
+                    # The ``max(0.0, ...)`` clamp mirrors the LINE follow's
+                    # degenerate-geometry guard; the firmware instead hard-faults on
+                    # ``delta > offset`` (PIVOT_TRIM_UNDERFLOW), which the validator's
+                    # delta-budget precludes for any legal sensor-regime pivot. The
+                    # approaching-pivot trim was already folded into
                     # ``decision.overshoot_cm`` by the classifier (the shared
                     # sensor-overshoot twin, clamped to the floor).
-                    offset = LINE_SENSOR_AXLE_OFFSET_CM
+                    offset = pivot_overshoot_budget_cm(direction)
                     seek_advance_cm = max(
                         0.0, distance_cm - (offset - decision.overshoot_cm)
                     )
@@ -3596,25 +3830,32 @@ class PathTrackerSim:
                     # changing what the robot is commanded to do.
                     yield (ACT_STOP_AT_LINE, distance_cm)
                 else:
-                    # Pivots are FRONT-only in v1 (ADR-036 / #54): the force-FRONT
-                    # above sets ``direction = FRONT`` whenever a pivot is active,
-                    # so a REAR seek can NEVER carry an approaching pivot and this
-                    # branch needs no overshoot trim. That invariant is documented
-                    # (and enforced) at the force-FRONT site -- not re-asserted
-                    # here, where it would be unreachable dead code. #54 (REAR
-                    # pivots) must add a REAR overshoot trim on this branch when it
-                    # relaxes the force-FRONT (see the ADR-044 trigger).
-                    #
                     # 2-board REAR stop-at-line: the rear board detects the
-                    # crossing, so the chassis re-anchors via
-                    # ``on_intersection`` (mirrors the firmware reverse seek +
-                    # ``Localization.onIntersection``; AC1). The chassis
-                    # advances backward by ``distance_cm`` to the node.
-                    # ADR-036: sensor-terminated -- no distance trim; the outgoing
-                    # carry is owned by ``_pending_pivot`` -> next hop's
-                    # ``_departing_pivot``.
-                    self._chassis.reverse(distance_cm)
+                    # crossing, so the chassis re-anchors via ``on_intersection``
+                    # (mirrors the firmware reverse seek + ``Localization.onIntersection``;
+                    # AC1). Under force-SAME (#54 / ADR-071) a pivot's approach may now
+                    # resolve REAR, so a REAR seek CAN carry an approaching pivot -- the
+                    # mirror of the FRONT branch above, applying the REAR overshoot
+                    # budget. The rear board leads in the travel direction, so shrinking
+                    # the REVERSE displacement by ``offset - decision.overshoot_cm``
+                    # lands the axle ``delta`` SHORT of the node (the arc-start pose the
+                    # pivot needs). With NO approaching pivot the trim is 0 ->
+                    # ``offset - overshoot_cm == 0`` -> the advance is the full
+                    # ``distance_cm``, so a plain REAR seek is byte-identical to before.
+                    # ADR-036: sensor-terminated -- no dead-reckon DISTANCE trim (the
+                    # crossing terminates it); the outgoing carry is owned by
+                    # ``_pending_pivot`` -> the next hop's ``_departing_pivot``.
+                    offset = pivot_overshoot_budget_cm(direction)
+                    seek_advance_cm = max(
+                        0.0, distance_cm - (offset - decision.overshoot_cm)
+                    )
+                    self._chassis.reverse(seek_advance_cm)
                     self._localization.on_intersection(nxt)
+                    # The emitted primitive carries the COMMAND distance
+                    # (``distance_cm``), NOT the trimmed physical advance -- the
+                    # firmware dispatches the full ``Drive.stopAtLine`` bound and folds
+                    # the trim into the separate overshoot channel (payload = command,
+                    # pose = trimmed; the FRONT branch's rule).
                     yield (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge, cfg))
             else:    # DispatchPrimitive.BLIND_DEAD_RECKON
                 # Dead-reckoned blind move (byte-identical to the pre-resolver
@@ -3847,6 +4088,10 @@ class PathTrackerSim:
         self._pending_pivot = None
         self._departing_pivot = None
         self._approaching_pivot = None
+        # Drop the previous goal's taken-pivot direction surface (#54 / ADR-071):
+        # each slot is repopulated just-in-time before its departure hop's turn is
+        # yielded, so clearing here only sheds stale cross-goal entries.
+        self._taken_pivots = {}
         self._chain = _ChainRun()
 
     def _try_start_blind_chain(
