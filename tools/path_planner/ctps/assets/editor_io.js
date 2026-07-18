@@ -653,10 +653,11 @@
     /**
      * Tolerantly parse the robot-local `robot.axle_offset` block (issue #165).
      * Returns a well-formed offset object, `null` (with a `console.warn`) when
-     * `data` is present but malformed, or `undefined` when the key is absent --
-     * the caller then leaves `E.state.axleOffset` untouched. Mirrors
-     * `_parseVision`'s tri-state contract, but there is no "default axle
-     * offset" to fall back to on a malformed block: an offset redefines the
+     * `data` is present but malformed, or `undefined` when the key is absent.
+     * The caller collapses BOTH non-object results to `null` (a clear): an
+     * absent axle_offset means "no offset", so an offset-free load must not
+     * retain a prior layout's offset. Unlike `_parseVision` there is no "default
+     * axle offset" to fall back to on a malformed block: an offset redefines the
      * robot-local origin (Data Model), so a bad upload drops to NO offset
      * (axle-anchored, today's render) rather than a synthesized non-zero one.
      */
@@ -707,10 +708,14 @@
         if (vision !== undefined) {
             E.state.vision = vision || E.defaultVisionCone();
         }
+        // Absent OR malformed axle_offset clears any prior offset (issue #165):
+        // unlike the vision cone (which has a boot default and always re-emits a
+        // block), an absent axle_offset means "no offset", so loading an
+        // offset-free layout must not carry a previously-loaded layout's offset
+        // into the next Save. Both `undefined` (absent) and `null` (malformed)
+        // collapse to a clear.
         var axleOffset = _parseAxleOffset(robotSection.axle_offset);
-        if (axleOffset !== undefined) {
-            E.state.axleOffset = axleOffset || null;
-        }
+        E.state.axleOffset = axleOffset || null;
         E.state.selection = null;
         // Robot bounds may have shifted -> re-fit both views, then repaint.
         E.resize();
