@@ -124,16 +124,71 @@ void renderCalMenu()
 }
 
 /**
- * @brief Cooperative tick — every module's `update()` exactly once.
+ * @brief Whether this tick must run the line-array perception updates.
+ *
+ * The three line consumers — `LineArray.update()`, `LineFollower.update()` and
+ * `Intersection.update()` — only do useful work when the follower is engaged or
+ * a `stopAtLine` seek is in flight. On a pure GYRO/RAW/SYNC move or at
+ * pre-mission idle nothing reads the line cache, so the slow Wire1 I2C read is
+ * wasted budget. `cooperativeTick()` gates those three calls on this predicate.
+ *
+ * @return `LineFollower.isEnabled() || Drive.isSeekingLine()` when the gate is
+ *         enabled; always `true` when `Config::LINE_ARRAY_TICK_GATE_ENABLED` is
+ *         `false` (the `constexpr` early-out folds the gate away, restoring the
+ *         legacy unconditional three-update path).
+ * @note Keys off the `stopAtLine` seek FSM via `Drive.isSeekingLine()`; a
+ *       `wallStop` push does NOT open the gate — it uses the encoder stall
+ *       watchdog, not the line sensor.
+ */
+static bool lineArrayNeededThisTick()
+{
+    if (!Config::LINE_ARRAY_TICK_GATE_ENABLED)
+    {
+        return true;
+    }
+    return LineFollower.isEnabled() || Drive.isSeekingLine();
+}
+
+/**
+ * @brief Cooperative tick — every module's `update()` once per tick, with the
+ *        three line-array consumers gated on demand.
  *
  * Used as the body of `loop()` and registered with `Drive.setTickCallback()`,
  * `PathTracker.setTickCallback()`, and `LineFollower.setTickCallback()` so any
- * sync-blocking drain or follow-wait keeps everyone alive — in particular
- * `LineArray.update()` runs every iteration when `LINE_ARRAY_TICK_CACHE_ENABLED`
- * is flipped on, instead of freezing to whatever was cached on entry.
+ * sync-blocking drain or follow-wait keeps everyone alive.
  *
- * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
- *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace.
+ * Line-array gate (issue #164): `LineArray.update()`, `LineFollower.update()`
+ * and `Intersection.update()` run ONLY when `lineArrayNeededThisTick()` is true
+ * (the follower is enabled or a `stopAtLine` seek is in flight). On a pure
+ * GYRO/RAW/SYNC move or at idle nothing reads the line cache, so the slow Wire1
+ * I2C read (~11 ms in cache mode) is skipped. `Config::LINE_ARRAY_TICK_GATE_ENABLED`
+ * folds the gate away when `false`. The predicate is resolved ONCE per tick into
+ * `lineNeeded` so the three calls cannot disagree within a tick.
+ *
+ * Freshness is structural, not an extra refresh: `LineArray.update()` runs FIRST
+ * among the gated three and every consumer after it, so on any needed tick the
+ * cache is refreshed at the top before any read. The dispatch-tick case relies
+ * on a LOAD-BEARING order inside `Drive::update()`: `_updateStopAtLine()` runs
+ * BEFORE `_dispatchNext()`, so a queued `stopAtLine` popped this tick arms the
+ * seek AFTER the seek FSM already ran — it consumes no line sample until the
+ * next tick, whose tick-top predicate is true and refreshes first. Do NOT
+ * reorder `_dispatchNext()` ahead of the sub-FSM updates or this guarantee
+ * breaks (host-tested).
+ *
+ * `Drive.update()` (between LineArray and the follower) and everything from
+ * `Localization.update()` onward stay UNCONDITIONAL.
+ *
+ * Reopen drain: the gate's closed->open edge arms a countdown of
+ * `Config::INTERSECTION_DEBOUNCE_TICKS` open ticks; on each, after
+ * `Intersection.update()` produced that tick's fresh sample, a read-and-clear
+ * discards any departure-junction latch so PathTracker cannot consume it as a
+ * phantom arrival. A window (not a one-shot) is required because the debounced
+ * edge fires up to `INTERSECTION_DEBOUNCE_TICKS` ticks AFTER reopen (Error
+ * Handling -> phantom junction on gate reopen).
+ *
+ * Order: [LineArray] -> Drive -> [LineFollower -> Intersection] -> Manipulator
+ *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace
+ *     (bracketed steps gated on `lineNeeded`).
  */
 void cooperativeTick()
 {
@@ -142,15 +197,69 @@ void cooperativeTick()
     // AND the SEGMENT_COUNT constant) so the loop-time benchmark stays
     // representative (issue #123).
 
-    // LineArray.update() refreshes the sensor cache for the rest of the tick
-    // WHEN Config::LINE_ARRAY_TICK_CACHE_ENABLED is true. When false, this is
-    // a no-op and the getters refresh independently (current PR #20 behaviour).
-    // See WROLineArray.h::update().
-    LineArray.update();
+    // Line-array gate (issue #164). Resolve the predicate ONCE so the three
+    // gated consumer updates below cannot disagree within a tick.
+    const bool lineNeeded = lineArrayNeededThisTick();
 
+    // Reopen-drain + gate observable state (see the doxygen block above).
+    static bool     s_prevLineNeeded   = true;   // prev-tick gate state; init true so a disabled gate never drains
+    static uint8_t  s_reopenDrainTicks = 0;      // open ticks left in the reopen-drain window
+    static uint32_t s_tickCount        = 0;      // total cooperativeTick() calls
+    static uint32_t s_lineUpdateCount  = 0;      // ticks LineArray.update() ran
+    static uint32_t s_lastGateHbMs     = 0;      // last gate-heartbeat timestamp
+    constexpr uint32_t GATE_HEARTBEAT_INTERVAL_MS = 1000;
+
+    ++s_tickCount;
+
+    if (lineNeeded)
+    {
+        // LineArray.update() refreshes the sensor cache for the rest of the tick
+        // WHEN Config::LINE_ARRAY_TICK_CACHE_ENABLED is true. When false, this is
+        // a no-op and the getters refresh independently (current PR #20 behaviour).
+        // See WROLineArray.h::update(). Runs FIRST among the gated three so the
+        // cache is fresh before any consumer reads it this tick.
+        LineArray.update();
+        ++s_lineUpdateCount;
+    }
+
+    // Unconditional: Drive drives the profile/seek/wallStop FSMs and the queue.
+    // Its `_updateStopAtLine()` sub-FSM reads the (now-fresh) cache and runs
+    // BEFORE `_dispatchNext()` — the load-bearing order the dispatch-tick
+    // freshness proof depends on. Do NOT reorder it past LineArray above.
     Drive.update();
-    LineFollower.update();
-    Intersection.update();
+
+    if (lineNeeded)
+    {
+        LineFollower.update();
+        Intersection.update();
+
+        // Reopen drain (Error Handling -> phantom junction on gate reopen).
+        // While the gate was closed over a departure junction, Intersection's
+        // _validStreak was frozen below Config::INTERSECTION_DEBOUNCE_TICKS, so
+        // the rising edge for that junction does NOT latch on the reopen tick —
+        // Intersection.update() latches it only once the streak reaches the
+        // threshold, up to INTERSECTION_DEBOUNCE_TICKS open ticks after reopen.
+        // A one-shot drain on the reopen tick alone therefore fired one debounce
+        // window too early and missed the phantom. Instead, arm a countdown on
+        // the closed->open edge and drain (read-and-clear) on EACH of the first
+        // INTERSECTION_DEBOUNCE_TICKS open ticks, after Intersection.update()
+        // produced that tick's fresh sample — the latest possible departure-
+        // marker edge lands on the last drained tick. A genuine NEXT-node
+        // arrival cannot physically occur within one debounce window of follow
+        // start, so no real edge is ever clipped.
+        if (!s_prevLineNeeded)
+        {
+            s_reopenDrainTicks = Config::INTERSECTION_DEBOUNCE_TICKS;
+        }
+        if (s_reopenDrainTicks > 0)
+        {
+            (void) Intersection.isAtIntersection();
+            --s_reopenDrainTicks;
+        }
+    }
+
+    s_prevLineNeeded = lineNeeded;
+
     Manipulator.update();
     Tasks.update();          // T8: housekeeping; no FSM in this plan
     PathTracker.update();
@@ -164,6 +273,20 @@ void cooperativeTick()
     Localization.update();
 
     Mission.update();
+
+    // Gate observable (issue #164, AC1): cumulative LineArray.update() runs vs
+    // total ticks, printed on a millis-gated cadence (no delay()). During a pure
+    // GYRO/RAW/SYNC move the numerator holds while the denominator climbs — the
+    // evidence the gate actually closes.
+    const uint32_t nowMs = millis();
+    if ((nowMs - s_lastGateHbMs) >= GATE_HEARTBEAT_INTERVAL_MS)
+    {
+        s_lastGateHbMs = nowMs;
+        Serial.print(F("[gate] la="));
+        Serial.print(s_lineUpdateCount);
+        Serial.print('/');
+        Serial.println(s_tickCount);
+    }
 
     // The calibration menu owns the OLED while open (FINDING #4): EventTrace's
     // dirty-flag repaint would clearDisplay() and paint the event ring over the
