@@ -325,7 +325,10 @@ static void test_breakaway_handoff_latches_static_to_kinetic_floor()
     turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.4f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
-    turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.9f);
+    // Second sub-threshold tick. Post-ADR-071 the yaw comes from the external gyro at whole-degree
+    // resolution, so a sub-1 deg heading reads back as 0 deg — the pre-migration 0.9x fraction now
+    // rounds up to the 1 deg breakaway threshold, so keep this step clearly under 0.5 deg.
+    turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.4f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
     // Cross the breakaway-motion threshold — the check runs BEFORE the PD step, so the SAME
@@ -334,8 +337,9 @@ static void test_breakaway_handoff_latches_static_to_kinetic_floor()
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_CREEP_PWM);
 
     // Latched: a regression back UNDER the threshold (relative to the ORIGINAL start yaw) must
-    // NOT un-set it.
-    turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.5f);
+    // NOT un-set it. (Sub-0.5 deg so the whole-degree gyro reads it as 0 deg — genuinely back
+    // under the 1 deg threshold, not merely at it.)
+    turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.4f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_CREEP_PWM);
 }
 
@@ -368,7 +372,7 @@ static void test_small_turn_breaks_away_then_settles_cleanly()
     // Moved a little but still UNDER TURN_BREAKAWAY_MOTION_DEG — the floor stays at the static
     // breakaway value. (A gentle step keeps the D term small so the command stays sub-threshold
     // and the assertion reads the floor, not the PD value.)
-    turn_harness::tickAtYaw(startYaw + 0.6f);
+    turn_harness::tickAtYaw(startYaw + 0.4f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
     // Now let the chassis move PAST the breakaway-motion threshold — the floor drops to kinetic.

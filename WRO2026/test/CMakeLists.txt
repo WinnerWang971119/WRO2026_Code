@@ -2693,6 +2693,7 @@ foreach(_yawsrc_target IN ITEMS
     test_drive_decel_floor_identity
     test_drive_hardening
     test_path_tracker_lost_line
+    test_turn_pd_integration
 )
     target_compile_definitions(${_yawsrc_target} PRIVATE
         GYRO_SCALE_DEFAULT=1.0f
