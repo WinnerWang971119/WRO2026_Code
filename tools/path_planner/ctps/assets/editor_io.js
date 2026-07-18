@@ -104,6 +104,17 @@
     }
 
     /**
+     * A schema dict for the robot-local `robot.axle_offset` block (issue #165),
+     * matching Python `AxleOffset.to_dict()` key-for-key.
+     */
+    function _axleOffsetDict(a) {
+        return {
+            forward_cm: a.forward_cm,
+            lateral_cm: a.lateral_cm,
+        };
+    }
+
+    /**
      * Serialise the current editor state to a schema_version-1 layout dict. Only
      * the dimension keys matching each object's shape are emitted (a rect never
      * carries radius_cm; a circle never carries w_cm/h_cm) -- mirroring
@@ -148,6 +159,9 @@
         };
         if (E.state.vision) {
             robotDict.vision = _visionDict(E.state.vision);
+        }
+        if (E.state.axleOffset) {
+            robotDict.axle_offset = _axleOffsetDict(E.state.axleOffset);
         }
         var layout = {
             schema_version: 1,
@@ -636,6 +650,36 @@
         };
     }
 
+    /**
+     * Tolerantly parse the robot-local `robot.axle_offset` block (issue #165).
+     * Returns a well-formed offset object, `null` (with a `console.warn`) when
+     * `data` is present but malformed, or `undefined` when the key is absent --
+     * the caller then leaves `E.state.axleOffset` untouched. Mirrors
+     * `_parseVision`'s tri-state contract, but there is no "default axle
+     * offset" to fall back to on a malformed block: an offset redefines the
+     * robot-local origin (Data Model), so a bad upload drops to NO offset
+     * (axle-anchored, today's render) rather than a synthesized non-zero one.
+     */
+    function _parseAxleOffset(data) {
+        if (data === undefined) {
+            return undefined; // no key at all -- distinct from "present but bad"
+        }
+        if (!data || typeof data !== "object") {
+            console.warn("layout: robot.axle_offset is not an object; dropping offset");
+            return null;
+        }
+        if (!_finite(data.forward_cm) || !_finite(data.lateral_cm)) {
+            console.warn(
+                "layout: robot.axle_offset.forward_cm/lateral_cm must be finite numbers; " +
+                "dropping offset");
+            return null;
+        }
+        return {
+            forward_cm: +data.forward_cm,
+            lateral_cm: +data.lateral_cm,
+        };
+    }
+
     /** Ingest a parsed-and-tolerated layout dict into the editor + repaint. */
     function _ingest(data) {
         if (!data || typeof data !== "object" || !Array.isArray(data.objects)) {
@@ -662,6 +706,10 @@
         var vision = _parseVision(robotSection.vision);
         if (vision !== undefined) {
             E.state.vision = vision || E.defaultVisionCone();
+        }
+        var axleOffset = _parseAxleOffset(robotSection.axle_offset);
+        if (axleOffset !== undefined) {
+            E.state.axleOffset = axleOffset || null;
         }
         E.state.selection = null;
         // Robot bounds may have shifted -> re-fit both views, then repaint.
