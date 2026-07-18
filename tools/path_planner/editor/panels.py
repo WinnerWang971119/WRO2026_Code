@@ -388,6 +388,7 @@ _SECTION_PIPELINE_DEFAULTS_TITLE: str = "Pipeline defaults"
 _SECTION_GLOBALS_TITLE: str = "Global knobs"
 _SECTION_NODES_LIST_TITLE: str = "Nodes"
 _SECTION_START_TITLE: str = "Start"
+_SECTION_ALIGN_TITLE: str = "Align"
 # Trailing rule character repeated after a section header to suggest a hairline.
 _HEADER_RULE_HEIGHT_PX: int = 1
 # Horizontal gap (pixels) between a collapsible header's chevron and its text.
@@ -397,6 +398,34 @@ _CHEVRON_GAP_PX: int = 4
 _GHOST_ADD_PIVOT_TEXT: str = "+ add pivot"
 # Thin border width (pixels) drawn around a ghost button at rest.
 _GHOST_BUTTON_BORDER_PX: int = 1
+
+# ---- ALIGN section (issue #161) ----
+# The "Make straight" ghost-button label (active voice; the action keeps its
+# name, matching the status line the app surfaces after a run).
+_ALIGN_MAKE_STRAIGHT_TEXT: str = "Make straight"
+# Static label for the "Axis" radio group leader.
+_ALIGN_AXIS_LABEL_TEXT: str = "Axis:"
+# Default text for the Auto radio before the app reveals a resolved axis; once
+# a selection resolves, :meth:`SidePanels.set_align_state` rewrites it to
+# ``"Auto -- X"`` / ``"Auto -- Y"`` via ``axis_label``.
+_ALIGN_AUTO_DEFAULT_LABEL: str = "Auto"
+# Readout residual line format: the max off-axis Euclidean travel in cm, at the
+# 4 dp the alignment rounds to (``ALIGN_ROUND_DP``).  ``0.0000cm`` marks the
+# already-straight no-op state.
+_ALIGN_RESIDUAL_FORMAT: str = "max off-axis %.4fcm"
+# Thin (pixels) SPINE hairline drawn around the readout box.
+_ALIGN_READOUT_BORDER_PX: int = 1
+# The AlignAxis value string for the Auto radio (the wire form to the app; the
+# ``AlignAxis`` enum itself lives in ``editor/align.py``, which this module must
+# not import).
+_ALIGN_AXIS_AUTO_VALUE: str = "auto"
+# The three fixed axis radios as ``(AlignAxis value string, label)`` pairs; the
+# Auto radio is built separately because its label is dynamic.
+_ALIGN_STATIC_AXIS_CHOICES: tuple[tuple[str, str], ...] = (
+    ("x", "X"),
+    ("y", "Y"),
+    ("fit", "Best fit"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +486,19 @@ def _theme_color(name: str, fallback: str) -> str:
     :return: The resolved ``#rrggbb`` colour string.
     """
     return getattr(theme, name, fallback)
+
+
+def _align_count_text(count: int) -> str:
+    """Return the ALIGN count-label text for *count* selected nodes.
+
+    Pluralized so the live count reads naturally at every size:
+    ``"0 nodes selected"`` / ``"1 node selected"`` / ``"6 nodes selected"``.
+
+    :param count: Number of currently selected nodes.
+    :return: The count-label caption string.
+    """
+    suffix = "" if count == 1 else "s"
+    return f"{count} node{suffix} selected"
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +759,17 @@ class SidePanels(tk.Frame):
         # New slots (wired by the app in a later task).  Defaulted to None /
         # no-op like every other slot so the panel builds standalone.
         self.on_show_shortcuts: Optional[Callable[[], None]] = None
+        # ---- ALIGN section slots (issue #161) --------------------------
+        # ``on_nodes_select`` fires on every ``<<ListboxSelect>>`` with the FULL
+        # ``EXTENDED`` selection (node names, in listbox / sorted order).  The
+        # app funnels it through its single ``_set_selection`` writer.
+        self.on_nodes_select: Optional[Callable[[list[str]], None]] = None
+        # ``on_axis_change`` fires on every axis-radio flip; ``on_align_request``
+        # fires on the ``Make straight`` button.  Both carry an ``AlignAxis``
+        # VALUE STRING (``"auto"`` / ``"x"`` / ``"y"`` / ``"fit"``) -- never the
+        # enum, since panels must not import ``editor.align``.
+        self.on_axis_change: Optional[Callable[[str], None]] = None
+        self.on_align_request: Optional[Callable[[str], None]] = None
 
         # ---- Tk variables (single source of truth for widget state) -----
         self.mode_var = tk.StringVar(value=Mode.SELECT.value)
@@ -798,6 +851,20 @@ class SidePanels(tk.Frame):
         self._blind_projection_auto_seek_var = tk.BooleanVar(value=True)
         self._field_width_mm_var = tk.StringVar(value="")
         self._field_height_mm_var = tk.StringVar(value="")
+
+        # ---- ALIGN section Tk variables (issue #161) -------------------
+        # ``_align_axis_var`` holds the operator's chosen AlignAxis value string;
+        # it is user-driven only (the app never pushes it back) so the radios use
+        # ``command=`` rather than a var trace.  The other three are display-only
+        # readout vars written by :meth:`set_align_state`.
+        self._align_axis_var = tk.StringVar(value=_ALIGN_AXIS_AUTO_VALUE)
+        self._align_auto_label_var = tk.StringVar(value=_ALIGN_AUTO_DEFAULT_LABEL)
+        self._align_count_var = tk.StringVar(value=_align_count_text(0))
+        self._align_residual_var = tk.StringVar(value="")
+        self._align_target_var = tk.StringVar(value="")
+        # The axis radios + Make-straight button, captured at build time so
+        # :meth:`set_align_state` can enable / disable the whole section as one.
+        self._align_axis_radios: list[tk.Radiobutton] = []
 
         # The model's per-edge override overlay, cached from the most recent
         # :meth:`refresh` so the inline editor / graft methods can derive an
@@ -1441,7 +1508,10 @@ class SidePanels(tk.Frame):
         self._build_node_list_and_inspector(master)
         self._build_reset_spec_panel(master)
         self._build_pivots_panel(master)
-        # EDGE OVERRIDES sits directly below Pivots, mirroring its idiom; then
+        # ALIGN (multi-node "Make straight") sits directly below Pivots and above
+        # EDGE OVERRIDES, mirroring the collapsible idiom.
+        self._build_align_panel(master)
+        # EDGE OVERRIDES sits directly below ALIGN, mirroring its idiom; then
         # PIPELINE DEFAULTS, then the (extended) Global knobs section.
         self._build_edge_overrides_panel(master)
         self._build_pipeline_defaults_panel(master)
@@ -1475,7 +1545,10 @@ class SidePanels(tk.Frame):
             list_frame,
             height=_NODE_LIST_HEIGHT,
             width=_NODE_LIST_WIDTH,
-            selectmode=tk.SINGLE,
+            # EXTENDED lets the operator pick several nodes (shift = range,
+            # ctrl = toggle) to feed the ALIGN "Make straight" action; the
+            # single-node inspector anchor stays keyed on ``_selected_node_var``.
+            selectmode=tk.EXTENDED,
             exportselection=False,
             yscrollcommand=scrollbar.set,
             background=theme.PAPER_LIGHT,
@@ -1781,6 +1854,149 @@ class SidePanels(tk.Frame):
             command=self._handle_add_pivot,
         )
         self._add_pivot_ghost_button.pack(side="left", fill="x", expand=True)
+
+    def _align_radio(
+        self,
+        master: tk.Misc,
+        *,
+        value: str,
+        text: Optional[str] = None,
+        textvariable: Optional[tk.StringVar] = None,
+    ) -> tk.Radiobutton:
+        """Return a themed axis :class:`tk.Radiobutton` for the ALIGN section.
+
+        All four axis radios share one look + wiring: they bind the shared
+        :attr:`_align_axis_var`, carry an :class:`AlignAxis` *value* string, and
+        fire :meth:`_handle_axis_change` on click.  The Auto radio passes a
+        *textvariable* (its label is dynamic); the fixed radios pass *text*.
+
+        :param master: Parent container the radio packs into (caller places it).
+        :param value: The ``AlignAxis`` value string this radio selects.
+        :param text: Static label (mutually exclusive with *textvariable*).
+        :param textvariable: Dynamic-label var (used only for the Auto radio).
+        :return: The configured, still-unplaced radio button.
+        """
+        kwargs: dict = {
+            "variable": self._align_axis_var,
+            "value": value,
+            "command": self._handle_axis_change,
+            "anchor": "w",
+            "background": theme.SURFACE,
+            "foreground": theme.INK,
+            "activebackground": theme.SURFACE,
+            "activeforeground": theme.TERRACOTTA,
+            "selectcolor": theme.SURFACE,
+            "disabledforeground": theme.INK_MUTED,
+            "highlightthickness": _FLAT_BORDER_PX,
+            "borderwidth": 0,
+            "font": self._font_ui,
+        }
+        if textvariable is not None:
+            kwargs["textvariable"] = textvariable
+        else:
+            kwargs["text"] = text
+        return tk.Radiobutton(master, **kwargs)
+
+    def _build_align_panel(self, master: tk.Misc) -> None:
+        """Create the collapsible **Align** section (issue #161).
+
+        Mirrors the EDGE OVERRIDES idiom (chevron header, hairline rule, body
+        padding).  The body holds, top to bottom: a live count caption
+        (``"N nodes selected"``), an axis radio group whose ``Auto`` label
+        reveals the resolved axis (``Auto -- X``) plus fixed ``X`` / ``Y`` /
+        ``Best fit`` choices, a SPINE-bordered readout box (max off-axis
+        residual + target coordinate), and a ``Make straight`` ghost button.
+
+        This builder wires widgets only; it never runs an alignment.  The axis
+        radios fire :attr:`on_axis_change` and the button fires
+        :attr:`on_align_request`, each with the current ``AlignAxis`` value
+        string.  The whole section is disabled until the app enables it (via
+        :meth:`set_align_state` with ``enabled=True``) at >= 2 selected nodes.
+
+        :param master: Parent inspector column.
+        """
+        body = self._collapsible_section(
+            master,
+            "align",
+            _SECTION_ALIGN_TITLE,
+            start_open=True,
+        )
+
+        # --- Live count caption ("N nodes selected"). ---
+        self._align_count_label = self._themed_label(
+            body,
+            textvariable=self._align_count_var,
+            anchor="w",
+            foreground=_theme_color("SECTION_HEADER_FG", theme.INK_MUTED),
+        )
+        self._align_count_label.pack(side="top", fill="x")
+
+        # --- Axis radio group: Auto (dynamic label) / X / Y / Best fit. ---
+        axis_row = self._themed_frame(body)
+        axis_row.pack(side="top", fill="x", pady=(4, 0))
+        self._themed_label(axis_row, text=_ALIGN_AXIS_LABEL_TEXT).pack(
+            side="left"
+        )
+        auto_radio = self._align_radio(
+            axis_row,
+            value=_ALIGN_AXIS_AUTO_VALUE,
+            textvariable=self._align_auto_label_var,
+        )
+        auto_radio.pack(side="left", padx=(_CHEVRON_GAP_PX, 0))
+        self._align_axis_radios = [auto_radio]
+
+        # The three fixed-label radios stack below the leader row so the group
+        # reads Auto / X / Y / Best fit without crowding one line.
+        for value, label in _ALIGN_STATIC_AXIS_CHOICES:
+            radio_row = self._themed_frame(body)
+            radio_row.pack(side="top", fill="x")
+            radio = self._align_radio(radio_row, value=value, text=label)
+            radio.pack(side="left", padx=(_CHEVRON_GAP_PX, 0))
+            self._align_axis_radios.append(radio)
+
+        # --- Readout box: max off-axis residual + target coordinate. ---
+        # A SPINE hairline frames the box; the two mono lines are written by
+        # :meth:`set_align_state` and blanked when ``residual_cm`` is ``None``.
+        readout = tk.Frame(
+            body,
+            background=theme.SURFACE,
+            highlightbackground=_theme_color("HAIRLINE", theme.SPINE),
+            highlightcolor=_theme_color("HAIRLINE", theme.SPINE),
+            highlightthickness=_ALIGN_READOUT_BORDER_PX,
+        )
+        readout.pack(side="top", fill="x", pady=(4, 0))
+        self._align_residual_label = self._themed_label(
+            readout,
+            textvariable=self._align_residual_var,
+            anchor="w",
+            font=self._font_mono,
+        )
+        self._align_residual_label.pack(
+            side="top", fill="x", padx=4, pady=(2, 0)
+        )
+        self._align_target_label = self._themed_label(
+            readout,
+            textvariable=self._align_target_var,
+            anchor="w",
+            font=self._font_mono,
+        )
+        self._align_target_label.pack(side="top", fill="x", padx=4, pady=(0, 2))
+
+        # --- Make straight ghost button. ---
+        button_row = self._themed_frame(body)
+        button_row.pack(side="top", fill="x", pady=(4, 0))
+        self._align_make_straight_button = self._ghost_button(
+            button_row,
+            text=_ALIGN_MAKE_STRAIGHT_TEXT,
+            command=self._handle_align_request,
+        )
+        self._align_make_straight_button.pack(
+            side="left", fill="x", expand=True
+        )
+
+        # Start disabled: the section needs >= 2 selected nodes, which the app
+        # signals via ``set_align_state(..., enabled=True)``.
+        self._set_align_controls_enabled(False)
 
     def _build_edge_overrides_panel(self, master: tk.Misc) -> None:
         """Create the collapsible **Edge overrides** section (issue #79).
@@ -2428,6 +2644,14 @@ class SidePanels(tk.Frame):
             # than the rounded display var (R6).
             self._field_mm = (float(width_mm), float(height_mm))
 
+            # Capture the FULL ``EXTENDED`` selection (names, in listbox order)
+            # BEFORE the rebuild so a pure model mutation (node nudge / undo)
+            # does not wipe a multi-node selection.  The single-node inspector
+            # anchor stays keyed on ``_selected_node_var`` (restored below).
+            previously_selected_names = [
+                self._node_listbox.get(index)
+                for index in self._node_listbox.curselection()
+            ]
             previously_selected = self._selected_node_var.get() or None
 
             # --- Node listbox: rebuild from sorted node names. ---
@@ -2435,6 +2659,13 @@ class SidePanels(tk.Frame):
             self._node_listbox.delete(0, tk.END)
             for name in sorted_names:
                 self._node_listbox.insert(tk.END, name)
+
+            # Re-highlight every previously-selected node that still exists,
+            # preserving listbox (sorted) order.  This restores the parallel
+            # multi-selection on top of the single-node inspector anchor below.
+            for name in previously_selected_names:
+                if name in model.nodes:
+                    self._node_listbox.selection_set(sorted_names.index(name))
 
             # Restore the previous selection if the node still exists.  The
             # reset-spec sub-panel tracks the selection: it is enabled +
@@ -2655,6 +2886,51 @@ class SidePanels(tk.Frame):
                 f"set_auto_create_state: mode must be 'idle' or 'preview', "
                 f"got {mode!r}"
             )
+
+    def set_align_state(
+        self,
+        count: int,
+        axis_label: str,
+        residual_cm: Optional[float],
+        target_label: str,
+        enabled: bool,
+    ) -> None:
+        """Write the **ALIGN** section readout and enable / disable its controls.
+
+        Purely a display setter driven by the app (via ``_compute_align_state``)
+        on every selection or model change; it fires no callback.
+
+        :param count: Number of selected nodes; drives the count caption
+            (``"6 nodes selected"``).
+        :param axis_label: Full label for the ``Auto`` radio, revealing the
+            resolved axis (e.g. ``"Auto -- X"``).
+        :param residual_cm: Max off-axis residual in cm, or ``None`` to blank
+            the readout box entirely.
+        :param target_label: The target-coordinate line (e.g. ``"x = 50.4867"``);
+            ignored when *residual_cm* is ``None``.
+        :param enabled: ``True`` to enable the radios + button (>= 2 selected),
+            ``False`` to grey the whole section out.
+        """
+        self._align_count_var.set(_align_count_text(count))
+        self._align_auto_label_var.set(axis_label)
+        if residual_cm is None:
+            self._align_residual_var.set("")
+            self._align_target_var.set("")
+        else:
+            self._align_residual_var.set(_ALIGN_RESIDUAL_FORMAT % residual_cm)
+            self._align_target_var.set(target_label)
+        self._set_align_controls_enabled(enabled)
+
+    def _set_align_controls_enabled(self, enabled: bool) -> None:
+        """Enable or disable the ALIGN axis radios + Make-straight button.
+
+        :param enabled: ``True`` to make the controls clickable; ``False`` to
+            grey them out (the ``< 2`` selected state).
+        """
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for radio in self._align_axis_radios:
+            radio.configure(state=state)
+        self._align_make_straight_button.configure(state=state)
 
     def set_dirty(self, dirty: bool) -> None:
         """Show or hide the title-bar unsaved-changes dot.
@@ -3214,22 +3490,51 @@ class SidePanels(tk.Frame):
     # ------------------------------------------------------------------
 
     def _handle_listbox_select(self, _event: tk.Event) -> None:
-        """Forward listbox selection changes to :attr:`on_node_select`."""
+        """Forward the FULL listbox selection to :attr:`on_nodes_select`.
+
+        The listbox is in ``EXTENDED`` mode, so the payload is every selected
+        node name in listbox (sorted) order.  The LAST-selected name is mirrored
+        into :attr:`_selected_node_var` -- the single-node inspector anchor --
+        so the coords / type / reset handlers keep editing exactly one node; an
+        empty selection clears the inspector.  The app funnels
+        ``on_nodes_select`` through its single ``_set_selection`` writer.
+        """
         if self._suppress_callbacks:
             return
         selection = self._node_listbox.curselection()
-        node_name: Optional[str]
-        if selection:
-            node_name = self._node_listbox.get(selection[0])
-            # Mirror the selection into the inspector's name variable so the
-            # combobox handler below can read it without re-querying the
-            # listbox.  (Type/coords are filled by the next ``refresh``.)
-            self._selected_node_var.set(node_name)
+        names = [self._node_listbox.get(index) for index in selection]
+        if names:
+            # The primary (inspector anchor) is the LAST-selected node, matching
+            # the app's ``_selected_node == _selected_nodes[-1]`` invariant.
+            self._selected_node_var.set(names[-1])
         else:
-            node_name = None
             self._clear_inspector()
-        if self.on_node_select is not None:
-            self.on_node_select(node_name)
+        if self.on_nodes_select is not None:
+            self.on_nodes_select(names)
+
+    def _handle_axis_change(self) -> None:
+        """Fire :attr:`on_axis_change` with the chosen ``AlignAxis`` value string.
+
+        Bound as the ``command`` on every ALIGN axis radio, so it runs only on a
+        user flip (a programmatic ``_align_axis_var`` set never invokes it).  The
+        app recomputes the readout / preview for the new axis without running an
+        alignment.
+        """
+        if self._suppress_callbacks:
+            return
+        if self.on_axis_change is not None:
+            self.on_axis_change(self._align_axis_var.get())
+
+    def _handle_align_request(self) -> None:
+        """Fire :attr:`on_align_request` with the current ``AlignAxis`` value string.
+
+        Bound as the ``Make straight`` button command; the app builds and
+        dispatches the alignment for the live selection at the chosen axis.
+        """
+        if self._suppress_callbacks:
+            return
+        if self.on_align_request is not None:
+            self.on_align_request(self._align_axis_var.get())
 
     def _handle_type_change(self, _event: tk.Event) -> None:
         """Forward type-combobox changes to :attr:`on_node_type_change`."""
