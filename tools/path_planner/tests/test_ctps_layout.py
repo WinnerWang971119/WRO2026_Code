@@ -26,7 +26,7 @@ import json
 
 import pytest
 
-from tools.path_planner.ctps.layout import LayoutError, load
+from tools.path_planner.ctps.layout import LayoutError, load, validate
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a valid, fully-populated layout dict (schema_version 1)
@@ -650,3 +650,179 @@ def test_rejects_vision_range_cm_negative():
     message = str(exc_info.value)
     assert message.startswith("ctps.layout:")
     assert "robot.vision.range_cm" in message
+
+
+# ---------------------------------------------------------------------------
+# robot.axle_offset additions (T7 -- CTPS axle-body-offset plan, AC6)
+# ---------------------------------------------------------------------------
+#
+# Exercises the layout.py boundary for the optional `robot.axle_offset` block:
+# both the `validate()` path (`_validate_axle_offset`) and the `load()` /
+# `_build_layout` construction path (`_build_axle_offset`) must agree, so a
+# layout carrying an offset round-trips byte-for-byte through
+# `load(dict).to_dict()`. TC5 below is the dual-path gate: if only `validate`
+# learned the field, `_build_layout` would silently drop `axle_offset` from
+# the built `Layout`'s `to_dict()` output.
+
+
+def _valid_axle_offset_block() -> dict:
+    """Return a fresh, valid `robot.axle_offset` block dict."""
+    return {"forward_cm": 4.0, "lateral_cm": -1.5}
+
+
+def _layout_with_axle_offset() -> dict:
+    """Return a valid layout dict carrying a `robot.axle_offset` block."""
+    data = _valid_layout_dict()
+    data["robot"]["axle_offset"] = _valid_axle_offset_block()
+    return data
+
+
+# -- TC1: axle_offset present -- to_dict() includes both keys; validates clean --
+
+
+def test_axle_offset_present_to_dict_includes_both_keys_and_validates():
+    """TC1: RobotConfig.to_dict() with axle_offset includes both keys; validate passes."""
+    data = _layout_with_axle_offset()
+
+    layout = load(copy.deepcopy(data))
+
+    assert layout.robot.axle_offset is not None
+    assert layout.robot.axle_offset.forward_cm == 4.0
+    assert layout.robot.axle_offset.lateral_cm == -1.5
+
+    out = layout.robot.to_dict()
+    assert out["axle_offset"] == {"forward_cm": 4.0, "lateral_cm": -1.5}
+
+    validate(layout.to_dict())  # must not raise
+
+
+# -- TC2: axle_offset absent -- to_dict() omits the key entirely ----------------
+
+
+def test_axle_offset_absent_to_dict_omits_key():
+    """TC2: RobotConfig.to_dict() with no axle_offset omits the key entirely.
+
+    Byte-identical to the no-offset input -- an absent offset must never gain
+    an `"axle_offset"` key (nor emit one as an explicit `None`).
+    """
+    data = _valid_layout_dict()
+    assert "axle_offset" not in data["robot"]
+
+    layout = load(copy.deepcopy(data))
+
+    assert layout.robot.axle_offset is None
+    out = layout.robot.to_dict()
+    assert "axle_offset" not in out
+    assert layout.to_dict() == data
+
+
+# -- TC3: validate() directly on a layout dict with a valid axle_offset ---------
+
+
+def test_validate_accepts_valid_axle_offset():
+    """TC3: validate() on a layout dict with a valid robot.axle_offset passes."""
+    data = _layout_with_axle_offset()
+    validate(data)  # must not raise
+
+
+# -- TC4: validate() rejects each malformed axle_offset shape, naming the path --
+
+
+def test_rejects_axle_offset_not_a_dict():
+    """TC4a: a non-dict robot.axle_offset raises naming the key path."""
+    data = _layout_with_axle_offset()
+    data["robot"]["axle_offset"] = "forward"
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset" in message
+    assert "dict" in message
+
+
+def test_rejects_axle_offset_missing_forward_cm():
+    """TC4b: robot.axle_offset missing forward_cm raises naming the missing key."""
+    data = _layout_with_axle_offset()
+    del data["robot"]["axle_offset"]["forward_cm"]
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset" in message
+    assert "forward_cm" in message
+
+
+def test_rejects_axle_offset_missing_lateral_cm():
+    """TC4b: robot.axle_offset missing lateral_cm raises naming the missing key."""
+    data = _layout_with_axle_offset()
+    del data["robot"]["axle_offset"]["lateral_cm"]
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset" in message
+    assert "lateral_cm" in message
+
+
+def test_rejects_axle_offset_non_finite_value():
+    """TC4c: a non-finite (NaN) axle_offset value raises naming the key path."""
+    data = _layout_with_axle_offset()
+    data["robot"]["axle_offset"]["forward_cm"] = float("nan")
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset.forward_cm" in message
+    assert "finite" in message
+
+
+def test_rejects_axle_offset_infinite_value():
+    """TC4c: an infinite axle_offset value raises naming the key path."""
+    data = _layout_with_axle_offset()
+    data["robot"]["axle_offset"]["lateral_cm"] = float("inf")
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset.lateral_cm" in message
+    assert "finite" in message
+
+
+def test_rejects_axle_offset_non_numeric_value():
+    """TC4d: a non-numeric axle_offset value raises naming the key path."""
+    data = _layout_with_axle_offset()
+    data["robot"]["axle_offset"]["forward_cm"] = "far"
+
+    with pytest.raises(LayoutError) as exc_info:
+        validate(data)
+
+    message = str(exc_info.value)
+    assert "robot.axle_offset.forward_cm" in message
+    assert "finite" in message
+
+
+# -- TC5 (CRITICAL -- the dual-path gate): load().to_dict() round-trips ---------
+
+
+def test_axle_offset_round_trips_through_load_to_dict_load():
+    """TC5 (dual-path gate): load(dict_with_offset).to_dict() round-trips axle_offset.
+
+    Catches a missing `_build_axle_offset` wiring in `_build_layout` -- if
+    only `validate()` learned the field, the built `Layout`'s `to_dict()`
+    would silently drop `axle_offset` even though `validate()` accepted it.
+    """
+    data = _layout_with_axle_offset()
+
+    layout = load(copy.deepcopy(data))
+
+    assert layout.robot.axle_offset is not None
+    assert layout.to_dict() == data
+
+    # Round-trip through actual JSON text, then reload -- stable second pass.
+    reloaded = load(json.loads(json.dumps(layout.to_dict())))
+    assert reloaded.to_dict() == data
