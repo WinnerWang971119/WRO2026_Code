@@ -6,19 +6,28 @@
  * `ManipBelt` drives the manipulator conveyor belt. Unlike the RC servos
  * (`ManipServo`, which has no position feedback and fakes completion with a
  * timer), the belt motor is a LEGO encoder DC motor with REAL encoder feedback,
- * so this class can move it to absolute encoder targets and confirm completion
- * from the lower MCU's rotate-done bit.
+ * so this class can move it to absolute encoder targets and confirm arrival from
+ * the encoder itself.
  *
  * It supports two move modes, selected per station in `Config::BELT_STATIONS`:
  *
  *  - **POSITION** (`Config::BeltMode::POSITION`) — for *mid* stations that have a
- *    well-defined encoder target with free travel on both sides. The vendor
- *    `rotateFor(speed, degree)` primitive is **relative** ("rotate N degrees from
- *    here"), so an absolute target is reached by reading `getDegrees()`, computing
- *    `delta = absTarget - current`, and issuing `rotateFor(sign(delta) * |moveSpeed|,
- *    |delta|)`. Completion is read from the encoder via `ChkRotateEnd(bool&)`. A
- *    bounded watchdog (`Config::BELT_MOVE_TIMEOUT_MS`) forces completion if the
- *    move stalls, so a jammed belt never hangs the drain.
+ *    well-defined encoder target with free travel on both sides. The position loop is
+ *    closed **on the R4**, in `update()`: each tick reads `getDegrees()`, computes
+ *    `err = target - current`, and drives `setSpeed()` toward it — coarse
+ *    (`Config::BELT_MOVE_SPEED`) while further than `Config::BELT_POS_SLOW_ZONE_DEG`,
+ *    then creeping (`Config::BELT_POS_CREEP_SPEED`) so it can actually stop inside
+ *    `Config::BELT_POS_TOL_DEG`. A stall detector and the wall-clock watchdog
+ *    (`Config::BELT_MOVE_TIMEOUT_MS`) both force completion, so a jammed belt never
+ *    hangs the drain.
+ *
+ *    The lower MCU's own position primitive (`rotateFor` / `ChkRotateEnd`) is
+ *    deliberately NOT used. Bench measurement on this belt
+ *    (`inoTest/belt_rotate_authority`) found it delivers only ~43% of the commanded
+ *    degrees before stopping — flat across a 5x speed sweep, with the rotate-done bit
+ *    never latching — while the very same motor tracks an R4-side loop over `setSpeed`
+ *    to within tolerance every time. It is closed vendor firmware, so the primitive is
+ *    replaced rather than repaired.
  *
  *  - **TIMED** (`Config::BeltMode::TIMED`) — for *end* stations that stall the belt
  *    against a hard mechanical stop. Commanding an encoder degree into an end-stop
@@ -98,12 +107,10 @@ public:
      * Sequence:
      *   1. `setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM)` — encoder resolution + RPM
      *      ceiling for the lower-MCU speed/position loops.
-     *   2. `setReverse(Config::BELT_MOTOR_REVERSE)` — reverse the motor power if it disagrees
-     *      with the encoder, so the closed-loop `rotateFor` (POSITION moves) completes on the
-     *      encoder instead of running away to the watchdog. Flipping the MOTOR realigns it
-     *      with a reversed encoder; the encoder-side `SetEncoderDir` does NOT work (the STM32
-     *      rotate controller ignores it — why the vendor left it commented out of setReverse).
-     *      The logical drive direction is carried separately by `Config::BELT_DIR_SIGN`.
+     *   2. `setReverse(Config::BELT_MOTOR_REVERSE)` — selects which physical travel direction
+     *      the hardware treats as a positive speed command, so `reset()`'s negative homing
+     *      command drives into the correct end-stop. The matching encoder READ frame is carried
+     *      by `Config::BELT_DIR_SIGN` (applied in `_getDegrees()` only).
      *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, `resetCounter()`,
      *      settle, then drive to MID), polled by `update()` + `delay(2)` until `isDone()`
      *      or the `Config::BELT_HOME_TIMEOUT_MS` ceiling.
@@ -120,9 +127,9 @@ public:
     bool begin()
     {
         bool ok = _setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM);
-        // Reverse the motor power if it disagrees with the encoder, so the closed-loop
-        // rotateFor completes on ChkRotateEnd instead of running away to the watchdog. The
-        // logical drive direction is then carried by BELT_DIR_SIGN.
+        // Select which physical direction the hardware calls positive, so reset()'s negative
+        // homing command drives into the correct end-stop. The encoder read frame that matches
+        // it is carried by BELT_DIR_SIGN, applied in _getDegrees() only.
         ok = _setReverse(Config::BELT_MOTOR_REVERSE) && ok;
 
         // Full home (stall to LEFT/HOME, reset, drive to MID), blocking-bounded. begin() runs
@@ -180,19 +187,23 @@ public:
     /**
      * @brief Start an absolute POSITION move to @p absDeg encoder degrees.
      *
-     * `rotateFor` is RELATIVE, so the absolute target is converted to a signed relative
-     * delta: `delta = absDeg - getDegrees()`. A near-zero delta is a no-op (already
-     * there → IDLE). Otherwise the direction is carried in the sign of the speed
-     * (`+|BELT_MOVE_SPEED|` toward FAR_END, `-|BELT_MOVE_SPEED|` toward HOME) and the
-     * magnitude is `|delta|`. The move runs non-blocking; poll `isDone()` / call
-     * `update()`.
+     * Arms the R4-side position loop and returns immediately — no drive command is issued
+     * here. A target already inside `Config::BELT_POS_TOL_DEG` is a no-op (already there →
+     * IDLE). Otherwise `update()` takes over: every tick it re-reads the position, re-derives
+     * the direction from `target - current`, and drives coarse-then-creep until the error is
+     * inside tolerance. The move runs non-blocking; poll `isDone()` / call `update()`.
      *
-     * @param absDeg Absolute encoder target, measured from the homed zero.
+     * Deriving the direction from a fresh reading each tick — rather than committing to one at
+     * issue time — is what makes the loop self-correcting: overshoot, backlash and stiction are
+     * all absorbed on the next tick.
      *
-     * @note Targets are only repeatable relative to the zero established by `home()` +
-     *       `resetCounter()`.
-     * @note The watchdog (`Config::BELT_MOVE_TIMEOUT_MS`, enforced in `update()`) bounds
-     *       this move so a stall cannot hang the drain.
+     * @param absDeg Absolute logical target (HOME = 0, FAR_END positive), measured from the
+     *               zero established by `home()` + `resetCounter()`.
+     *
+     * @note Targets are only repeatable relative to that homed zero.
+     * @note Both the stall detector and the wall-clock watchdog
+     *       (`Config::BELT_MOVE_TIMEOUT_MS`, enforced in `update()`) bound this move, so a jam
+     *       cannot hang the drain.
      */
     void beltTo(int32_t absDeg)
     {
@@ -202,16 +213,6 @@ public:
         const int32_t current = _getDegrees();
         const int32_t delta   = absDeg - current;
 
-        if (labs(delta) <= POS_DEADBAND_DEG) {
-            // Already at the target (within deadband) — nothing to do.
-            _state = State::IDLE;
-            return;
-        }
-
-        const int16_t  mag    = (int16_t)abs(Config::BELT_MOVE_SPEED);
-        const int16_t  speed  = (delta >= 0) ? mag : (int16_t)(-mag);
-        const uint16_t degree = (uint16_t)labs(delta);
-
         // TEMP bring-up telemetry: shows the actual encoder frame at move time so we can tell
         // a sign-frame bug (current reads the wrong sign) from a stale-position one.
         Serial.print(F("[ManipBelt] beltTo cur="));
@@ -219,18 +220,22 @@ public:
         Serial.print(F(" tgt="));
         Serial.print((long)absDeg);
         Serial.print(F(" delta="));
-        Serial.print((long)delta);
-        Serial.print(F(" spd="));
-        Serial.println((int)speed);
+        Serial.println((long)delta);
 
-        if (!_rotateFor(speed, degree)) {
-            Serial.println(F("[ManipBelt] beltTo: rotateFor failed"));
-            _state = State::IDLE;    // treat as done so a blocking drain does not hang
+        if (labs(delta) <= Config::BELT_POS_TOL_DEG) {
+            // Already at the target (within tolerance) — nothing to do.
+            _state = State::IDLE;
             return;
         }
 
-        _state   = State::POS_MOVE;
-        _startMs = millis();
+        // Arm the loop. No drive command is issued here: update() owns every write, so the
+        // approach/creep/stop decision is made in exactly one place against a fresh reading.
+        _target       = absDeg;
+        _lastCmd      = 0;
+        _motionRefDeg = current;
+        _state        = State::POS_MOVE;
+        _startMs      = millis();
+        _lastMotionMs = _startMs;
     }
 
     /**
@@ -334,12 +339,14 @@ public:
      *     enter **SETTLE** rather than IDLE. Any other TIMED completion returns to IDLE.
      *   - **SETTLE** — after `Config::BELT_HOME_SETTLE_MS` from the braked stall, issue the
      *     chained move via `toStation()` and enter POS_MOVE/TIMED (or IDLE if nothing was
-     *     chained). The dwell gives the lower MCU a clean tick gap to switch from the stall's
-     *     `setSpeed()` into the rotate (a same-tick stop->rotate failed to engage on hardware).
-     *   - **POS_MOVE** — read `ChkRotateEnd(bool&)`; if the lower MCU reports the rotate
-     *     is done, brake and return to IDLE. Otherwise, if `millis() - _startMs >=
-     *     Config::BELT_MOVE_TIMEOUT_MS`, the watchdog fires: brake, return to IDLE, and
-     *     emit a Serial warning (a stalled POSITION move must never hang the drain).
+     *     chained). The dwell lets the belt relax off the end-stop and the encoder reading
+     *     settle before the chained move samples it as its starting position.
+     *   - **POS_MOVE** — run one iteration of the R4-side position loop: read the position,
+     *     stop and brake if the error is inside `Config::BELT_POS_TOL_DEG`, otherwise drive
+     *     `setSpeed` toward the target at coarse or creep speed. Ends early if the belt stops
+     *     moving for `Config::BELT_POS_STALL_MS` (jam) or if `millis() - _startMs >=
+     *     Config::BELT_MOVE_TIMEOUT_MS` (watchdog); either way it brakes, returns to IDLE, and
+     *     emits a Serial warning — a stalled POSITION move must never hang the drain.
      *   - **IDLE** — no-op.
      *
      * @note Contains no `delay()`. Safe to call at any cadence.
@@ -355,10 +362,10 @@ public:
                         _resetCounter();    // re-establish the encoder zero at LEFT/HOME
                         if (_pendingStation >= 0) {
                             // A station was chained (home()): defer it to SETTLE. We just braked
-                            // the stall's setSpeed() drive, so give the lower MCU a clean tick gap
-                            // before issuing the chained move (back-to-back stop->rotate in ONE
-                            // tick is what failed on hardware — the rotate never engaged). The
-                            // dwell mirrors how ordinary moves are separated across ticks.
+                            // the stall's setSpeed() drive against a hard stop, so dwell before
+                            // the chained move samples the encoder — the belt relaxes off the
+                            // end-stop by a few degrees once the drive releases, and that
+                            // settled reading is the zero every absolute target is measured from.
                             _state   = State::SETTLE;
                             _startMs = millis();
                             break;
@@ -372,11 +379,10 @@ public:
             case State::SETTLE: {
                 if ((uint32_t)(millis() - _startMs) >= Config::BELT_HOME_SETTLE_MS) {
                     // Settled. Drive on to the chained station via toStation() — reusing the
-                    // normal path (no copy-pasted rotate math). toStation() reads getDegrees(),
-                    // but the 150 ms settle gives the lower MCU a clean gap after the reset brake
-                    // so the post-reset encoder read is stable (this replaces the old
-                    // relative-rotate-of-known-degree approach). Capture and clear the pending
-                    // station first so toStation() does not inherit a stale latch.
+                    // normal path, so there is exactly one place that turns a station into a
+                    // move. The dwell has let the belt relax off the end-stop, so the position
+                    // toStation() samples is stable. Capture and clear the pending station
+                    // first so toStation() does not inherit a stale latch.
                     const int8_t s = _pendingStation;
                     _pendingStation = -1;
                     if (s >= 0) { toStation((Config::BeltStation)s); }   // -> POS_MOVE/TIMED or IDLE
@@ -386,17 +392,58 @@ public:
             }
 
             case State::POS_MOVE: {
-                bool ended = false;
-                _chkEnd(ended);
-                if (ended) {
+                const uint32_t now = millis();
+                const int32_t  cur = _getDegrees();
+                const int32_t  err = _target - cur;
+
+                if (labs(err) <= Config::BELT_POS_TOL_DEG) {
+                    _setSpeed(0);
                     _setBrake(true);
                     _state = State::IDLE;
-                } else if ((uint32_t)(millis() - _startMs) >= Config::BELT_MOVE_TIMEOUT_MS) {
-                    // Watchdog: the encoder never reported done — assume a stall/jam and
-                    // force completion so the drain cannot hang.
+                    break;
+                }
+
+                // Stall detection measures against a reference that only advances when real
+                // motion is seen — never against the previous tick. At creep speed the belt
+                // covers well under BELT_POS_MOTION_EPS_DEG in one ~8 ms tick, so a per-tick
+                // comparison would read a healthy creep as a jam.
+                if (labs(cur - _motionRefDeg) >= Config::BELT_POS_MOTION_EPS_DEG) {
+                    _motionRefDeg = cur;
+                    _lastMotionMs = now;
+                }
+
+                const bool stalled  = (uint32_t)(now - _lastMotionMs) >= Config::BELT_POS_STALL_MS;
+                const bool timedOut =
+                    (uint32_t)(now - _startMs) >= Config::BELT_MOVE_TIMEOUT_MS;
+                if (stalled || timedOut) {
+                    // Jam or overrun. Force completion so a blocking drain cannot hang — the
+                    // belt reports done either way, matching the pre-existing watchdog contract.
+                    _setSpeed(0);
                     _setBrake(true);
                     _state = State::IDLE;
-                    Serial.println(F("[ManipBelt] update: POSITION move watchdog tripped"));
+                    Serial.print(F("[ManipBelt] update: POSITION move "));
+                    Serial.print(stalled ? F("stalled") : F("watchdog tripped"));
+                    Serial.print(F(" at "));
+                    Serial.print((long)cur);
+                    Serial.print(F(" (target "));
+                    Serial.print((long)_target);
+                    Serial.println(F(")"));
+                    break;
+                }
+
+                // Coarse until close, then creep. The creep phase is what lets the belt stop
+                // inside BELT_POS_TOL_DEG at all — see the constant's docblock.
+                const int16_t mag = (labs(err) > Config::BELT_POS_SLOW_ZONE_DEG)
+                                        ? Config::BELT_MOVE_SPEED
+                                        : Config::BELT_POS_CREEP_SPEED;
+                const int16_t cmd = (err > 0) ? mag : (int16_t)(-mag);
+
+                // Only write when the command actually changes. The lower MCU holds the last
+                // speed setpoint, and every write is a blocking SoftwareSerial round trip — so
+                // a healthy move costs three writes (coarse, creep, stop) instead of one per tick.
+                if (cmd != _lastCmd) {
+                    _setSpeed(cmd);
+                    _lastCmd = cmd;
                 }
                 break;
             }
@@ -410,8 +457,9 @@ public:
     /**
      * @brief Whether the belt is idle (no move in flight).
      * @return `true` iff the internal state machine is IDLE.
-     * @note For POSITION moves this becomes `true` when `ChkRotateEnd` reports done or
-     *       the watchdog fires; for TIMED moves when the run timer elapses.
+     * @note For POSITION moves this becomes `true` when the position error falls inside
+     *       `Config::BELT_POS_TOL_DEG`, or when the stall detector or watchdog fires; for TIMED
+     *       moves when the run timer elapses.
      */
     bool isDone() const { return _state == State::IDLE; }
 
@@ -419,9 +467,9 @@ private:
     /**
      * @brief Internal move state.
      *
-     * `IDLE` = no move; `POS_MOVE` = an absolute POSITION move issued via `rotateFor`,
-     * completion read from `ChkRotateEnd` (watchdog-bounded); `TIMED_MOVE` = a fixed-speed
-     * run (station end-stop or homing), completion by timer.
+     * `IDLE` = no move; `POS_MOVE` = an absolute POSITION move driven by the R4-side loop in
+     * `update()`, completion on position tolerance (stall- and watchdog-bounded);
+     * `TIMED_MOVE` = a fixed-speed run (station end-stop or homing), completion by timer.
      */
     enum class State : uint8_t
     {
@@ -430,10 +478,6 @@ private:
         TIMED_MOVE,
         SETTLE    ///< Dwell between the braked reset stall and the chained station move.
     };
-
-    /// @brief Encoder-degree tolerance below which a POSITION move is treated as already
-    ///        complete (avoids issuing a zero-length `rotateFor`).
-    static constexpr int32_t POS_DEADBAND_DEG = 2;
 
     const Config::BeltStationCfg* _table   = nullptr;    ///< Per-station command table (not owned).
     uint8_t                       _count   = 0;          ///< Number of entries in `_table`.
@@ -444,6 +488,12 @@ private:
     uint32_t _durMs   = 0;              ///< TIMED-move duration (ms); unused in POS_MOVE.
     bool     _resetPending = false;     ///< TIMED move is a reset stall → resetCounter() on done.
     int8_t   _pendingStation = -1;      ///< -1 = none; else a `Config::BeltStation` index to chain after the reset settles.
+
+    // --- POSITION-move loop state (POS_MOVE only) ---
+    int32_t  _target       = 0;    ///< Absolute logical target the loop is driving toward.
+    int16_t  _lastCmd      = 0;    ///< Last speed written; suppresses redundant bus writes.
+    int32_t  _motionRefDeg = 0;    ///< Position at the last CONFIRMED motion (stall reference).
+    uint32_t _lastMotionMs = 0;    ///< `millis()` at the last confirmed motion.
 
     // -------------------------------------------------------------------------------------
     // Vendor dispatch helpers.
@@ -457,77 +507,27 @@ private:
     // -------------------------------------------------------------------------------------
 
     /**
-     * @brief Issue a RELATIVE rotate (`rotateFor`) on the bound motor. Retry-once.
-     * @param speed  Signed PWM (sign carries direction).
-     * @param degree Magnitude of rotation in degrees.
-     * @return `true` if the lower MCU accepted the command.
-     */
-    bool _rotateFor(int16_t speed, uint16_t degree)
-    {
-        // Apply the belt direction sign once here so the caller's logical convention
-        // (+ toward FAR_END) holds regardless of motor wiring (see Config::BELT_DIR_SIGN).
-        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
-        bool          ok = false;
-        switch (_motorId) {
-            case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
-            case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
-            case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
-            case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
-            default: return false;
-        }
-        if (!ok) {
-            delay(1);
-            switch (_motorId) {
-                case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
-                case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
-                case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
-                case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
-                default: return false;
-            }
-        }
-        return ok;
-    }
-
-    /**
-     * @brief Read the rotate-done bit (`ChkRotateEnd`) for the bound motor.
-     *
-     * `ChkRotateEnd` is an out-param API, not a predicate return: the `bool&` it fills is
-     * the rotate-done state, while its own `bool` return only reports whether the read
-     * succeeded. On a failed read, @p isEnd is left as the caller initialised it (the
-     * caller seeds it `false`), so a transient bus error never spuriously ends the move.
-     *
-     * @param[out] isEnd Set to the rotate-done state on a successful read.
-     * @return `true` if the state was read successfully.
-     */
-    bool _chkEnd(bool& isEnd)
-    {
-        switch (_motorId) {
-            case 1: return MiniR4.M1.ChkRotateEnd(isEnd);
-            case 2: return MiniR4.M2.ChkRotateEnd(isEnd);
-            case 3: return MiniR4.M3.ChkRotateEnd(isEnd);
-            case 4: return MiniR4.M4.ChkRotateEnd(isEnd);
-            default: return false;
-        }
-    }
-
-    /**
-     * @brief Read cumulative encoder degrees for the bound motor.
+     * @brief Read the belt's LOGICAL position for the bound motor (HOME = 0, FAR_END positive).
      *
      * Routes through EncoderSource (ADR-066): the bare vendor `getDegrees()` silently returns
-     * `0` on a lower-MCU comms timeout, which would corrupt the `beltTo` position delta. The
-     * last-good cache returns the previous reading on a transient miss instead. Fallback `0`
-     * matches the post-`resetCounter()` physical zero (the belt homes to 0 at `begin()`, so the
-     * cache is warm in normal operation).
+     * `0` on a lower-MCU comms timeout, which would corrupt the position error the loop drives
+     * on. The last-good cache returns the previous reading on a transient miss instead. Fallback
+     * `0` matches the post-`resetCounter()` physical zero (the belt homes to 0 at `begin()`, so
+     * the cache is warm in normal operation).
      *
-     * @return Encoder degrees (signed); `0` for an invalid motor id or a cold-cache read miss.
+     * @return Logical position in encoder degrees; `0` for an invalid motor id or a cold-cache
+     *         read miss.
+     *
+     * @note `Config::BELT_DIR_SIGN` is applied HERE AND ONLY HERE. Applying it to the speed
+     *       commands as well would cancel it out of the loop entirely: the drive direction comes
+     *       from `target - current`, so scaling both the read and the command by the same factor
+     *       leaves the chosen direction unchanged. Read-only is what makes it a working knob.
+     * @note A stale last-good read cannot spoof arrival on its own — it also freezes the stall
+     *       reference, so a wedged bus ends the move through the stall path rather than by
+     *       reporting a false position match.
      */
     int32_t _getDegrees()
     {
-        // Route through EncoderSource for the last-good read (ADR-066), then fold the belt
-        // direction sign so getDegrees() is in the same logical frame as the speed commands
-        // (see Config::BELT_DIR_SIGN) — absolute POSITION math in beltTo() stays correct no
-        // matter how the motor + encoder are wired. An invalid id / cold-cache miss reads 0,
-        // and BELT_DIR_SIGN * 0 == 0, so the fallback is unchanged.
         const int32_t raw = EncoderSource.readDegreesOr(_motorId, 0);
         return (int32_t)(Config::BELT_DIR_SIGN * raw);
     }
@@ -539,9 +539,11 @@ private:
      */
     bool _setSpeed(int16_t speed)
     {
-        // Apply the belt direction sign once here (see Config::BELT_DIR_SIGN) so a negative
-        // speed always drives toward HOME and a positive toward FAR_END, whatever the wiring.
-        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
+        // NO sign folding here — Config::BELT_DIR_SIGN belongs to the READ only (see
+        // _getDegrees). Applying it on both sides cancels it out of every position calculation
+        // and silently turns the knob into a no-op. Which physical direction the hardware calls
+        // positive is selected by Config::BELT_MOTOR_REVERSE instead.
+        const int16_t s = speed;
         bool          ok = false;
         switch (_motorId) {
             case 1: ok = MiniR4.M1.setSpeed(s); break;
