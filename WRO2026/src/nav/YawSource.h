@@ -1,11 +1,10 @@
 /**
  * @file YawSource.h
- * @brief Sole adapter between the external gyro's raw heading and the app world frame, and the
- *        app->STM32 heading converter for the unchanged gyro-PID write path.
+ * @brief Sole adapter between the external gyro's raw heading and the app world frame.
  * @author WRO 2026
  *
  * @details
- * `YawSourceClass` is the single owner of the robot's yaw READ. The heading is now sourced from
+ * `YawSourceClass` is the single owner of the robot's yaw READ. The heading is sourced from
  * an external MXColor-protocol gyro board (I2C addr 0x22 on `Wire1`) rather than the on-board
  * STM32 IMU (ADR-074). That board packs a signed 16-bit heading into two colour registers;
  * `YawSource` owns the I2C transport, a tick-scoped cache, and a per-read dead-byte gate, and
@@ -14,26 +13,16 @@
  * (an all-zero pair = dead bus); a plausibility gate — a torn-read guard the known-good reference
  * omits — is deferred to bench verification.
  *
- * Two PHYSICALLY INDEPENDENT frame-crossing signs live at this boundary, each applied exactly
- * once (ADR-074, extending ADR-045's one-place rule to per-frame):
+ * The frame-crossing sign at this boundary is applied exactly once (ADR-074, extending
+ * ADR-045's one-place rule to per-frame): **external gyro -> app** (`readYawDeg` /
+ * `readYawDegOr`) decodes the raw bytes via `GyroDecodePolicy.h::decodeGyroYawDeg`, which folds
+ * `Config::GYRO_YAW_SIGN` into the same multiply as the scale, before the wrap. That is the SOLE
+ * application of `GYRO_YAW_SIGN` — never apply it a second time anywhere. A double application
+ * double-negates the conversion and reverses all heading math (the exact bug ADR-045 exists to
+ * prevent).
  *
- *  - **external gyro -> app** (`readYawDeg` / `readYawDegOr`): the read path decodes the raw
- *    bytes via `GyroDecodePolicy.h::decodeGyroYawDeg`, which folds `Config::GYRO_YAW_SIGN` into
- *    the same multiply as the scale, before the wrap. That is the SOLE application of
- *    `GYRO_YAW_SIGN`.
- *  - **app -> STM32 raw** (`toHwHeading`): still `appHeading * Config::IMU_YAW_SIGN`, used to
- *    convert an app-frame target into the raw-frame heading a `MoveGyro*` gyro-PID command
- *    expects. UNCHANGED — the STM32 IMU still backs the move/write path. That is the SOLE
- *    application of `IMU_YAW_SIGN`.
- *
- * The gyro and the STM32 coprocessor are two separate devices with independent handedness, so
- * `GYRO_YAW_SIGN` (read) and `IMU_YAW_SIGN` (write) are distinct constants — never collapse
- * them, and never apply either sign a SECOND time anywhere. A double application double-negates
- * the conversion and reverses all heading math (the exact bug ADR-045 exists to prevent).
- *
- * Single-owner rule: no other module reads the gyro board or applies either sign. Every
- * consumer works exclusively in the app CCW-positive frame and routes its yaw I/O through this
- * class.
+ * Single-owner rule: no other module reads the gyro board or applies the sign. Every consumer
+ * works exclusively in the app CCW-positive frame and routes its yaw I/O through this class.
  *
  * This header is intentionally LIGHT — it pulls in only `<stdint.h>` so dependents (`Drive.h`,
  * `Localization.cpp`) can include it cheaply without dragging in MatrixMiniR4 or `Config.h`. The
@@ -48,12 +37,12 @@
 
 /**
  * @brief Sole adapter over the external gyro yaw read (applies `Config::GYRO_YAW_SIGN` via the
- *        decode policy) plus the app->STM32 write converter (applies `Config::IMU_YAW_SIGN`).
+ *        decode policy).
  *
  * @note Single global instance `YawSource` (declared `extern` below, defined in the .cpp).
  *       Construct nothing else; all consumers share this instance.
- * @note No other module performs gyro yaw I/O or applies either yaw sign — see the file header
- *       and ADR-074 / ADR-045.
+ * @note No other module performs gyro yaw I/O or applies the yaw sign — see the file header and
+ *       ADR-074 / ADR-045.
  */
 class YawSourceClass
 {
@@ -141,23 +130,6 @@ public:
      *       sensible default rather than force the caller to branch on a `bool`.
      */
     double readYawDegOr(double fallback) const;
-
-    /**
-     * @brief Convert an app-frame heading into the STM32 raw-frame heading for a `MoveGyro*`
-     *        gyro-PID target.
-     *
-     * A pure sign flip: app CCW-positive heading -> STM32 raw CW-positive gyro-PID target. The
-     * app and raw frames differ by sign alone (the `Localization` offset is already folded into
-     * the app-frame value reaching here), so there is no offset term.
-     *
-     * @param appHeadingDeg App-frame (CCW-positive) heading in degrees.
-     * @return The raw-frame (CW-positive) heading: `IMU_YAW_SIGN * appHeadingDeg`, computed as a
-     *         float multiply before the cast back to `int16_t`.
-     * @note `static` — depends only on `Config::IMU_YAW_SIGN`, not on instance state. This is the
-     *       UNCHANGED app->STM32 write path (the gyro read migration, ADR-074, does not touch it);
-     *       replacing this write path is tracked separately (issue #169).
-     */
-    static int16_t toHwHeading(int16_t appHeadingDeg);
 };
 
 /// Single global instance — the sole owner of gyro yaw I/O (defined in the .cpp).

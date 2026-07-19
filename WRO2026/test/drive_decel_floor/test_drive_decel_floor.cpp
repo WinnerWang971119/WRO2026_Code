@@ -50,9 +50,9 @@
  * block comment above `test_path_tracker_passthrough_on` in CMakeLists.txt — MINUS
  * PathTracker/Localization/YawSource-as-a-consumer/routes, since this target drives `Drive`
  * directly and never touches PathTracker):
- *   - Links the REAL `Drive.cpp` + `YawSource.cpp` (Drive.cpp references
- *     `YawSource::toHwHeading` in its GYRO emit branch — the symbol must resolve even though
- *     this test's SYNC-mode moves never execute that branch at runtime) + `path_mocks.cpp`
+ *   - Links the REAL `Drive.cpp` + `YawSource.cpp` (Drive.cpp's GYRO heading-hold reads
+ *     `YawSource::readYawDeg` — the symbol must resolve even though this test's SYNC-mode moves
+ *     never execute that branch at runtime) + `path_mocks.cpp`
  *     (the facade-globals TU: `MiniR4` / `Serial` / `Serial1` / `EventTrace` / clock globals —
  *     deliberately NOT `Drive`, so it never collides with the real `Drive.cpp` that is the
  *     sole definer of the `Drive` global).

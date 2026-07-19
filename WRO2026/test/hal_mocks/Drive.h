@@ -448,8 +448,6 @@ public:
     // continuous primitives (setSpeed / stop are above, in the LineFollower surface)
     /** @brief Record-free no-op MoveSync continuous primitive. @return `0x00`. */
     uint8_t setSpeedSync(int16_t /*L*/, int16_t /*R*/) { return 0; }
-    /** @brief Record-free no-op MoveGyro continuous primitive. @return `0x00`. */
-    uint8_t forwardGyro(int16_t /*power*/) { return 0; }
 
     // fluent verbs — return recording builders (which capture verb + key arg on construction)
     /** @brief Build a distance-bounded move; records `driveDist(cm)` immediately. */

@@ -35,9 +35,6 @@
 //                            `@note` on `YawSourceClass::begin()`); only the G/R liveness pair is
 //                            authoritative.
 //   TC20 (zeroHardware)   — a successful `begin()` issues exactly one `getColor(K)` zero read.
-//   TC21 (toHwHeading)    — the UNCHANGED app->STM32 write path, kept VERBATIM from the retired
-//                            file's TC4 block: this boundary is untouched by the read migration.
-//
 // HOW THE SUT IS LINKED (see CMakeLists.txt `test_yaw_source`):
 //   - `YawSource.cpp` is compiled UNCHANGED. It pulls `<MatrixMiniR4.h>` + quoted `"Config.h"`
 //     via the `mocks/`-first `COMMON_INCLUDES`, so the mock gyro surface (`MatrixColor`, `mmL`,
@@ -60,8 +57,13 @@
 #include <cstdio>
 
 #include "src/nav/YawSource.h"
-#include "Config.h"           // Config::IMU_YAW_SIGN / GYRO_CACHE_MAX_AGE_MS + mock <Arduino.h>.
+#include "Config.h"           // Config::GYRO_CACHE_MAX_AGE_MS + mock <Arduino.h>.
 #include "MatrixMiniR4.h"     // mock: MatrixColor::mock* + mmL.mockYawDeg / mockResult.
+
+// The mock yaw bridge (hal_mocks/MatrixMiniR4.h) round-trips mmL.mockYawDeg through readYawDeg
+// with a fixed -1.0f sign (its kBridgeImuSign) — byte-identical to the retired production
+// Config::IMU_YAW_SIGN but INDEPENDENT of it, so this test survives IMU_YAW_SIGN's removal (#169).
+static constexpr double kBridgedYawSign = -1.0;
 
 static int g_failures = 0;
 
@@ -89,8 +91,8 @@ int main()
         double y  = 123.0;    // sentinel — must be overwritten on success.
         bool   ok = YawSource.readYawDeg(y);
         check(ok, "TC13: readYawDeg returns true on a bridged OK read");
-        check(y == 90.0 * Config::IMU_YAW_SIGN,
-              "TC13: bridged read equals mockYawDeg * IMU_YAW_SIGN (90 -> -90)");
+        check(y == 90.0 * kBridgedYawSign,
+              "TC13: bridged read equals mockYawDeg * bridge sign (90 -> -90)");
     }
 
     // -------------------------------------------------------------------------------------
@@ -106,8 +108,8 @@ int main()
         double y  = 0.0;
         bool   ok = YawSource.readYawDeg(y);
         check(ok, "TC13: readYawDeg returns true on a bridged OK read (negative mockYawDeg)");
-        check(y == -30.0 * Config::IMU_YAW_SIGN,
-              "TC13: bridged read equals mockYawDeg * IMU_YAW_SIGN (-30 -> +30), proves the sign");
+        check(y == -30.0 * kBridgedYawSign,
+              "TC13: bridged read equals mockYawDeg * bridge sign (-30 -> +30), proves the sign");
     }
 
     // -------------------------------------------------------------------------------------
@@ -162,7 +164,7 @@ int main()
         const bool ok3 = YawSource.readYawDeg(y3);
 
         check(ok1 && ok2 && ok3, "TC17: all three cached reads succeed");
-        check(y1 == 45.0 * Config::IMU_YAW_SIGN && y2 == y1 && y3 == y1,
+        check(y1 == 45.0 * kBridgedYawSign && y2 == y1 && y3 == y1,
               "TC17: all three cached reads return the same tick-scoped value");
         check(MatrixColor::mockDeviceReads == 1,
               "TC17: update() + 3 reads in one tick cost exactly one device sample (AC-5)");
@@ -182,7 +184,7 @@ int main()
 
         double cached = 0.0;
         check(YawSource.readYawDeg(cached), "TC18: precondition — the fresh cache serves a read");
-        check(cached == 45.0 * Config::IMU_YAW_SIGN,
+        check(cached == 45.0 * kBridgedYawSign,
               "TC18: precondition — the cached value matches the seeded mockYawDeg");
 
         // Push the mock clock strictly past the staleness backstop, then change the underlying
@@ -193,7 +195,7 @@ int main()
         double fresh = 0.0;
         const bool ok = YawSource.readYawDeg(fresh);
         check(ok, "TC18: a stale-cache read still succeeds (inline refresh)");
-        check(fresh == 60.0 * Config::IMU_YAW_SIGN,
+        check(fresh == 60.0 * kBridgedYawSign,
               "TC18: a stale cache triggers an inline refresh reflecting the NEW mockYawDeg");
         check(fresh != cached, "TC18: the refreshed value differs from the stale cached value");
     }
@@ -245,18 +247,6 @@ int main()
         check(ok, "TC20: begin() succeeds on a live device");
         check(MatrixColor::mockKReadCount == 1,
               "TC20: begin() zeroes the hardware exactly once (getColor(K))");
-    }
-
-    // -------------------------------------------------------------------------------------
-    // TC21 (toHwHeading) — app CCW-positive heading -> STM32 raw CW-positive gyro-PID target, a
-    // pure sign flip (IMU_YAW_SIGN = -1). UNCHANGED write path — kept VERBATIM from the retired
-    // file's TC4 block. int16_t compares are exact for these +/-1 signs.
-    // -------------------------------------------------------------------------------------
-    {
-        check(YawSource.toHwHeading(90) == -90, "TC21: toHwHeading(+90) == -90");
-        check(YawSource.toHwHeading(-90) == 90, "TC21: toHwHeading(-90) == +90");
-        check(YawSource.toHwHeading(0) == 0, "TC21: toHwHeading(0) == 0");
-        check(YawSource.toHwHeading(45) == -45, "TC21: toHwHeading(+45) == -45");
     }
 
     if (g_failures == 0)

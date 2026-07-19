@@ -41,7 +41,7 @@
  *     done-bit is irrelevant here (the drain is skipped while a profile is in flight).
  *   - **Turn PD controller** (`turnToYaw().setMode(...)` pre-edge turn, ADR-068): owns `_turnDone`
  *     via `_updateTurnProfile`, which runs ONE PD step per tick against `Move(L,R)` until the
- *     corrected IMU yaw read (`YawSource.readYawDeg` -> `mmL.mockYawDeg * IMU_YAW_SIGN`) has sat
+ *     corrected IMU yaw read (`YawSource.readYawDeg` -> `mmL.mockYawDeg * -1.0f`) has sat
  *     within `TURN_TOLERANCE_DEG` of the app-frame target for `Config::TURN_SETTLE_SAMPLES`
  *     CONSECUTIVE ticks — the settle debounce (Drive.cpp:1144-1153), not a single-shot check; one
  *     out-of-band sample resets the counter to 0. RETIRED by parking `mmL.mockYawDeg` at the
@@ -63,26 +63,27 @@
  * ===========================================================================================
  * CONTRACT 2 — the yaw-frame caveat (off-by-sign trap)
  * ===========================================================================================
- * The app world frame is CCW-positive; the STM32 raw frame is CW-positive. `YawSource` bridges
- * them with `Config::IMU_YAW_SIGN` (= -1) at exactly two points (ADR-045):
- *   - STM32 -> app: `readYawDeg` returns `rawYaw * IMU_YAW_SIGN`.
- *   - app -> STM32: `toHwHeading(app)` returns `app * IMU_YAW_SIGN`.
+ * The app world frame is CCW-positive; the raw gyro frame is CW-positive. The mock yaw bridge
+ * (hal_mocks/MatrixMiniR4.h) round-trips `mmL.mockYawDeg` through `YawSource::readYawDeg` with a
+ * FIXED -1.0f sign, so `readYawDeg` returns `mmL.mockYawDeg * -1.0f` (the READ path — the only
+ * frame bridge that survives issue #169; the app->STM32 write path `toHwHeading` and
+ * `Config::IMU_YAW_SIGN` were retired with the STM32 GYRO PID).
  * Consequences for scripting:
- *   - A GYRO straight-line / seek move records `MiniR4.DriveDC.lastMoveGyroDegsTarget` /
- *     `lastMoveGyroTarget` in the HARDWARE frame: `target == IMU_YAW_SIGN * appHeading`.
- *   - Scripted IMU yaw (`mmL.mockYawDeg`) is ALSO the raw/hw frame: the FSM reads it
- *     back through `YawSource` which multiplies by `IMU_YAW_SIGN` to recover the app value.
- * `expectPreTurn` takes the APP-frame target and converts via `Config::IMU_YAW_SIGN` internally
- * (parking `mmL.mockYawDeg` at the hw value), so the test reads in the app frame.
+ *   - A GYRO straight-line / seek move now runs the R4-side heading hold over `Move(L,R)` and
+ *     records NO lower-MCU gyro target (`lastMoveGyroDegsTarget` / `lastMoveGyroTarget` stay 0) —
+ *     assert the dispatched `Move(L,R)` (or the seek's `LineArray` board flip) instead.
+ *   - Scripted IMU yaw (`mmL.mockYawDeg`) is the RAW frame: the FSM reads it back through
+ *     `YawSource`, which applies the -1.0f bridge sign to recover the app value.
+ * `expectPreTurn` takes the APP-frame target and parks `mmL.mockYawDeg` at its raw value via
+ * `hwYaw(...)` (a test-local sign flip), so the test reads in the app frame.
  *
  * @note A pre-edge turn dispatches `Drive.turnToYaw(...).setMode(byte).async()`, which runs the
- *       CUSTOM TurnGyro profile (`Move(L,R)`, NOT a lower-MCU `TurnGyro`/`MoveGyroDegs`). So the
- *       turn does NOT stamp `lastMoveGyroDegsTarget`; `expectPreTurn` asserts the turn COMPLETED
- *       (Drive idle, turn-profile back to IDLE) at the scripted app yaw, not a recorded gyro
- *       target. The representative lower-MCU gyro-target assert (CONTRACT 2) belongs to the GYRO
- *       MOVE helpers (`expectBlindHop` GYRO / `expectStopAtLine`), which the test pairs with a
- *       `MiniR4.DriveDC.lastMoveGyroDegsTarget` / `lastMoveGyroTarget` check using
- *       `hwYaw(appHeading)`.
+ *       CUSTOM turn-PD profile (`Move(L,R)`, NOT a lower-MCU `TurnGyro`/`MoveGyroDegs`). Post
+ *       issue #169 a GYRO straight / seek is the SAME story — the R4 heading hold drives
+ *       `Move(L,R)` and stamps no lower-MCU gyro target. So `expectPreTurn` asserts the turn
+ *       COMPLETED (Drive idle, turn-profile back to IDLE) at the scripted app yaw, and the GYRO
+ *       MOVE helpers (`expectBlindHop` GYRO / `expectStopAtLine`) assert the dispatched `Move(L,R)`
+ *       / the seek board flip — never a recorded `lastMoveGyroDegsTarget` / `lastMoveGyroTarget`.
  *
  * ===========================================================================================
  * Production cooperative-tick order (WRO2026.ino::cooperativeTick, line 136)
@@ -121,7 +122,7 @@
 #include "src/nav/FieldMap.h"        // real — getNextHop / getEdge / findNodeByName
 #include "src/nav/Localization.h"    // real — declarePosition / onIntersection / zeroHeadingFromCurrent
 #include "src/mission/PathTracker.h"     // real — PathTrackerClass + the global `PathTracker`
-#include "src/nav/YawSource.h"       // real — YawSource.toHwHeading (static; call as YawSource.method())
+#include "src/nav/YawSource.h"       // real — YawSource.readYawDeg (static; call as YawSource.method())
 
 // -------------------------------------------------------------------------------------------
 // Mock surfaces (resolved by the hal_mocks/ + path_mocks/ -first include path). `<Arduino.h>`
@@ -323,19 +324,26 @@ inline void assertNoBypass(uint8_t a, uint8_t c)
 // World-frame helpers
 // ===========================================================================================
 
+/// @brief Test-local yaw sign the mock IMU bridge round-trips through `readYawDeg`, byte-identical
+///        to the RETIRED production `Config::IMU_YAW_SIGN` (-1.0f) but INDEPENDENT of it — so this
+///        harness survives issue #169's removal of `IMU_YAW_SIGN` from Config.
+static constexpr float kHarnessYawReadSign = -1.0f;
+
 /**
- * @brief Convert an app-frame (CCW-positive) heading to the hardware/raw (CW-positive) frame.
+ * @brief Convert an app-frame (CCW-positive) heading to the raw yaw the mock IMU bridge expects,
+ *        so a real `YawSource::readYawDeg` read recovers @p appHeadingDeg.
  *
- * @param appHeadingDeg App-frame heading the FSM commands (degrees).
- * @return The hardware-frame yaw `Config::IMU_YAW_SIGN * appHeadingDeg`, rounded to `int16_t`.
- * @note This is the SAME conversion `YawSource.toHwHeading` applies (ADR-045). Use it (a) to
- *       PARK `mmL.mockYawDeg` so a real IMU read recovers the app value, and (b) to
- *       predict the recorded `MiniR4.DriveDC.lastMoveGyroDegsTarget` of a GYRO move. CONTRACT 2:
- *       the recorded gyro target is hw-frame, so a test asserts it equals `hwYaw(appHeading)`.
+ * @param appHeadingDeg App-frame heading to park the mock at (degrees).
+ * @return The raw-frame yaw `kHarnessYawReadSign * appHeadingDeg`, rounded to `int16_t`.
+ * @note READ-frame parking ONLY. The mock yaw bridge (hal_mocks/MatrixMiniR4.h) round-trips
+ *       `mmL.mockYawDeg` through `readYawDeg` with the fixed -1.0f bridge sign, so parking the raw
+ *       value of an app heading makes the FSM's read recover that app value (CONTRACT 2). Issue
+ *       #169 retired the app->STM32 write path (`toHwHeading`) and `Config::IMU_YAW_SIGN`, so this
+ *       uses a test-local sign literal and there is no longer any GYRO lower-MCU target to predict.
  */
 inline int16_t hwYaw(int16_t appHeadingDeg)
 {
-    return YawSource.toHwHeading(appHeadingDeg);
+    return (int16_t) lroundf((float) appHeadingDeg * kHarnessYawReadSign);
 }
 
 /**
@@ -482,8 +490,9 @@ inline void driveToLineFollowEntry(const char* startName, const char* goalName,
  *
  * @note Asserts the turn actually COMPLETED: `Drive.isIdle()` and `Drive.isTurnDone()` true after
  *       the handshake (the representative observable for a turn — the turn PD controller never
- *       issues a lower-MCU `MoveGyroDegs`, so there is no `lastMoveGyroDegsTarget` to check; the
- *       gyro-target assert belongs to the GYRO MOVE helpers). @p wheelByte is accepted so the
+ *       issues a lower-MCU `MoveGyroDegs`, so there is no `lastMoveGyroDegsTarget` to check; and
+ *       post issue #169 no GYRO move stamps one either — the GYRO MOVE helpers assert the
+ *       dispatched `Move(L,R)` / the seek board flip). @p wheelByte is accepted so the
  *       signature documents the dispatched pattern and a future TurnMode-recording assert has the
  *       expected value at the call site; it is not otherwise consulted (the PD controller drives
  *       `Move(L,R)`, whose L/R sign encodes the pattern, not a recorded mode byte).
@@ -571,11 +580,11 @@ inline void expectLineHop()
  *           total). Pass the fixture edge's `distance_cm` so the test reads self-documentingly.
  *
  * @note Asserts the move completed (`Drive.isIdle()` after the handshake) — the representative
- *       observable. For a GYRO dead-reckon the test additionally folds in the lower-MCU gyro
- *       target by asserting `MiniR4.DriveDC.lastMoveGyroDegsTarget == hwYaw(appBodyHeading)`
- *       (CONTRACT 2) on the recorded dispatch BEFORE calling this (the capture survives until the
- *       next gyro move). This helper does not re-assert it because the recorded value is the
- *       SAME field the seek helper also writes.
+ *       observable. Post issue #169 a GYRO dead-reckon runs the R4 heading hold over `Move(L,R)`
+ *       (the dispatcher lowers the GYRO `driveDist` to a cooperative profile) and records NO
+ *       lower-MCU gyro target, so there is nothing extra to fold in here — completion + the
+ *       dispatched `Move(L,R)` are the observables; the retired `lastMoveGyroDegsTarget` /
+ *       `lastMoveGyroTarget` are never written.
  */
 inline void expectBlindHop(float cm)
 {

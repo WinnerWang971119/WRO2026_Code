@@ -348,7 +348,6 @@ public:
 
     // continuous primitives (setSpeed / stop are above, in the LineFollower surface)
     uint8_t setSpeedSync(int16_t /*L*/, int16_t /*R*/) { return 0; }
-    uint8_t forwardGyro(int16_t /*power*/) { return 0; }
 
     // fluent verbs
     DriveDistBuilder  driveDist(float cm) { return DriveDistBuilder{*this, cm}; }
