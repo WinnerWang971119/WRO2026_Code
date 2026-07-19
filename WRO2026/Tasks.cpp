@@ -765,16 +765,30 @@ bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 
 bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)
 {
+    PathTracker.goTo("shovel1Get").setArrivalDirection(Direction::REAR);
+    Drive.turnToYaw(90);
+    Manipulator.boxClose();
+    PathTracker.goTo("shovel1Put").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
     return true;
 }
 
 bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
 {
+    PathTracker.goTo("shovel2Get").setArrivalDirection(Direction::REAR);
+    Drive.turnToYaw(90);
+    Manipulator.boxClose();
+    PathTracker.goTo("shovel2Put").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
     return true;
 }
 
 bool TasksClass::pot(const TaskArgs& /*args*/)
 {
+    PathTracker.goTo("PotGet").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    PathTracker.goTo("PotPut").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
     return true;
 }
 
