@@ -13,7 +13,14 @@ The audit behind this file found exactly three field-sourcing gaps:
 diagnostic (fixed by T3, smoke-tested manually by T6). The remaining reads of
 the module-level :data:`~tools.path_planner.pipeline_config.PIPELINE_CONFIG`
 singleton are documented, deliberate fallbacks (default args, absent-key
-degrades) -- see the allowlist table T5 appends below this file.
+degrades) -- see the allowlist table below (TC9-TC11, T5).
+
+**TC9-TC11 (T5, near the bottom of this file)** are a static AST lint, not a
+behavioral test: it walks every ``.py`` under ``tools/path_planner/`` (minus
+``tests/``) and fails if a ``PIPELINE_CONFIG`` singleton read appears outside
+the allowlist above. It is the actual answer to "was the audit complete?" --
+TC1-TC8/TC12 only prove the three found gaps are fixed; TC9 is what proves a
+fourth one is not still sitting somewhere in the ~40-file tree.
 
 **TC1 and TC2 live in ``test_compiler.py``, not here.** T2 already added
 ``test_final_heading_after_pipeline_direction_default_matches_compile_path``
@@ -41,6 +48,7 @@ two surfaces agree. Left alone because that file is out of scope for this task.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List
@@ -591,3 +599,398 @@ def test_tc12_pass_through_heading_eligible_none_pipeline_default_falls_back_to_
         outbound_edge, False, pipeline_default=None, **common_kwargs
     )
     assert eligible_omitted_after_patch is False
+
+
+# -- TC9-TC11: AST lint scan for singleton PIPELINE_CONFIG reads (T5, AC6) -----
+#
+# TC1-TC8/TC12 above prove the three known field-sourcing gaps (#148) are
+# fixed. They do NOT stop a FOURTH site from drifting back to the module
+# singleton -- this lint is that guard, and it is the real check on whether
+# the audit that found exactly three gaps was actually complete. Two rules
+# make it trustworthy:
+#
+# * AST, not regex. ``PIPELINE_CONFIG`` appears in ~40 docstrings, comments,
+#   and error-message strings in ``validator.py`` alone (see TC11) -- a
+#   substring/regex scan would drown in false positives or need a fragile
+#   exclude-list. Only a real parse distinguishes an executable read from
+#   prose.
+# * Both node shapes are flagged, not just attribute reads. A default
+#   argument (``cfg: PipelineConfig = PIPELINE_CONFIG``) and a bare-name
+#   return (``return PIPELINE_CONFIG``) are ``ast.Name`` nodes, not
+#   ``ast.Attribute`` nodes -- an attribute-only predicate would leave 7 of
+#   the allowlist's 10 legitimate entries undetectable (dead weight) and
+#   would miss a real regression laundered through an alias
+#   (``c = PIPELINE_CONFIG; c.blind``).
+
+# Scan root: every ``.py`` under ``tools/path_planner/`` EXCEPT ``tests/`` --
+# test files legitimately monkeypatch and compare against the singleton (see
+# ``test_field_data.py:1983``, ``test_sim_pipeline_parity.py:74``, and TC12
+# above), so flagging them would be noise, not signal.
+_LINT_REPO_ROOT = Path(__file__).resolve().parents[3]
+_LINT_SCAN_ROOT = _LINT_REPO_ROOT / "tools" / "path_planner"
+_LINT_EXCLUDED_DIR = _LINT_SCAN_ROOT / "tests"
+
+#: Non-vacuity floor for the scan. ``Path.rglob`` on a NONEXISTENT directory
+#: returns an empty iterator SILENTLY, and TC9's only assertion is
+#: "no findings" -- so a wrong ``_LINT_SCAN_ROOT`` (e.g. after this file is
+#: relocated one directory deeper, changing ``parents[3]``) would make TC9
+#: pass vacuously and this guard would die without ever going red. That is
+#: precisely the silent-drift failure the guard exists to prevent, so the
+#: scan asserts it found a plausible number of files before trusting a clean
+#: result. The tree has 45 today; the floor is deliberately slack so ordinary
+#: churn never trips it, while a resolution bug (which yields 0) always does.
+_LINT_MIN_SCANNED_FILES = 20
+
+# The exact post-fix legitimate set, encoded verbatim from the plan's
+# Contracts -> Naming table: (repo-relative path, enclosing qualified
+# function name) pairs. Line-number-independent by construction, so it
+# survives edits elsewhere in the file. A ``None`` function name allowlists
+# the WHOLE file -- used only for ``pipeline_config.py``, which defines the
+# singleton itself (its own ``PIPELINE_CONFIG = PipelineConfig()`` at module
+# scope is a ``Store``, never flagged -- see the visitor docstring below) and
+# its own documented absent-key fallback inside
+# ``PipelineConfig.from_field_data``.
+#
+# Qualified names below are shaped like Python's own ``__qualname__``: dotted
+# through enclosing scopes, with a literal ``<locals>`` segment inserted
+# wherever the immediately enclosing scope is a FUNCTION (never for a class or
+# the module) -- precisely what a function-name-stack visitor produces
+# naturally, with no special-casing.
+#
+# Exception: the visitor overrides neither ``visit_Lambda`` nor the
+# comprehension scopes, so a read inside a lambda or a comprehension is
+# attributed to the nearest enclosing NAMED function rather than to
+# ``<locals>.<lambda>``. The effect is narrow and one-directional -- it can
+# only widen an ALREADY-allowlisted function's suppression to a lambda nested
+# inside it, never suppress a read in a function that is not on the list.
+#
+# The six ``sim/runtime.py`` entries are all default-argument reads
+# (``cfg: PipelineConfig = PIPELINE_CONFIG``). The default expression
+# evaluates exactly once, at module-IMPORT time, at MODULE scope -- but the
+# ``Name`` node for it is a syntactic child of the ``FunctionDef`` it
+# defaults for, and this visitor pushes the enclosing-scope stack before
+# descending into ``node.args`` (see ``_visit_scoped`` below), so the
+# finding is attributed to the function being defined, not to the module.
+# That is a deliberate design choice, not an accident: it is exactly what
+# makes these 6 entries encodable at all (a module-scope-only allowlist could
+# not distinguish "this file's default-arg fallbacks" from "an actual
+# module-level PIPELINE_CONFIG read"), and it is verified empirically below
+# -- every one of the 10 entries is exercised by scanning the real tree
+# (confirmed by hand against a probe run before this file was written: zero
+# post-allowlist findings, zero unused/dead allowlist entries).
+_LINT_ALLOWLIST: frozenset[tuple[str, str | None]] = frozenset(
+    {
+        # Narrower than the plan's table, which allowlisted this file WHOLE.
+        # The file's only singleton READ is from_field_data's absent-key
+        # fallback (its module-scope ``PIPELINE_CONFIG = PipelineConfig()`` is
+        # a Store, never flagged), so pinning the function costs nothing today
+        # and stops a genuinely drifted NEW read elsewhere in the file from
+        # being waved through -- the widest hole in the original table.
+        ("tools/path_planner/pipeline_config.py", "PipelineConfig.from_field_data"),
+        ("tools/path_planner/sim/runtime.py", "resolve_speed"),
+        ("tools/path_planner/sim/runtime.py", "resolve_blind_mode"),
+        ("tools/path_planner/sim/runtime.py", "resolve_line_follow_mode"),
+        ("tools/path_planner/sim/runtime.py", "_pass_through_heading_eligible"),
+        ("tools/path_planner/sim/runtime.py", "PathTrackerSim.resolve_speed"),
+        ("tools/path_planner/sim/runtime.py", "PathTrackerSim.resolve_blind_mode"),
+        ("tools/path_planner/sim/runtime.py", "PathTrackerSim.resolve_line_follow_mode"),
+        (
+            "tools/path_planner/validator.py",
+            "_validate_pivot_turns.<locals>._pipeline_direction_default",
+        ),
+        (
+            "tools/path_planner/validator.py",
+            "_validate_pivot_turns.<locals>._pipeline_cfg",
+        ),
+    }
+)
+
+
+class _PipelineConfigSingletonVisitor(ast.NodeVisitor):
+    """Collect every disallowed ``PIPELINE_CONFIG`` singleton READ.
+
+    Maintains a stack of ``(scope_kind, name)`` for every enclosing
+    ``def``/``async def``/``class``, so each finding carries a
+    ``__qualname__``-shaped enclosing function name (e.g.
+    ``_validate_pivot_turns.<locals>._pipeline_direction_default`` or
+    ``PathTrackerSim.resolve_speed``) -- exactly what
+    :data:`_LINT_ALLOWLIST` keys on.
+
+    Flags BOTH node shapes; an attribute-only predicate would leave most of
+    the allowlist dead and miss a real regression laundered through an alias:
+
+    (a) ``ast.Name`` with ``id == "PIPELINE_CONFIG"`` in a ``Load`` context.
+        ``Store`` is skipped deliberately -- it is the singleton's own
+        definition (``PIPELINE_CONFIG = PipelineConfig()``) in
+        ``pipeline_config.py``, not a read. Catches default args
+        (``cfg: PipelineConfig = PIPELINE_CONFIG``), ``return
+        PIPELINE_CONFIG``, and aliasing (``c = PIPELINE_CONFIG; c.blind`` --
+        the alias's own RHS ``Name`` is what gets flagged).
+    (b) ``ast.Attribute`` with ``attr == "PIPELINE_CONFIG"`` -- the dotted
+        ``_pipeline_config.PIPELINE_CONFIG.direction`` form in
+        ``sim/runtime.py``'s ``_pass_through_heading_eligible``, where the
+        singleton is reached through a module attribute, never as a bare
+        ``Name`` at all, so predicate (a) alone would miss it.
+
+    ``from ... import PIPELINE_CONFIG`` produces no ``Name`` node at all
+    (import aliases are ``ast.alias`` nodes, not ``ast.Name``), so a bare
+    import is never flagged. That is intentional: an import with no
+    subsequent read is dead code, not a violation of this guard.
+    """
+
+    def __init__(self) -> None:
+        self._scope_stack: List[tuple[str, str]] = []
+        self.findings: List[tuple[int, str]] = []  # (lineno, qualname)
+
+    def _current_qualname(self) -> str:
+        """Render the enclosing-scope stack in ``__qualname__`` shape."""
+        parts: List[str] = []
+        previous_kind: str | None = None
+        for kind, name in self._scope_stack:
+            if previous_kind == "function":
+                parts.append("<locals>")
+            parts.append(name)
+            previous_kind = kind
+        return ".".join(parts)
+
+    def _visit_scoped(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+        kind: str,
+    ) -> None:
+        self._scope_stack.append((kind, node.name))
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # Pushed BEFORE generic_visit descends into node.args, so a default
+        # argument's Name node is attributed to this function -- see the
+        # class docstring's note on the six sim/runtime.py entries.
+        self._visit_scoped(node, "function")
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_scoped(node, "function")
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_scoped(node, "class")
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == "PIPELINE_CONFIG" and isinstance(node.ctx, ast.Load):
+            self.findings.append((node.lineno, self._current_qualname()))
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr == "PIPELINE_CONFIG":
+            self.findings.append((node.lineno, self._current_qualname()))
+        self.generic_visit(node)
+
+
+def _lint_allowlisted(repo_relative_path: str, qualname: str) -> bool:
+    """True iff ``(repo_relative_path, qualname)`` is a documented fallback."""
+    if (repo_relative_path, None) in _LINT_ALLOWLIST:
+        return True
+    return (repo_relative_path, qualname) in _LINT_ALLOWLIST
+
+
+def _lint_format_finding(repo_relative_path: str, lineno: int, qualname: str) -> str:
+    """Render one finding.
+
+    MUST name the offending ``file:line`` and MUST contain the literal
+    substring ``PipelineConfig.from_field_data`` so the fix is discoverable
+    from the assertion failure alone, with no need to open this module (AC6).
+    """
+    location = f"{repo_relative_path}:{lineno}"
+    enclosing = qualname if qualname else "<module scope>"
+    return (
+        f"{location} reads the PIPELINE_CONFIG singleton inside {enclosing}, "
+        "outside the documented lint allowlist -- use "
+        "PipelineConfig.from_field_data(field_data) instead (issue #148)."
+    )
+
+
+def _lint_scan_source(source: str, repo_relative_path: str) -> List[tuple[int, str]]:
+    """Parse ``source`` and return non-allowlisted ``(lineno, qualname)`` findings.
+
+    Shared by the real-tree scan (:func:`_lint_scan_tree`, TC9) and the
+    synthetic sources TC10/TC11 build inline, so every test exercises the
+    identical visitor + allowlist logic -- no separate "test-only" scan path
+    to drift out of sync with the real one.
+
+    An unparseable source fails LOUDLY, naming the file, rather than being
+    silently skipped -- a skipped file is a hole in the guard, not a clean
+    result.
+    """
+    try:
+        tree = ast.parse(source, filename=repo_relative_path)
+    except SyntaxError as exc:
+        raise AssertionError(
+            f"pipeline_config lint: could not parse {repo_relative_path}: {exc}"
+        ) from exc
+    visitor = _PipelineConfigSingletonVisitor()
+    visitor.visit(tree)
+    return [
+        (lineno, qualname)
+        for lineno, qualname in visitor.findings
+        if not _lint_allowlisted(repo_relative_path, qualname)
+    ]
+
+
+def _lint_iter_scan_files() -> List[Path]:
+    """Every ``.py`` under ``tools/path_planner/``, excluding ``tests/``.
+
+    Asserts the scan root resolved to a real directory holding a plausible
+    number of files BEFORE returning. Without this the guard can fail closed:
+    ``rglob`` on a nonexistent path returns an empty iterator silently, TC9's
+    "no findings" assertion then holds vacuously, and the lint is dead while
+    CI stays green -- the same silent drift the lint exists to catch. See
+    :data:`_LINT_MIN_SCANNED_FILES`.
+    """
+    assert _LINT_SCAN_ROOT.is_dir(), (
+        f"pipeline_config lint: scan root {_LINT_SCAN_ROOT} is not a directory "
+        "-- _LINT_REPO_ROOT resolved wrong (did this test file move? it uses "
+        "Path(__file__).parents[3]). The scan would silently find nothing and "
+        "TC9 would pass vacuously."
+    )
+    paths = sorted(
+        path
+        for path in _LINT_SCAN_ROOT.rglob("*.py")
+        if _LINT_EXCLUDED_DIR not in path.parents
+    )
+    assert len(paths) >= _LINT_MIN_SCANNED_FILES, (
+        f"pipeline_config lint: only {len(paths)} file(s) under "
+        f"{_LINT_SCAN_ROOT}, below the non-vacuity floor of "
+        f"{_LINT_MIN_SCANNED_FILES}. Either the scan root is wrong or the tree "
+        "shrank drastically; a clean result here would be meaningless."
+    )
+    return paths
+
+
+def _lint_scan_tree() -> List[str]:
+    """Scan the real post-fix tree; return formatted findings (empty == clean)."""
+    messages: List[str] = []
+    for path in _lint_iter_scan_files():
+        repo_relative_path = path.relative_to(_LINT_REPO_ROOT).as_posix()
+        source = path.read_text(encoding="utf-8")
+        for lineno, qualname in _lint_scan_source(source, repo_relative_path):
+            messages.append(_lint_format_finding(repo_relative_path, lineno, qualname))
+    return messages
+
+
+def test_tc9_lint_scan_over_post_fix_tree_yields_zero_findings() -> None:
+    """TC9: the scan over the REAL post-fix ``tools/path_planner/`` tree is clean.
+
+    This is the actual audit-completeness check (AC6): TC1-TC8/TC12 prove the
+    three T1-T3 fixes are correct, but only this whole-tree scan proves no
+    site OUTSIDE the allowlist reads the singleton -- including files this
+    plan never touched (``ctps/``, ``editor/``, ``sim/parity.py``,
+    ``header_writer.py``, ``field_data.py``, ...).
+
+    If this reddens on a site the allowlist does not cover, that means the
+    audit missed a real site: either a genuine 4th field-sourcing defect, or
+    a legitimate fallback the plan's Naming table missed. Either way, the fix
+    is to investigate and (if legitimate) extend :data:`_LINT_ALLOWLIST` with
+    a written justification -- never to loosen the visitor's node predicate.
+    """
+    findings = _lint_scan_tree()
+    assert findings == [], "\n".join(findings)
+
+
+def test_tc10_lint_flags_singleton_attribute_read_outside_allowlist() -> None:
+    """TC10: a synthetic ``PIPELINE_CONFIG.blind`` read outside the allowlist
+    is flagged exactly once, with a message naming the line number and citing
+    the fix.
+
+    A negative-path CONTENT assertion, not just "the scan found something":
+    proves the finding is attributed to the RIGHT line and enclosing function,
+    and that the rendered message is actionable on its own (AC6 requires the
+    failure message to name ``file:line`` AND contain the literal substring
+    ``PipelineConfig.from_field_data``).
+    """
+    source = (
+        "def _not_on_the_allowlist():\n"
+        "    x = PIPELINE_CONFIG.blind\n"
+        "    return x\n"
+    )
+    findings = _lint_scan_source(source, "tools/path_planner/_tc10_synthetic.py")
+
+    assert len(findings) == 1
+    lineno, qualname = findings[0]
+    assert lineno == 2
+    assert qualname == "_not_on_the_allowlist"
+
+    message = _lint_format_finding(
+        "tools/path_planner/_tc10_synthetic.py", lineno, qualname
+    )
+    assert "tools/path_planner/_tc10_synthetic.py:2" in message
+    assert "PipelineConfig.from_field_data" in message
+
+
+def test_tc11_lint_ignores_docstring_and_comment_mentions() -> None:
+    """TC11: ``PIPELINE_CONFIG`` mentioned ONLY in a docstring and a comment
+    yields zero findings -- this is what proves the AST walk beats a regex.
+
+    A regex for ``PIPELINE_CONFIG\\.\\w+`` (or even a bare substring check)
+    would match both lines below. The AST walk does not, because neither a
+    docstring (an ``ast.Constant`` string literal, not a ``Name``/``Attribute``
+    node) nor a comment (not part of the AST at all -- the tokenizer discards
+    it before parsing) is a node this visitor's predicates can match.
+    """
+    source = (
+        '"""Module docstring mentioning PIPELINE_CONFIG.blind for prose only."""\n'
+        "\n"
+        "def _uses_the_name_only_in_prose():\n"
+        '    """See PIPELINE_CONFIG.blind for background -- not a real read."""\n'
+        "    # PIPELINE_CONFIG.blind is read at C++ dispatch time, not here.\n"
+        "    return 42\n"
+    )
+    findings = _lint_scan_source(source, "tools/path_planner/_tc11_synthetic.py")
+    assert findings == []
+
+
+def test_tc9b_lint_fails_loudly_on_an_unparseable_file() -> None:
+    """TC9b: an unparseable source raises, naming the file -- never skipped.
+
+    The plan's Error Handling section calls this out explicitly: "Lint
+    encounters an unparseable ``.py`` file: fail the test loudly with the
+    filename rather than skipping it. A silently-skipped file is a hole in the
+    guard." A ``try/except SyntaxError: continue`` would let a drifted site
+    hide behind an unrelated syntax error, so the behavior is pinned here
+    rather than left to inspection (issue #148).
+    """
+    with pytest.raises(AssertionError) as excinfo:
+        _lint_scan_source("def broken(:\n", "tools/path_planner/_tc9b_synthetic.py")
+
+    message = str(excinfo.value)
+    assert "tools/path_planner/_tc9b_synthetic.py" in message
+    assert "could not parse" in message
+
+
+def test_tc9c_scan_tree_wires_the_formatter_end_to_end() -> None:
+    """TC9c: ``_lint_scan_tree`` really walks files and formats findings.
+
+    TC9 asserts the tree is CLEAN and TC10 calls :func:`_lint_format_finding`
+    directly, so neither one exercises the wiring BETWEEN the file walk and the
+    formatter -- a scan that silently visited nothing would satisfy both. This
+    pins the two halves that TC9's green result depends on: the walk yields a
+    plausible file set (including files this plan never touched), and every
+    scanned path is expressed relative to the repo root, which is what makes a
+    finding's ``file:line`` clickable (issue #148).
+    """
+    scanned = _lint_iter_scan_files()
+
+    # The walk is non-vacuous and reaches beyond the three files T1-T3 touched.
+    relative = {path.relative_to(_LINT_REPO_ROOT).as_posix() for path in scanned}
+    assert "tools/path_planner/compiler.py" in relative
+    assert "tools/path_planner/sim/runtime.py" in relative
+    assert "tools/path_planner/header_writer.py" in relative
+    assert "tools/path_planner/ctps/track_builder.py" in relative
+
+    # ...and no test file leaks in (they may read the singleton legitimately).
+    assert not [name for name in relative if "/tests/" in name]
+
+    # The formatter's message shape is what a reader acts on: file:line plus
+    # the fix. Built from the same helpers _lint_scan_tree composes.
+    formatted = _lint_format_finding("tools/path_planner/compiler.py", 42, "compile_path")
+    assert "tools/path_planner/compiler.py:42" in formatted
+    assert "compile_path" in formatted
+    assert "PipelineConfig.from_field_data" in formatted
