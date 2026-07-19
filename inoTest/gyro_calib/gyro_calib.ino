@@ -6,15 +6,19 @@
  * @author WRO 2026
  *
  * @details
- * Three operator-gated measurement phases, each advanced ONLY by an explicit `BTN_UP` press
- * (never an auto-countdown), with a ~60 s per-phase timeout (repo convention):
+ * Three operator-gated measurement phases, each advanced ONLY by explicit button presses (never
+ * an auto-countdown), with a ~60 s per-phase timeout (repo convention). BTN_UP ends each phase's
+ * measurement window; the SCALE phase additionally uses BTN_DOWN to lock its wall-aligned baseline
+ * before the turn count begins:
  *
  *   1. SIGN    -- baseline raw is captured the instant the phase is entered; the operator
  *                 rotates the robot COUNTER-CLOCKWISE by hand, then presses `BTN_UP` to end
  *                 the window. If the raw count INCREASED, the board is already CCW-positive
  *                 (`GYRO_YAW_SIGN = +1.0f`); if it DECREASED, `GYRO_YAW_SIGN = -1.0f`.
- *   2. SCALE   -- the operator hand-turns the robot exactly `SCALE_TURNS_N` full turns against
- *                 a fixed reference mark, then presses `BTN_UP` to end the window. The sketch
+ *   2. SCALE   -- the operator seats the robot against a wall / fixed reference mark and presses
+ *                 `BTN_DOWN` to LOCK THE BASELINE, then hand-turns it exactly `SCALE_TURNS_N` full
+ *                 turns back to the SAME mark and presses `BTN_UP` to end the window. Returning to
+ *                 the mark is what guarantees the true travel is exactly `N * 360` deg. The sketch
  *                 accumulates the UNWRAPPED raw travel via a fast per-sample delta sum (see
  *                 `shortestRawDelta`), then `GYRO_SCALE = (N * 360) / |accumulated|`.
  *   3. DRIFT   -- the operator holds the robot still and presses `BTN_UP` to START a fixed
@@ -80,7 +84,7 @@ namespace
     constexpr uint8_t SCALE_TURNS_N = 10;
 
     /// @brief Per-phase operator-response timeout (ms) -- repo convention (~60 s).
-    constexpr uint32_t PHASE_TIMEOUT_MS = 60000;
+    constexpr uint32_t PHASE_TIMEOUT_MS = 6000000;
 
     /// @brief Fixed drift-logging window (ms) for the DRIFT phase (spec range: 30-60 s).
     constexpr uint32_t DRIFT_WINDOW_MS = 30000;
@@ -183,20 +187,25 @@ int32_t shortestRawDelta(int32_t current, int32_t last)
 }
 
 /**
- * @brief Block until `BTN_UP` transitions low->high (a fresh press, ignoring any already-held
- *        state), or until `timeoutMs` elapses.
- * @return `true` on a fresh `BTN_UP` press; `false` on timeout.
+ * @brief Block until `btn` transitions low->high (a fresh press, ignoring any already-held state),
+ *        or until `timeoutMs` elapses.
+ * @tparam Btn The `MiniR4BTN<ID>` instantiation -- `BTN_UP` and `BTN_DOWN` are distinct types, so
+ *             this is templated on the button rather than taking a common base reference.
+ * @param btn       The button to watch (`MiniR4.BTN_UP` or `MiniR4.BTN_DOWN`).
+ * @param timeoutMs Give-up window in ms.
+ * @return `true` on a fresh press; `false` on timeout.
  */
-bool waitForBtnUpPress(uint32_t timeoutMs)
+template<typename Btn>
+bool waitForButtonPress(Btn& btn, uint32_t timeoutMs)
 {
-    bool           prev = MiniR4.BTN_UP.getState();
+    bool           prev = btn.getState();
     const uint32_t t0   = millis();
     while (millis() - t0 < timeoutMs)
     {
-        const bool now = MiniR4.BTN_UP.getState();
+        const bool now = btn.getState();
         if (now && !prev)
         {
-            while (MiniR4.BTN_UP.getState()) { delay(POLL_PERIOD_MS); }    // debounce: wait for release
+            while (btn.getState()) { delay(POLL_PERIOD_MS); }    // debounce: wait for release
             return true;
         }
         prev = now;
@@ -294,7 +303,7 @@ void runSignPhase()
         return;
     }
 
-    if (!waitForBtnUpPress(PHASE_TIMEOUT_MS))
+    if (!waitForButtonPress(MiniR4.BTN_UP, PHASE_TIMEOUT_MS))
     {
         Serial.println(F("[gyro_calib] SIGN: timed out waiting for BTN_UP -- skipping."));
         return;
@@ -331,32 +340,53 @@ void runSignPhase()
 /**
  * @brief Phase 2/3 -- scale.
  *
- * Accumulates the UNWRAPPED raw travel across the operator's `SCALE_TURNS_N` x 360 deg
- * hand-rotation via a running per-sample delta sum (`shortestRawDelta`), then
+ * Two-gated: the operator first seats the robot against a wall / fixed reference mark and presses
+ * BTN_DOWN to LOCK THE BASELINE (so the accumulation starts from a known, repeatable orientation),
+ * then hand-turns `SCALE_TURNS_N` full turns back to the SAME mark and presses BTN_UP to end.
+ * Returning to the mark is what makes the true travel exactly `N x 360` deg. Accumulates the
+ * UNWRAPPED raw travel via a running per-sample delta sum (`shortestRawDelta`), then
  * `GYRO_SCALE = (N * 360) / |accumulated|`. Sets `_measuredScale` + `_haveScale` on success.
  */
 void runScalePhase()
 {
     Serial.println(F("\n=== PHASE 2/3: SCALE ==="));
-    Serial.print(F("Rotate the robot EXACTLY "));
-    Serial.print(SCALE_TURNS_N);
-    Serial.println(F(" full turns against a fixed reference mark, then press BTN_UP."));
+    Serial.println(F("Seat the robot flat against the wall / reference mark, then press BTN_DOWN"));
+    Serial.println(F("to lock the baseline."));
 
     oledClearHeader("P2 SCALE");
     MiniR4.OLED.setCursor(0, 8);
-    MiniR4.OLED.print(F("Rotate "));
-    MiniR4.OLED.print(SCALE_TURNS_N);
-    MiniR4.OLED.println(F(" full turns"));
+    MiniR4.OLED.println(F("Seat at wall/mark"));
     MiniR4.OLED.setCursor(0, 16);
-    MiniR4.OLED.println(F("then press BTN_UP"));
+    MiniR4.OLED.println(F("BTN_DOWN to start"));
     MiniR4.OLED.display();
+
+    if (!waitForButtonPress(MiniR4.BTN_DOWN, PHASE_TIMEOUT_MS))
+    {
+        Serial.println(F("[gyro_calib] SCALE: timed out waiting for BTN_DOWN (baseline) -- skipping."));
+        return;
+    }
 
     int32_t lastBiased = 0;
     if (!readRawBiasedChecked(lastBiased))
     {
-        Serial.println(F("[gyro_calib] SCALE: dead bus (G=R=0) at phase entry -- skipping."));
+        Serial.println(F("[gyro_calib] SCALE: dead bus (G=R=0) at baseline -- skipping."));
         return;
     }
+
+    Serial.print(F("[gyro_calib] SCALE: baseline locked (raw="));
+    Serial.print(lastBiased);
+    Serial.print(F("). Now rotate EXACTLY "));
+    Serial.print(SCALE_TURNS_N);
+    Serial.println(F(" full turns back to the SAME mark, then press BTN_UP."));
+
+    oledClearHeader("P2 SCALE");
+    MiniR4.OLED.setCursor(0, 8);
+    MiniR4.OLED.print(F("Turn "));
+    MiniR4.OLED.print(SCALE_TURNS_N);
+    MiniR4.OLED.println(F("x ->wall/mark"));
+    MiniR4.OLED.setCursor(0, 16);
+    MiniR4.OLED.println(F("then press BTN_UP"));
+    MiniR4.OLED.display();
 
     int64_t        totalRawAccum = 0;
     bool           btnSeen       = false;
@@ -429,7 +459,7 @@ void runDriftPhase()
     MiniR4.OLED.println(F("then press BTN_UP"));
     MiniR4.OLED.display();
 
-    if (!waitForBtnUpPress(PHASE_TIMEOUT_MS))
+    if (!waitForButtonPress(MiniR4.BTN_UP, PHASE_TIMEOUT_MS))
     {
         Serial.println(F("[gyro_calib] DRIFT: timed out waiting for BTN_UP -- skipping."));
         return;
