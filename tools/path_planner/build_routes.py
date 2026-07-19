@@ -66,8 +66,8 @@ from tools.path_planner.header_writer import (  # noqa: E402
     emit_routes,
 )
 from tools.path_planner.pipeline_config import (  # noqa: E402
-    PIPELINE_CONFIG,  # noqa: F401 -- baked into routes.cpp by header_writer
     LineFollowMode,
+    PipelineConfig,
 )
 from tools.path_planner.planner import (  # noqa: E402
     BlindDecayParams,
@@ -288,17 +288,27 @@ def _run(
 
     # 1. Validate the field-data module before doing any geometry work.
     #    Validation failure is fatal: routes.h must NOT be written.
-    log(
-        f"pipeline_config: speed={PIPELINE_CONFIG.speed.name}, "
-        f"blind={PIPELINE_CONFIG.blind.name}, "
-        f"turn={PIPELINE_CONFIG.turn.name}"
-    )
     log("validating field_data.py ...")
     try:
         validate(field_data)
     except FieldDataError as exc:
         print(f"ERROR: field_data invalid: {exc}", file=sys.stderr)
         return 2
+
+    # 1b. Diagnostic: report the FIELD-SOURCED pipeline config (the same
+    # PipelineConfig.from_field_data(field_data) call header_writer uses to
+    # bake values into routes.cpp), not the module singleton -- printed only
+    # after validate() succeeds so it can never claim a config the field
+    # cannot legally express (a malformed PIPELINE_* name would otherwise
+    # surface here as a bare KeyError instead of the validator's precise
+    # FieldDataError).
+    resolved_pipeline_config = PipelineConfig.from_field_data(field_data)
+    log(
+        f"pipeline_config: speed={resolved_pipeline_config.speed.name}, "
+        f"blind={resolved_pipeline_config.blind.name}, "
+        f"turn={resolved_pipeline_config.turn.name}, "
+        f"direction={resolved_pipeline_config.direction.name}"
+    )
 
     # 2. Build the directed graph (with C-space inflation).
     #    build_graph emits UserWarnings for disconnected goals and
