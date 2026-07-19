@@ -268,25 +268,47 @@ namespace Config
     /**
      * @brief Toggle tick-scoped caching in WROLineArrayClass.
      *
-     * When `false` (default — legacy / current PR behaviour): each call to
+     * When `false` (legacy / pre-cache behaviour): each call to
      * `getError()`, `isOnline()`, and `getJunctionType()` independently issues
      * a full 4-byte CMYK I²C transaction. `WROLineArrayClass::update()` is a
      * no-op. Total per cooperative tick: 3 sensor reads (~33 ms at vendor I²C
      * timing), giving ~28-30 Hz loop rate.
      *
-     * When `true`: `WROLineArrayClass::update()` issues the single sensor
-     * read for the tick (must be called at the top of `cooperativeTick()` for
-     * this to work). The three getters become pure cache readers. Total per
-     * tick: 1 sensor read (~11 ms), giving ~70-80 Hz loop rate.
+     * When `true` (default): `WROLineArrayClass::update()` issues the single
+     * sensor read for the tick (must be called at the top of
+     * `cooperativeTick()` for this to work). The three getters become pure
+     * cache readers. Total per tick: 1 sensor read (~11 ms), giving ~70-80 Hz
+     * loop rate.
      *
-     * Default is `false` to preserve the currently-tested code path on first
-     * flash. Flip to `true` after hardware bring-up confirms the cached path
-     * behaves identically (no controller wobble from one-tick-stale data on
-     * a chassis travelling at typical cruise).
+     * Default is `true`: hardware bring-up confirmed the cached path behaves
+     * identically (no controller wobble from one-tick-stale data on a
+     * chassis travelling at typical cruise). Flip to `false` to fall back to
+     * the legacy uncached per-getter reads if a regression is suspected.
      *
      * See PR #20 review thread + DECISIONS.md if added later.
      */
     constexpr bool LINE_ARRAY_TICK_CACHE_ENABLED = true;
+
+    /**
+     * @brief Toggle the line-sensor consumer gate inside `cooperativeTick()`.
+     *
+     * When `true` (default): `cooperativeTick()` skips `LineArray.update()`,
+     * `LineFollower.update()`, and `Intersection.update()` on ticks where
+     * nothing needs a fresh sample — i.e. no line-follow is enabled and no
+     * `stopAtLine` seek is in flight — reclaiming the slow Wire1 I²C read.
+     * `stopAtLine` and junction detection keep the gate open, so those paths
+     * still see a fresh sample every tick.
+     *
+     * When `false`: the gate predicate constant-folds to `true` and the
+     * three updates run unconditionally, matching pre-gate behavior.
+     *
+     * This is a compile-time `constexpr`, so the off-branch is dead-code
+     * eliminated by the compiler, mirroring `LINE_ARRAY_TICK_CACHE_ENABLED`
+     * above. Flipping this to `false` is the one-line rollback.
+     *
+     * See issue #164.
+     */
+    constexpr bool LINE_ARRAY_TICK_GATE_ENABLED = true;
 
     // ---------------------------------------------------------------------------------------
     // Lost-line behavior
