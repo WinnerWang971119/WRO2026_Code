@@ -1742,10 +1742,10 @@ def test_axle_tc8_draw_sites_reference_axle_to_body_pose_helper():
     assert "axleToBodyPose(" in cargo_js
 
 
-#: The five cargo EVENT-RESOLUTION functions that must stay on the raw axle
-#: pose (AC4) — the plan's explicit "resolution is NOT moved" decision.
-_CARGO_RESOLUTION_FUNCTIONS = (
-    "cargo_resolve",
+#: The four cargo EVENT-RESOLUTION HELPERS that receive the already-transformed
+#: body pose as a parameter — they must NOT call axleToBodyPose themselves (the
+#: transform is single-sourced once at the cargo_resolve entry, #165 follow-up).
+_CARGO_RESOLUTION_HELPERS = (
     "_doGrab",
     "_doDump",
     "_doBoxClose",
@@ -1753,31 +1753,44 @@ _CARGO_RESOLUTION_FUNCTIONS = (
 )
 
 
-def test_axle_tc9_cargo_resolution_functions_do_not_use_axle_to_body_pose():
-    """TC9: source-text pin — cargo EVENT RESOLUTION stays on the axle pose (AC4).
+def test_axle_tc9_cargo_resolution_uses_the_body_pose_single_sourced():
+    """TC9: source-text pin — cargo EVENT RESOLUTION resolves on the BODY pose.
 
-    Key assertion (text heuristic, robust to formatting — mirrors TC12's
-    isolate-the-function-body technique): for each of ``cargo_resolve``,
-    ``_doGrab``, ``_doDump``, ``_doBoxClose``, and ``_doBoxOpen``, the isolated
-    top-level function body (from ``function <name>(`` to its closing brace at
-    the same 4-space indent) contains NO reference to ``axleToBodyPose`` —
-    proving the drawn zones (T5, moved to the body pose) and the RESOLVED
-    zones (unchanged, raw axle pose from ``CTPS.engine.poseAt``) stay
-    deliberately divergent, per the plan's Decisions: "the cargo event
-    resolution stays on the axle — user choice". A sanity assertion confirms
-    ``axleToBodyPose`` still appears SOMEWHERE in ``cargo.js`` (the draw
-    sites, TC8) so a failure here reads as "resolution moved," never "the
-    helper vanished from the file."
+    The gripper is body-mounted, so a grab must resolve exactly where the zone
+    is DRAWN (the body pose, T5). This reverses the original plan's "resolution
+    stays on the axle" decision: ``cargo_resolve`` now wraps the per-event pose
+    in ``axleToBodyPose(...)`` before dispatching, so the drawn and resolved
+    zones can never disagree by the offset vector.
+
+    Key assertions (text heuristic, robust to formatting):
+
+    * ``cargo_resolve``'s isolated body references ``axleToBodyPose(`` — the
+      transform is applied ONCE at the resolution entry.
+    * Each of ``_doGrab`` / ``_doDump`` / ``_doBoxClose`` / ``_doBoxOpen`` does
+      NOT reference ``axleToBodyPose`` — they operate on the body pose passed in,
+      so the transform stays single-sourced (never re-derived per helper).
+
+    Offset-free traces are unaffected: ``axleToBodyPose`` returns the pose
+    unchanged when there is no ``axle_offset``, so every cargo golden (none carry
+    an offset) resolves byte-identically.
     """
     cargo_js = (PLAYER_JS_PATH.parent / "cargo.js").read_text(encoding="utf-8")
-    assert "axleToBodyPose(" in cargo_js  # sanity: draw sites still wired (TC8)
 
-    for name in _CARGO_RESOLUTION_FUNCTIONS:
+    resolve_match = re.search(
+        r"function\s+cargo_resolve\s*\([\s\S]*?\n    \}", cargo_js
+    )
+    assert resolve_match is not None, "could not isolate cargo_resolve's body in cargo.js"
+    assert "axleToBodyPose(" in resolve_match.group(0), (
+        "cargo_resolve must resolve against the body pose (axleToBodyPose) so the "
+        "drawn and resolved zones agree"
+    )
+
+    for name in _CARGO_RESOLUTION_HELPERS:
         match = re.search(
             r"function\s+" + re.escape(name) + r"\s*\([\s\S]*?\n    \}", cargo_js
         )
         assert match is not None, f"could not isolate {name}'s function body in cargo.js"
         assert "axleToBodyPose" not in match.group(0), (
-            f"{name} must resolve against the raw axle pose (AC4) but its body "
-            "references axleToBodyPose"
+            f"{name} must operate on the body pose passed in, not re-derive it — "
+            "the transform is single-sourced at cargo_resolve"
         )
