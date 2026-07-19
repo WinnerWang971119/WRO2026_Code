@@ -371,6 +371,66 @@ namespace Config
     constexpr float STOP_AT_LINE_PROGRESS_EPS_CM = 0.2f;
 
     // ---------------------------------------------------------------------------------------
+    // Anticipatory line-approach ramp (LineFollower junction hops + Drive.stopAtLine() seek)
+    //
+    // Both line-detection primitives predict WHEN the crossing line should arrive (from the
+    // authored edge length / expected distance) and ramp cruise DOWN to the arrival floor
+    // (`Config::PWM_MOVING_MIN`) BEFORE that predicted point, instead of reacting only after
+    // the sensor sees the line. This lets the chassis already be slow when an early line
+    // arrives, and still lets a late line be found via a bounded floor-speed search before
+    // declaring a hard fault. Toggling the feature off restores today's flat-cruise-until-
+    // detected behavior byte-for-byte.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master toggle for the anticipatory line-approach ramp.
+     *
+     * `true` arms the shared ramp-down schedule on both consumers (`LineFollower`'s junction
+     * hops via `setApproachTarget`, `Drive.stopAtLine()`'s seek). `false` disables the
+     * schedule everywhere — both paths fall back to today's flat cruise until the line is
+     * detected, byte-identical to pre-feature behavior.
+     *
+     * @note Global kill switch, not a per-call knob: flip this to `false` to instantly revert
+     *       the feature without touching any call site.
+     * @note **Compile-time override:** guarded by `#ifndef LINE_APPROACH_RAMP_ENABLED_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_APPROACH_RAMP_ENABLED_DEFAULT=false`
+     *       on the compiler command line without editing this file — same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` (`ConfigNav.h`). The public
+     *       `Config::LINE_APPROACH_RAMP_ENABLED` symbol is unchanged; only its initializer is
+     *       overridable.
+     */
+#ifndef LINE_APPROACH_RAMP_ENABLED_DEFAULT
+#define LINE_APPROACH_RAMP_ENABLED_DEFAULT true
+#endif
+    constexpr bool LINE_APPROACH_RAMP_ENABLED = LINE_APPROACH_RAMP_ENABLED_DEFAULT;
+
+    /**
+     * @brief Distance (cm) BEFORE the predicted line crossing where the ramp bottoms out at
+     *        the arrival floor (`Config::PWM_MOVING_MIN`).
+     *
+     * The schedule reaches floor speed this many cm early so an early-arriving line (encoder
+     * under-estimate, curvy-follow path-length bias) still meets an already-slow chassis
+     * instead of one still ramping down. Larger values trade a longer floor-speed crawl for
+     * more margin against prediction error.
+     *
+     * @note Must be non-negative — enforced by a `ConfigChecks.h` static_assert.
+     */
+    constexpr float LINE_APPROACH_MARGIN_CM = 4.0f;
+
+    /**
+     * @brief Overrun bound (cm) PAST the predicted line crossing before the bounded
+     *        floor-speed search gives up and hard-faults.
+     *
+     * Mirrors `STOP_AT_LINE_MAX_MARGIN_CM` (ADR-039: a missed line is a hard fault, not a
+     * silent crawl). If no line is detected by `predicted + LINE_APPROACH_MAX_MARGIN_CM`, the
+     * caller (`LineFollower` / `Drive.stopAtLine()`) surfaces `LINE_NOT_FOUND` so PathTracker
+     * stops the chassis rather than crawling forever.
+     *
+     * @note Must be strictly positive — enforced by a `ConfigChecks.h` static_assert.
+     */
+    constexpr float LINE_APPROACH_MAX_MARGIN_CM = 15.0f;
+
+    // ---------------------------------------------------------------------------------------
     // Wall-stop re-zero primitive (`Drive.wallStop(cm)`) — wall-zero reset nodes (AC8)
     //
     // `Drive.wallStop(cm)` pushes the chassis toward a physical wall at low PWM and re-zeros

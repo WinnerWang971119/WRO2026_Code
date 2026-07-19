@@ -42,6 +42,9 @@ Public API (see the plan Contracts, 2026-07-09 CTPS motion-profile spec)
 ------------------------------------------------------------------------
 - :func:`resolve_tshape_ramps` — pure float32 mirror of the C++ policy.
 - :func:`tshape_speed_at` — pure float32 mirror of the C++ speed-at.
+- :func:`resolve_approach_schedule` / :func:`approach_speed_at` — pure float32
+  mirrors of ``ApproachRampPolicy::resolveApproachSchedule`` /
+  ``approachSpeedAt`` (2026-07-17 anticipatory-line-approach-ramp plan, T4).
 - :func:`resolve_drive_profile` -> :class:`DriveProfile` — Config-wired wrapper
   with phase boundaries, ``pwm_at_s``, closed-form phase durations.
 - :func:`resolve_turn_profile` -> :class:`TurnProfile` — display-only constant
@@ -55,9 +58,10 @@ Public API (see the plan Contracts, 2026-07-09 CTPS motion-profile spec)
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
+from enum import IntEnum
 from math import ceil, degrees, log
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -164,6 +168,8 @@ class ProfileConfig:
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
     rear_axle_offset_cm: float  # LINE_SENSOR_AXLE_OFFSET_REAR_CM (REAR overshoot window)
     hop_settle_ms: int    # HOP_SETTLE_MS (ConfigNav.h) — post-stop settle dwell
+    approach_margin_cm: float      # LINE_APPROACH_MARGIN_CM (pre-prediction floor margin)
+    approach_max_margin_cm: float  # LINE_APPROACH_MAX_MARGIN_CM (overrun bound before fault)
 
 
 def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileConfig:
@@ -180,7 +186,9 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
     - ``ConfigDrive.h`` (``config_path``): the ``TSHAPE_*`` / ``TURN_*`` /
       ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, the
       ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` rear overshoot window (AC8 window-fit),
-      plus the symbolic ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
+      the ``LINE_APPROACH_MARGIN_CM`` / ``LINE_APPROACH_MAX_MARGIN_CM``
+      anticipatory-approach-ramp knobs, plus the symbolic
+      ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
     - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` (static breakaway floor) /
       ``PWM_MOVING_MIN`` (kinetic decel-tail floor) / ``PWM_MAX``.
     - ``ConfigLine.h``: ``CRUISE_SPEED = SPEED_NORMAL`` (symbolic).
@@ -242,6 +250,10 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
             "LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path
         ),
         hop_settle_ms=parse_config_int("HOP_SETTLE_MS", nav_h, search),
+        approach_margin_cm=parse_config_float("LINE_APPROACH_MARGIN_CM", config_path),
+        approach_max_margin_cm=parse_config_float(
+            "LINE_APPROACH_MAX_MARGIN_CM", config_path
+        ),
     )
 
 
@@ -461,6 +473,210 @@ def tshape_speed_at(
         inner = _trunc_i16(_f32(_f32(end - peak_pwm) * ratio))
         return _trunc_i16(int(peak_pwm) + inner)
     return int(peak_pwm)
+
+
+# ==============================================================================
+# Approach-ramp schedule kernel (ApproachRampPolicy.h mirror, T4)
+# ==============================================================================
+#
+# Bit-for-bit float32 mirror of `WRO2026/src/drive/ApproachRampPolicy.h`
+# (2026-07-17 anticipatory-line-approach-ramp plan, T2/T4): resolve a ramp-down
+# schedule from a PREDICTED sensor-crossing distance, then look up the
+# commanded magnitude for a traveled distance along that schedule. COMPOSES
+# `resolve_tshape_ramp_cm` above for the ramp LENGTH — the only new math here
+# is the three phase boundaries and one linear interpolation across the ramp
+# phase, exactly mirroring the C++ header's own composition of
+# `resolveTShapeRampCm`. Naming/field order is the T2 Contracts-section pin;
+# the cross-language golden test (T5) pins the exact arithmetic below.
+
+
+class ApproachPhase(IntEnum):
+    """Named phase of the approach-ramp schedule at a given traveled distance.
+
+    Mirror of the C++ ``enum class ApproachPhase : uint8_t``
+    (``WRO2026/src/drive/ApproachRampPolicy.h``). Order matches the physical
+    sequence of a terminating line hop: full cruise, ramping down, holding the
+    arrival floor, then (only on a missed line) an overrun crawl at the same
+    floor.
+    """
+
+    CRUISE = 0        # traveled < ramp_start_cm -- commanded magnitude is cruise
+    RAMP = 1          # ramp_start_cm <= traveled < floor_start_cm -- interpolating down
+    FLOOR_HOLD = 2    # floor_start_cm <= traveled < overrun_limit_cm -- floor magnitude
+    OVERRUN = 3       # traveled >= overrun_limit_cm -- floor magnitude, caller faults
+
+
+@dataclass(frozen=True)
+class ApproachSchedule:
+    """Resolved approach-ramp schedule — mirror of the C++ ``ApproachSchedule`` POD.
+
+    Field names/order are the T2 Contracts-section pin (same as
+    ``WRO2026/src/drive/ApproachRampPolicy.h``'s ``ApproachSchedule`` struct,
+    snake_cased): the Python mirror, the parity trace record, and the CTPS
+    renderer all depend on this exact shape. All distances share one unit (cm
+    from both current callers); :func:`approach_speed_at` is otherwise
+    unit-agnostic.
+    """
+
+    ramp_start_cm: float      # traveled where ramp begins (floor_start_cm - ramp_len_cm)
+    floor_start_cm: float     # traveled where floor hold begins (predicted_cm - margin_cm)
+    overrun_limit_cm: float   # traveled where OVERRUN begins (predicted_cm + max_margin_cm)
+    cruise_mag: int           # cruise magnitude (unsigned, >= 0)
+    floor_mag: int            # arrival/hold magnitude (unsigned, >= 0, == PWM_MOVING_MIN)
+    active: bool              # False => degenerate (short hop / disabled); caller runs flat path
+
+
+class ApproachSpeed(NamedTuple):
+    """Commanded magnitude + phase for one traveled distance — mirror of ``ApproachSpeed``.
+
+    A plain 2-tuple ``(pwm_mag, phase)`` (via :class:`NamedTuple` for the field
+    names) — matches the C++ ``ApproachSpeed`` POD's two members.
+    """
+
+    pwm_mag: int
+    phase: ApproachPhase
+
+
+def resolve_approach_schedule(
+    predicted_cm: float,
+    margin_cm: float,
+    max_margin_cm: float,
+    cruise_mag: int,
+    floor_mag: int,
+    accel: float,
+    ramp_min: float,
+    ramp_max: float,
+    no_ramp_eps: int,
+    min_move_cm: float,
+) -> ApproachSchedule:
+    """Resolve the approach-ramp schedule from a predicted sensor-crossing distance.
+
+    PURE float32 mirror of the C++ ``ApproachRampPolicy::resolveApproachSchedule``
+    (``WRO2026/src/drive/ApproachRampPolicy.h``, T2). The signature matches the
+    C++ 1:1 (10 params, ``min_move_cm`` trailing) so the golden-vector parity
+    test (T5) can call this directly with the goldens' own columns.
+
+    ``floor_start_cm = predicted_cm - margin_cm``; the ramp length COMPOSES
+    :func:`resolve_tshape_ramp_cm` (does NOT re-derive its no-ramp-epsilon /
+    clamp arithmetic), so ``ramp_start_cm = floor_start_cm - ramp_len_cm``;
+    ``overrun_limit_cm = predicted_cm + max_margin_cm``. The schedule degrades
+    to ``active=False`` when it is degenerate: either the ramp would have to
+    start at or before the beginning of the move (``ramp_start_cm <= 0.0`` — no
+    room for a full ramp before the floor hold), or the predicted distance
+    itself is below the minimum meaningful move (``predicted_cm <
+    min_move_cm``). Does NO sensor-offset math on ``predicted_cm`` — the
+    caller has already pre-subtracted the direction-aware axle offset (TC17).
+
+    :param predicted_cm: predicted distance (cm) the leading sensor still has
+        to travel before it crosses the target line; already sensor-frame.
+    :param margin_cm: distance (cm) BEFORE ``predicted_cm`` where the floor
+        hold begins (``Config::LINE_APPROACH_MARGIN_CM``).
+    :param max_margin_cm: distance (cm) PAST ``predicted_cm`` before
+        ``OVERRUN`` begins (``Config::LINE_APPROACH_MAX_MARGIN_CM``).
+    :param cruise_mag: cruise magnitude (unsigned, ``>= 0``), carried into the
+        schedule unchanged.
+    :param floor_mag: arrival/hold magnitude (unsigned, ``>= 0``,
+        ``Config::PWM_MOVING_MIN``).
+    :param accel: ramp slope in PWM per cm (``Config::TSHAPE_ACCEL_PWM_PER_CM``);
+        must be ``> 0`` — forwarded to :func:`resolve_tshape_ramp_cm` unchanged
+        (no divide guard here, mirrors the C++ precondition note).
+    :param ramp_min: per-side ramp floor (cm, ``Config::TSHAPE_RAMP_MIN_CM``).
+    :param ramp_max: per-side ramp ceiling (cm, ``Config::TSHAPE_RAMP_MAX_CM``).
+    :param no_ramp_eps: no-ramp hysteresis in PWM
+        (``Config::TSHAPE_NO_RAMP_EPSILON_PWM``).
+    :param min_move_cm: minimum meaningful predicted distance (cm) below which
+        the schedule degrades to flat (``Config::TSHAPE_MIN_MOVE_CM``).
+    :return: the resolved :class:`ApproachSchedule`; check ``active`` before
+        using the other fields.
+    """
+    # Coerce the PWM operands to int up front — the firmware types are
+    # int16_t, matching resolve_tshape_ramps'/resolve_tshape_ramp_cm's own
+    # up-front int coercion of their PWM operands.
+    cruise_mag = int(cruise_mag)
+    floor_mag = int(floor_mag)
+
+    # Narrow every raw float input to float32 up front — mirrors each C++
+    # `float` parameter already holding a float32 value at the call boundary.
+    predicted = _f32(predicted_cm)
+    margin = _f32(margin_cm)
+    max_margin = _f32(max_margin_cm)
+    min_move = _f32(min_move_cm)
+
+    floor_start_cm = _f32(predicted - margin)
+
+    ramp_len_cm = resolve_tshape_ramp_cm(
+        cruise_mag, floor_mag, accel, ramp_min, ramp_max, no_ramp_eps
+    )
+    ramp_start_cm = _f32(floor_start_cm - ramp_len_cm)
+
+    overrun_limit_cm = _f32(predicted + max_margin)
+
+    active = not (ramp_start_cm <= 0.0 or predicted < min_move)
+
+    return ApproachSchedule(
+        ramp_start_cm=ramp_start_cm,
+        floor_start_cm=floor_start_cm,
+        overrun_limit_cm=overrun_limit_cm,
+        cruise_mag=cruise_mag,
+        floor_mag=floor_mag,
+        active=active,
+    )
+
+
+def approach_speed_at(schedule: ApproachSchedule, traveled_cm: float) -> ApproachSpeed:
+    """Commanded magnitude + phase at a traveled distance along a resolved schedule.
+
+    PURE float32 mirror of the C++ ``ApproachRampPolicy::approachSpeedAt``. The
+    INNER cast order is load-bearing and reproduced exactly, the same shape as
+    :func:`tshape_speed_at`'s ramp-up branch: ``(int16_t)(cruise_mag +
+    (int16_t)((floor_mag - cruise_mag) * ratio))`` — an int subtract, a
+    float32 multiply, a TRUNCATING inner int16 cast, an int add of the
+    endpoint, then the outer int16 cast.
+
+    Verbatim four-way phase split, boundaries compared with ``<`` only (never
+    ``<=``) so each traveled distance maps to exactly one phase:
+
+    - ``traveled_cm < schedule.ramp_start_cm`` -> ``(cruise_mag, CRUISE)``.
+    - ``schedule.ramp_start_cm <= traveled_cm < schedule.floor_start_cm`` ->
+      linear interp ``cruise_mag -> floor_mag`` across
+      ``[ramp_start_cm, floor_start_cm)``, phase ``RAMP``. A zero-length ramp
+      guard yields ``ratio = 1.0``.
+    - ``schedule.floor_start_cm <= traveled_cm < schedule.overrun_limit_cm`` ->
+      ``(floor_mag, FLOOR_HOLD)``.
+    - ``traveled_cm >= schedule.overrun_limit_cm`` -> ``(floor_mag, OVERRUN)``
+      — OVERRUN is PINNED to return ``floor_mag``, the same magnitude as
+      FLOOR_HOLD; stopping the chassis is the caller's fault action, never
+      this policy's.
+
+    :param schedule: a schedule from :func:`resolve_approach_schedule`; the
+        caller must not invoke this on a schedule with ``active == False`` —
+        the boundaries are meaningless on a degenerate schedule.
+    :param traveled_cm: distance traveled so far (same unit as the schedule's
+        boundaries).
+    :return: an :class:`ApproachSpeed` — unsigned magnitude (pre-``deadband_snap``)
+        and the phase that produced it.
+    """
+    t = _f32(traveled_cm)
+
+    if t < schedule.ramp_start_cm:
+        return ApproachSpeed(int(schedule.cruise_mag), ApproachPhase.CRUISE)
+
+    if t < schedule.floor_start_cm:
+        # Ramp down: linear interp from cruise -> floor across
+        # [ramp_start_cm, floor_start_cm).
+        ramp_len_cm = _f32(schedule.floor_start_cm - schedule.ramp_start_cm)
+        into = _f32(t - schedule.ramp_start_cm)
+        ratio = _f32(1.0) if ramp_len_cm == 0.0 else _f32(into / ramp_len_cm)
+        inner = _trunc_i16(
+            _f32(_f32(schedule.floor_mag - schedule.cruise_mag) * ratio)
+        )
+        pwm_mag = _trunc_i16(int(schedule.cruise_mag) + inner)
+        return ApproachSpeed(pwm_mag, ApproachPhase.RAMP)
+
+    if t < schedule.overrun_limit_cm:
+        return ApproachSpeed(int(schedule.floor_mag), ApproachPhase.FLOOR_HOLD)
+
+    return ApproachSpeed(int(schedule.floor_mag), ApproachPhase.OVERRUN)
 
 
 # ==============================================================================

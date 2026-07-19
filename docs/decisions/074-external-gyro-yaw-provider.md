@@ -1,4 +1,4 @@
-# ADR-071: External gyro yaw provider — two independent frame-crossing signs
+# ADR-074: External gyro yaw provider — two independent frame-crossing signs
 
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 2 hardening)
@@ -48,7 +48,7 @@ sidesteps that class of bug entirely; it is not the reason for this ADR.)
 
 ## Trigger to revisit
 
-- **Resolved by [ADR-072](./072-gyro-move-r4-hold.md).** The STM32 gyro-PID **write**
+- **Resolved by [ADR-075](./075-gyro-move-r4-hold.md).** The STM32 gyro-PID **write**
   path no longer steers on the STM32's own onboard IMU — the accepted, tracked
   split-brain this line named (**#169**, a `MoveGyro*` target derived from the external
   gyro's zero serviced against the STM32's own zero) is closed: `Drive::_emitGyroHold`
@@ -64,9 +64,9 @@ sidesteps that class of bug entirely; it is not the reason for this ADR.)
   rule this ADR extends to a second, independent device frame; not superseded.
 - [ADR-019](./019-8channel-custom-line-sensor.md) — the `WROLineArray` / `MatrixColor` MXColor
   protocol driver this ADR's gyro read reuses.
-- [ADR-072](./072-gyro-move-r4-hold.md) — resolves the #169 split-brain this ADR's *Trigger to
+- [ADR-075](./075-gyro-move-r4-hold.md) — resolves the #169 split-brain this ADR's *Trigger to
   revisit* named: the STM32 gyro-PID write path retires, closing the loop entirely against the
   external-gyro read this ADR established.
 - Issue #169 — GYRO write-path split-brain (STM32 IMU write vs. external-gyro read) — resolved by
-  ADR-072.
+  ADR-075.
 - Issue #170 — bench verification of the deferred torn-read plausibility gate.

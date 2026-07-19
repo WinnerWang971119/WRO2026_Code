@@ -6,14 +6,14 @@
  * @details
  * `YawSourceClass` is the single owner of the robot's yaw READ. The heading is sourced from
  * an external MXColor-protocol gyro board (I2C addr 0x22 on `Wire1`) rather than the on-board
- * STM32 IMU (ADR-071). That board packs a signed 16-bit heading into two colour registers;
+ * STM32 IMU (ADR-074). That board packs a signed 16-bit heading into two colour registers;
  * `YawSource` owns the I2C transport, a tick-scoped cache, and a per-read dead-byte gate, and
  * hands every consumer an app-frame (CCW-positive), wrapped-to-`(-180, 180]` heading through the
  * UNCHANGED `readYawDeg` / `readYawDegOr` contract. Reads are gated ONLY by dead-byte detection
  * (an all-zero pair = dead bus); a plausibility gate — a torn-read guard the known-good reference
  * omits — is deferred to bench verification.
  *
- * The frame-crossing sign at this boundary is applied exactly once (ADR-071, extending
+ * The frame-crossing sign at this boundary is applied exactly once (ADR-074, extending
  * ADR-045's one-place rule to per-frame): **external gyro -> app** (`readYawDeg` /
  * `readYawDegOr`) decodes the raw bytes via `GyroDecodePolicy.h::decodeGyroYawDeg`, which folds
  * `Config::GYRO_YAW_SIGN` into the same multiply as the scale, before the wrap. That is the SOLE
@@ -42,7 +42,7 @@
  * @note Single global instance `YawSource` (declared `extern` below, defined in the .cpp).
  *       Construct nothing else; all consumers share this instance.
  * @note No other module performs gyro yaw I/O or applies the yaw sign — see the file header and
- *       ADR-071 / ADR-045.
+ *       ADR-074 / ADR-045.
  */
 class YawSourceClass
 {

@@ -12,6 +12,18 @@
  * — then resets the window. No mission is authored and no blocking Drive move is ever issued: the
  * bench stays idle so `loop()` never blocks, and `benchTick()` alone drives every module's `update()`.
  *
+ * GATE MEASUREMENT (issue #164) — `cooperativeTick()` now skips `LineArray`/`LineFollower`/
+ * `Intersection` on ticks where nothing needs a line sample (`LineFollower.isEnabled() ||
+ * Drive.isSeekingLine()`). This bench has no live mission or seek to drive that predicate, so it
+ * mirrors the predicate's SHAPE with a bench-local runtime `gateOpen` bool (`benchTick()`) that
+ * alternates every completed `WINDOW_TICKS` window: gate-OPEN windows run all 10 segments (today's
+ * unconditional path); gate-CLOSED windows skip the same three segment calls the real gate would
+ * (their per-segment lines correctly report zero samples that window). Each window's report is
+ * labeled `gate OPEN` / `gate CLOSED`, and the CLOSED report additionally prints the OPEN-vs-CLOSED
+ * whole-tick delta — the reclaimed `LineArray` I2C budget (AC6). This is NOT driven by
+ * `Config::LINE_ARRAY_TICK_GATE_ENABLED`: that `constexpr` toggle can only measure one path per
+ * build, so the bench uses its own runtime bool instead.
+ *
  * BUILD MECHANIC — `WRO2026/` and each `WRO2026/src/<domain>/` as legacy (1.0) Arduino libraries
  * -------------------------------------------------------------------------------------------------
  * Since the sketch-src reorg (issue #66) `WRO2026/` DOES have a `src/` subdir, but it still has no
@@ -70,6 +82,10 @@
  *       line if any comes back invalid. `Vision` is NOT a segment — it is capture-once via a task,
  *       not ticked in `cooperativeTick()` — but its `begin()` still runs below so the wiring order
  *       matches `setup()` exactly.
+ * @note GATE (issue #164): the registered segment SET above is unchanged — `benchTick()` only
+ *       conditionally SKIPS the `LineArray`/`LineFollower`/`Intersection` calls on gate-CLOSED
+ *       windows via the bench-local `gateOpen` bool, mirroring the real `cooperativeTick()` gate's
+ *       shape without adding or removing a segment.
  */
 
 #include <MatrixMiniR4.h>
@@ -106,6 +122,19 @@ namespace
     /// @brief Segment indices, assigned in `setup()` in `cooperativeTick()` order.
     uint8_t segYawSource, segLineArray, segDrive, segLineFollower, segIntersection;
     uint8_t segManipulator, segTasks, segPathTracker, segLocalization, segMission, segEventTrace;
+
+    /// @brief Bench-local runtime gate mirroring #164's `LineFollower.isEnabled() ||
+    ///        Drive.isSeekingLine()` predicate, NOT `Config::LINE_ARRAY_TICK_GATE_ENABLED` (a
+    ///        compile-time constant cannot measure both paths in one run). `true` selects the
+    ///        gate-OPEN path (all 11 segments run, today's behavior); `false` selects gate-CLOSED
+    ///        (`LineArray`, `LineFollower`, `Intersection` skipped). Alternates every completed
+    ///        report window (see `loop()`) so one run measures both paths back-to-back (AC6).
+    bool gateOpen = true;
+
+    /// @brief Whole-tick average (us) latched from the most recently completed gate-OPEN window;
+    ///        0 until the first OPEN window completes. Held across the following CLOSED window so
+    ///        its report can print the OPEN-vs-CLOSED delta (the reclaimed LineArray budget).
+    uint32_t lastOpenAvgUs = 0;
 }    // namespace
 
 /// @brief The fixed-size timing accumulator driving this bench. Registered once in `setup()`.
@@ -164,6 +193,13 @@ void pollSerial()
  *        `cooperativeTick()` order, timing each call into its profiler segment, then the whole pass.
  * @note `Vision.update()` is deliberately NOT called here — `Vision` is capture-once via a task, not
  *       ticked in the real `cooperativeTick()`.
+ * @note GATE MIRROR (issue #164): when the bench-local `gateOpen` is `false` (the current
+ *       measurement window is gate-CLOSED), the `LineArray`/`LineFollower`/`Intersection` segment
+ *       calls are skipped — mirroring the real `cooperativeTick()`'s
+ *       `LineFollower.isEnabled() || Drive.isSeekingLine()` predicate, for which this bench has no
+ *       live stand-in (no mission, no seek in flight), so `gateOpen` plays that role directly. Every
+ *       other segment call still runs unconditionally, exactly as the real gate leaves
+ *       `Drive.update()` and `Localization.update()` unconditional.
  */
 void benchTick()
 {
@@ -173,21 +209,27 @@ void benchTick()
     YawSource.update();
     prof.sampleSegment(segYawSource, micros() - s);
 
-    s = micros();
-    LineArray.update();
-    prof.sampleSegment(segLineArray, micros() - s);
+    if (gateOpen)
+    {
+        s = micros();
+        LineArray.update();
+        prof.sampleSegment(segLineArray, micros() - s);
+    }
 
     s = micros();
     Drive.update();
     prof.sampleSegment(segDrive, micros() - s);
 
-    s = micros();
-    LineFollower.update();
-    prof.sampleSegment(segLineFollower, micros() - s);
+    if (gateOpen)
+    {
+        s = micros();
+        LineFollower.update();
+        prof.sampleSegment(segLineFollower, micros() - s);
 
-    s = micros();
-    Intersection.update();
-    prof.sampleSegment(segIntersection, micros() - s);
+        s = micros();
+        Intersection.update();
+        prof.sampleSegment(segIntersection, micros() - s);
+    }
 
     s = micros();
     Manipulator.update();
@@ -287,8 +329,30 @@ void loop()
 
     if (prof.tickCount() >= WINDOW_TICKS)
     {
+        Serial.println(gateOpen
+                            ? F("-- gate OPEN (LineArray/LineFollower/Intersection run) --")
+                            : F("-- gate CLOSED (LineArray/LineFollower/Intersection skipped) --"));
         prof.report(Serial, TICK_FLOOR_HZ, TICK_GOOD_HZ);
+
+        if (gateOpen)
+        {
+            lastOpenAvgUs = prof.tickAvgUs();
+        }
+        else
+        {
+            const uint32_t closedAvgUs = prof.tickAvgUs();
+            const uint32_t reclaimedUs = (lastOpenAvgUs > closedAvgUs) ? (lastOpenAvgUs - closedAvgUs) : 0;
+            Serial.print(F("[bench] whole-tick avg -- OPEN="));
+            Serial.print(lastOpenAvgUs);
+            Serial.print(F(" us  CLOSED="));
+            Serial.print(closedAvgUs);
+            Serial.print(F(" us  delta(reclaimed)="));
+            Serial.print(reclaimedUs);
+            Serial.println(F(" us"));
+        }
+
         prof.reset();
+        gateOpen = !gateOpen;    // alternate to the other path for the next measurement window
     }
 
     pollSerial();

@@ -128,3 +128,12 @@ JunctionType IntersectionClass::getLastType() const
 {
     return _lastType;
 }
+
+bool IntersectionClass::isJunctionActive() const
+{
+    // Armed (debounced at-junction) OR still climbing a valid streak toward arming. The
+    // `_validStreak > 0` term keeps this true across the pre-arm ticks so the reopen-drain
+    // does not release before a forming junction has had its debounce window; `_wasAtJunction`
+    // keeps it true across a mid-marker NONE/UNKNOWN flicker (the F7 hold).
+    return _wasAtJunction || _validStreak > 0;
+}

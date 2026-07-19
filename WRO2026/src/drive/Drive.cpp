@@ -20,6 +20,10 @@
                                // (host-tested; ADR-075). Consumed by _emitGyroHold.
 #include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
                                     // math (host-tested + golden-pinned; issue #130).
+#include "ApproachRampPolicy.h"    // Anticipatory line-approach ramp — SEEK/ARMED feed the
+                                    // resolved schedule's per-tick magnitude to driveContinuous
+                                    // instead of flat cruise (T7). Composes TShapeProfilePolicy.h;
+                                    // also pulled transitively via Drive.h (`_stopApproachSchedule`).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
 #include "../util/EncoderSource.h"    // Single owner of lower-MCU encoder + drive task-done I/O (ADR-066).
 
@@ -453,6 +457,11 @@ bool DriveClass::isIdle() const
 bool DriveClass::isLineFound() const
 {
     return _isLineFound;
+}
+
+bool DriveClass::isSeekingLine() const
+{
+    return _stopState != StopAtLineState::IDLE;
 }
 
 float DriveClass::getStopOvershoot() const
@@ -1369,7 +1378,32 @@ void DriveClass::_updateStopAtLine()
     auto driveContinuous = [&](int16_t mag)
     {
         const int16_t pwm = (int16_t) (_stopReverse ? -mag : mag);
-        _emitContinuous(_stopMode, pwm, _stopHeading);
+        // Floor at the KINETIC deadband (`PWM_MOVING_MIN`), not the static breakaway floor: the
+        // seek is always already moving here, so the anticipatory approach ramp's arrival speed and
+        // the OVERSHOOT roll settle to the same kinetic floor the LineFollower hop reaches — one
+        // arrival speed across both reactive-stop paths (ADR-071). Byte-identical when the ramp is
+        // off: `_stopCruise` and the OVERSHOOT ramp's own math both stay >= the static floor, so the
+        // lower floor is a no-op there.
+        _emitContinuous(_stopMode, pwm, _stopHeading, Config::PWM_MOVING_MIN);
+    };
+
+    // SEEK/ARMED drive with the anticipatory approach ramp (T7). When the ramp is enabled and the
+    // resolved schedule is usable, feed the schedule's per-tick magnitude (cruise → kinetic floor
+    // over the predicted distance) instead of flat `_stopCruise`; otherwise fall back to constant
+    // `_stopCruise` — byte-identical to the pre-feature seek. The commanded magnitude is recorded in
+    // `_stopLastCommandedMag` so the OVERSHOOT leg can seed its ramp-down from it (AC3: PWM stays
+    // non-increasing across the detect→overshoot handoff; when disabled/degraded the recorded value
+    // is `_stopCruise`, so OVERSHOOT is byte-identical). Magnitude stays pre-`deadbandSnap` and
+    // unsigned — `driveContinuous` applies the seek direction and `_emitContinuous` snaps it.
+    auto driveSeekApproach = [&]()
+    {
+        int16_t mag = _stopCruise;
+        if (Config::LINE_APPROACH_RAMP_ENABLED && _stopApproachSchedule.active)
+        {
+            mag = approachSpeedAt(_stopApproachSchedule, traveled).pwmMag;
+        }
+        _stopLastCommandedMag = mag;
+        driveContinuous(mag);
     };
 
     switch (_stopState)
@@ -1392,11 +1426,19 @@ void DriveClass::_updateStopAtLine()
             break;
         }
 
-        // Cruise flat toward the endpoint; arm detection once inside the window. The arm threshold
-        // (`expectedCm - armWithin`, clamped at 0) lives in `stopAtLineArmed` so the SEEK → ARMED
-        // decision is host-testable (TC11). `_stopDetectStreak` is already zeroed at dispatch and
-        // SEEK never writes it — ARMED is its only writer — so no reset is needed on this transition.
-        driveContinuous(_stopCruise);
+        // Ramp the cruise magnitude DOWN toward the kinetic floor as the leading sensor nears the
+        // predicted crossing (anticipatory approach ramp, T7), instead of holding flat cruise until
+        // detection; `driveSeekApproach` degrades to constant `_stopCruise` when the feature is
+        // disabled or the schedule is degenerate (short seek). Arm detection once inside the window.
+        // The arm threshold (`expectedCm - armWithin`, clamped at 0) lives in `stopAtLineArmed` so
+        // the SEEK → ARMED decision is host-testable (TC11). `_stopDetectStreak` is already zeroed at
+        // dispatch and SEEK never writes it — ARMED is its only writer — so no reset is needed here.
+        //
+        // Seek arm-window note (spec, NOT a bug): with the default sensor→axle offset (12.02 cm)
+        // exceeding the arm window (10 cm), the approach ramp reaches the floor while still in SEEK,
+        // BEFORE this ARMED transition. That is intended — it tightens the detect-debounce distance
+        // spread — so do NOT try to "fix" it.
+        driveSeekApproach();
         if (stopAtLineArmed(traveled, _stopExpectedCm, _stopArmWithin))
         {
             _stopState = StopAtLineState::ARMED;
@@ -1422,11 +1464,12 @@ void DriveClass::_updateStopAtLine()
             break;
         }
 
-        // Keep cruising while watching for the crossing. Read the junction classification DIRECTLY
-        // from the line array (NOT the read-and-clear `Intersection::isAtIntersection()`), and step
-        // the consecutive-sample debounce. Detection confirms when the streak reaches
-        // `Config::STOP_AT_LINE_DETECT_TICKS`.
-        driveContinuous(_stopCruise);
+        // Keep driving the anticipatory approach ramp (already at/near the kinetic floor by here)
+        // while watching for the crossing (T7; `driveSeekApproach` degrades to flat `_stopCruise`
+        // when disabled/degenerate). Read the junction classification DIRECTLY from the line array
+        // (NOT the read-and-clear `Intersection::isAtIntersection()`), and step the consecutive-sample
+        // debounce. Detection confirms when the streak reaches `Config::STOP_AT_LINE_DETECT_TICKS`.
+        driveSeekApproach();
 
         const bool crossNow =
             (LineArray.getJunctionType() == WROLineArrayClass::JUNCTION_T_OR_CROSS);
@@ -1459,15 +1502,23 @@ void DriveClass::_updateStopAtLine()
             break;
         }
 
-        // Linear ramp of the (positive) cruise magnitude down to the deadband floor over the roll;
+        // Linear ramp of the OVERSHOOT seed magnitude down to the deadband floor over the roll;
         // `driveContinuous` reapplies the seek direction. Clamp at the floor so the motor never
-        // stalls mid-roll. If cruise was already below the floor, hold it flat at cruise.
+        // stalls mid-roll. If the seed was already below the floor, hold it flat at the seed.
+        //
+        // AC3 (F2): the seed is the LAST COMMANDED SEEK/ARMED magnitude (`_stopLastCommandedMag`),
+        // NOT `_stopCruise`. With the anticipatory approach ramp the robot arrives at the kinetic
+        // floor, so seeding from full cruise would jolt the chassis back to cruise on detection;
+        // seeding from the last commanded magnitude keeps PWM NON-INCREASING across the
+        // detect→overshoot handoff. When the approach ramp is disabled/degraded the last commanded
+        // magnitude equals `_stopCruise`, so this ramp is byte-identical to the pre-feature path.
         const float   frac     = rolled / _stopOvershoot;
         const int16_t floorPwm = Config::PWM_MIN_MAGNITUDE;
-        int16_t       rampMag  = _stopCruise;
-        if (_stopCruise > floorPwm)
+        const int16_t seedMag  = _stopLastCommandedMag;
+        int16_t       rampMag  = seedMag;
+        if (seedMag > floorPwm)
         {
-            rampMag = (int16_t) (_stopCruise - (int16_t) ((_stopCruise - floorPwm) * frac));
+            rampMag = (int16_t) (seedMag - (int16_t) ((seedMag - floorPwm) * frac));
             if (rampMag < floorPwm)
             {
                 rampMag = floorPwm;
@@ -1925,6 +1976,36 @@ void DriveClass::_dispatchNext()
         _stopDetectEnc   = _stopStartEnc;
         _stopDetectStreak = 0;
         _isLineFound     = false;    // cleared on dispatch; latched true only on a confirmed line.
+
+        // Anticipatory approach-ramp schedule (T7). Resolve ONCE here, at seek dispatch, so SEEK and
+        // ARMED can ramp the cruise magnitude down toward the kinetic floor before the leading sensor
+        // reaches the target line, instead of holding flat cruise until detection.
+        //
+        // SEEK PREDICTION FRAME (pinned): `_stopExpectedCm` is AXLE-frame — EdgeDispatchPolicy passes
+        // `commandedDistanceCm = rawDistanceCm`, the sensor→axle offset NOT subtracted — so the
+        // leading board crosses the line `axleOffsetCm` cm EARLIER than the axle reaches it. Predict
+        // the SENSOR-crossing distance by subtracting the direction-aware offset; bottoming out at
+        // `_stopExpectedCm` directly would floor the chassis ~12 cm late. `traveled` (fed to
+        // `approachSpeedAt` in `_updateStopAtLine`) is axle travel, matching this same frame. The
+        // policy returns a pre-`deadbandSnap`, unsigned magnitude with floor `Config::PWM_MOVING_MIN`
+        // (the kinetic floor); `driveContinuous` applies the seek direction + the existing snap.
+        const float axleOffsetCm = _stopReverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                                                : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+        _stopApproachSchedule =
+            resolveApproachSchedule(_stopExpectedCm - axleOffsetCm,
+                                    Config::LINE_APPROACH_MARGIN_CM,
+                                    Config::LINE_APPROACH_MAX_MARGIN_CM,
+                                    (int16_t) abs(_stopCruise),
+                                    Config::PWM_MOVING_MIN,
+                                    Config::TSHAPE_ACCEL_PWM_PER_CM,
+                                    Config::TSHAPE_RAMP_MIN_CM,
+                                    Config::TSHAPE_RAMP_MAX_CM,
+                                    Config::TSHAPE_NO_RAMP_EPSILON_PWM,
+                                    Config::TSHAPE_MIN_MOVE_CM);
+        // Seed the AC3 OVERSHOOT ramp source to cruise; the first SEEK/ARMED tick overwrites it with
+        // the actual commanded magnitude. This keeps OVERSHOOT byte-identical when the approach ramp
+        // is disabled/degraded (every SEEK/ARMED tick then re-writes `_stopCruise` here).
+        _stopLastCommandedMag = _stopCruise;
 
         // Seed the no-progress watchdog: baseline at zero travel, clock from now (ADR-027). The
         // watchdog faults `LINE_NOT_FOUND` if `traveled` does not advance for

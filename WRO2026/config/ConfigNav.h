@@ -164,27 +164,6 @@ namespace Config
     /// line-following instead of performing a wide on-the-spot turn.
     constexpr float BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90.0f;
 
-    // =========================================================================================
-    // IMU yaw sign — hardware CW-positive → app CCW-positive conversion (ADR-045).
-    //
-    // The STM32 coprocessor reports yaw in a CW-positive frame; the app world frame is
-    // CCW-positive (standard mathematical convention).  A single multiplicative sign
-    // applied at the two adapter points in `YawSource` bridges the two frames:
-    //
-    //   • STM32 → app  : `YawSource::readYawDeg()`  returns  raw * IMU_YAW_SIGN
-    //   • app  → STM32 : `YawSource::toHwHeading()`  converts appHeading * IMU_YAW_SIGN
-    //
-    // ALL other modules (PathTracker, Drive.turnToYaw, Localization, this Config file)
-    // work EXCLUSIVELY in the app CCW-positive frame and must NEVER apply this sign
-    // themselves — doing so would double-negate the conversion.
-    //
-    // Default `-1.0f` matches the current competition chassis (CW-positive raw IMU).
-    // The bench / test rover may differ — override at compile time via
-    //   `-DIMU_YAW_SIGN_DEFAULT=1.0f`
-    // without editing this file.  A static_assert in ConfigChecks.h enforces the value
-    // is exactly ±1.0f (that tripwire lives in ConfigChecks.h — just referenced here).
-    // =========================================================================================
-
     // `Config::IMU_YAW_SIGN` (the app->STM32 write-path yaw sign, applied only by the retired
     // `YawSource::toHwHeading`) was RETIRED in issue #169 (ADR-075): GYRO-straight heading-hold
     // moved to an R4-side PD, so nothing writes a heading target to the STM32 gyro PID anymore.
@@ -198,13 +177,12 @@ namespace Config
     // is the sole reader of these five constants, decoding via
     // `GyroDecodePolicy.h::decodeGyroYawDeg(hiG, loR, GYRO_SCALE, GYRO_YAW_SIGN)`.
     //
-    // `GYRO_YAW_SIGN` converts the gyro's raw decoded heading into the app CCW-positive frame.
-    // It is PHYSICALLY INDEPENDENT from `IMU_YAW_SIGN` above, which converts app -> STM32-raw
-    // for the unchanged `MoveGyro*` write path (`YawSource::toHwHeading`). The external gyro and
-    // the STM32 coprocessor are two separate devices with independent handedness, so one sign
-    // constant can no longer serve both a read and a write — this is precisely the "third frame
-    // crossing" ADR-045's Trigger to revisit anticipated. Do NOT collapse these two constants,
-    // and do NOT apply either sign anywhere outside its one documented adapter point.
+    // `GYRO_YAW_SIGN` converts the gyro's raw decoded heading into the app CCW-positive frame. It
+    // is now the SOLE yaw sign: the app -> STM32-raw write-path sign `IMU_YAW_SIGN` was retired
+    // with `YawSource::toHwHeading` and the `MoveGyro*` write path (issue #169, ADR-075). The
+    // external gyro is its own device with its own handedness, distinct from the STM32 IMU the
+    // old read-path sign served — exactly the "third frame crossing" ADR-045's Trigger to revisit
+    // anticipated. Apply this sign only inside its one documented adapter point.
     // =========================================================================================
 
     /**
@@ -229,10 +207,9 @@ namespace Config
     /**
      * @brief Positive scale calibration applied to the gyro's raw decoded heading.
      *
-     * @warning **UNVERIFIED — pending gyro_calib bench (AC-11).** `0.997f` is the mentor's value
-     *          measured on HIS board, carried over as a starting placeholder — it has not been
-     *          measured on this chassis's gyro. Replace it with the value the
-     *          `inoTest/gyro_calib/` sketch Serial-prints once hardware is in hand (AC-10/AC-11).
+     * @note Measured on this chassis's gyro via the `inoTest/gyro_calib/` SCALE phase (2026-07),
+     *       replacing the mentor's `0.997f` placeholder. Re-run that sketch and re-paste if the
+     *       gyro board is swapped.
      * @note Deliberately carries NO value-pinning tripwire (unlike a tuned drive constant): this
      *       constant is *meant* to be overwritten by the calibration output, not defended once
      *       set to a specific number.
@@ -241,7 +218,7 @@ namespace Config
      * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource`.
      */
 #ifndef GYRO_SCALE_DEFAULT
-#define GYRO_SCALE_DEFAULT 0.997f
+#define GYRO_SCALE_DEFAULT 0.9945f
 #endif
     constexpr float GYRO_SCALE = GYRO_SCALE_DEFAULT;
 
@@ -251,15 +228,14 @@ namespace Config
      *
      * Applied EXCLUSIVELY inside `GyroDecodePolicy.h::decodeGyroYawDeg` (via `YawSource`); no
      * other module may apply it — a secondary application would double-negate the sign and
-     * reverse all gyro-sourced heading math, the same one-place rule `IMU_YAW_SIGN` documents
-     * above.
+     * reverse all gyro-sourced heading math, the same one-place rule ADR-045 established for the
+     * (now-retired) STM32 write-path sign.
      *
-     * @warning **UNVERIFIED — pending gyro_calib bench (AC-11).** The placeholder `-1.0f` is a
-     *          coin-flip: the mentor's block code carries no sign, so his handedness cannot be
-     *          read off it. Replace it with the value the `inoTest/gyro_calib/` sketch
-     *          Serial-prints once hardware is in hand (AC-10/AC-11).
+     * @note Confirmed `-1.0f` on this chassis's gyro via the `inoTest/gyro_calib/` SIGN phase
+     *       (2026-07): the mentor's block code carries no sign, so handedness could only be read
+     *       off the bench. Re-run that sketch and re-paste if the gyro board is swapped.
      * @note A `static_assert` in `ConfigChecks.h` enforces the value is exactly `+1.0f` or
-     *       `-1.0f` — mirrors the `IMU_YAW_SIGN` structural assert above.
+     *       `-1.0f` — a pure-sign structural gate.
      * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource` only.
      */
 #ifndef GYRO_YAW_SIGN_DEFAULT
