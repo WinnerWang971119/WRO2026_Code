@@ -563,7 +563,9 @@ def _validate_pivot_turns(field_data) -> None:
     )
     from tools.path_planner.pipeline_config import (
         PIPELINE_CONFIG,
+        BlindMode,
         DirectionMode,
+        PipelineConfig,
         StopAtLineMode,
     )
     from tools.path_planner.planner import (
@@ -581,6 +583,7 @@ def _validate_pivot_turns(field_data) -> None:
         Direction,
         StopAtLine,
         pivot_overshoot_budget_cm,
+        resolve_blind_mode,
         resolve_stop_at_line,
     )
 
@@ -621,7 +624,15 @@ def _validate_pivot_turns(field_data) -> None:
     # (Issue #64: a projection arrival is still dead-reckoned for routing cost.)
 
     def _edge_attrs(a: str, b: str):
-        """Return (type, distance_cm, stop_at_line_override) or None."""
+        """Return (type, distance_cm, stop_at_line_override, edge_data) or None.
+
+        The 4th element is the LIVE NetworkX edge-data mapping (``graph[a][b]``
+        itself, not a copy) -- passed through to :func:`_regime` so it can read
+        the edge's own ``mode`` override via :func:`resolve_blind_mode`. Callers
+        must treat it as READ-ONLY: no caller may mutate it (it is the authored
+        graph's actual attribute dict, shared with every other reader of this
+        edge).
+        """
         if not graph.has_edge(a, b):
             return None
         data = graph[a][b]
@@ -629,9 +640,12 @@ def _validate_pivot_turns(field_data) -> None:
             data["type"],
             float(data["distance_cm"]),
             data.get("stop_at_line_override"),
+            data,
         )
 
-    def _regime(edge_type, dest_node_type, stop_override, auto_rule_active) -> str | None:
+    def _regime(
+        edge_type, dest_node_type, stop_override, auto_rule_active, edge_data
+    ) -> str | None:
         """Classify a directed edge from ``(edge_type, destination_node_type)``.
 
         Returns ``'line'``, ``'sensor'``, ``'distance'``, or ``None`` (issue #64
@@ -659,10 +673,31 @@ def _validate_pivot_turns(field_data) -> None:
                         from what the robot actually does.
         ``None``     -- an unclassifiable edge type (unsupported combo).
 
-        Per-edge ``primitive_mode`` no longer feeds this classification: with the
-        projection EDGE type gone, a BLIND edge's seek resolves against the
-        pipeline-default :class:`BlindMode` (``PIPELINE_CONFIG.blind``) plus its
-        per-edge ``stop_at_line`` override and the local auto-rule.
+        The edge's own resolved :class:`BlindMode` DOES feed this
+        classification: ``edge_data`` (the live NetworkX edge-attribute mapping
+        from :func:`_edge_attrs`) is resolved via
+        :func:`tools.path_planner.sim.runtime.resolve_blind_mode` -- reading the
+        edge's ``mode`` override, folded over the field-sourced ``cfg.blind`` --
+        and passed as arg3 (``edge_mode``) to :func:`resolve_stop_at_line`. That
+        resolver's precedence rung 3 treats a resolved
+        ``BlindMode.STOP_AT_LINE`` as a forced legacy seek -- so a BLIND edge
+        tagged that way seeks regardless of the auto-rule, but NOT regardless
+        of ``stop_at_line``: rung 2 (a per-edge ``StopAtLineMode.ON``/``OFF``)
+        outranks it and decides first. arg4 (``pipeline_blind``) is the
+        separate field-sourced ``cfg.blind``, read only by the resolver body's
+        Step 5 dead-reckon ``motion_mode`` fold (which this pass discards as
+        ``_motion_mode``), never by the seek boolean. Both arguments now come
+        from the closure's field-sourced ``cfg`` (see :func:`_pipeline_cfg`),
+        never the module-level :data:`PIPELINE_CONFIG` singleton directly.
+
+        **Rung 3 is unreachable from authored field data today, by
+        construction** -- which is why threading the real arg3/arg4 changes no
+        verdict on any field that reaches this pass. arg3 can only be
+        ``STOP_AT_LINE`` via a per-edge ``mode`` (rejected by
+        ``_validate_edges_field``, step 9, strictly before this step-10 pass)
+        or via ``cfg.blind`` (degraded away by :func:`_pipeline_cfg`). The
+        threading is a contract fix that keeps this pass honest if either gate
+        ever reopens -- not a behavior change. See ADR-064.
 
         The seek is CLASSIFIED with ``Direction.FRONT`` -- a front board always
         faces travel, so this answers "is this a seek edge at all?" independent of
@@ -682,17 +717,100 @@ def _validate_pivot_turns(field_data) -> None:
                 if isinstance(stop_override, StopAtLineMode)
                 else StopAtLineMode.DEFAULT
             )
+            # arg3/arg4 are field-sourced (issue #148): arg3 is THIS edge's
+            # own resolved BlindMode (its ``mode`` override folded over
+            # ``cfg.blind`` -- mirrors compiler.py's
+            # ``resolve_blind_mode(edge, cfg)`` call at the identical call
+            # site), arg4 is the field-sourced pipeline blind default itself.
+            # Both used to read the module-level PIPELINE_CONFIG.blind
+            # singleton directly, ignoring a field-authored PIPELINE_BLIND_MODE
+            # and the edge's own mode override alike.
             seek, _motion_mode = resolve_stop_at_line(
                 StopAtLine.AUTO,
                 edge_override,
-                PIPELINE_CONFIG.blind,
-                PIPELINE_CONFIG.blind,
+                resolve_blind_mode(edge_data, pipeline_cfg),
+                pipeline_cfg.blind,
                 Direction.FRONT,
                 LINE_BOARD_COUNT,
                 auto_rule_active,
             )
             return "sensor" if seek else "distance"
         return None
+
+    def _pipeline_cfg() -> "PipelineConfig":
+        """Return the field-sourced :class:`PipelineConfig`, degrading to the singleton.
+
+        Mirrors ``PipelineConfig.from_field_data(field_data)`` -- the same
+        whole-config resolve :func:`tools.path_planner.compiler.compile_path`
+        and the sim thread through every hop -- but degrades to the
+        module-level :data:`PIPELINE_CONFIG` singleton in TWO cases, so this
+        pass (which runs BEFORE :func:`_validate_pipeline_config`, ``validate``
+        step 13) never crashes and never misreports:
+
+        1. ``from_field_data`` RAISES (``KeyError`` on an unresolvable enum
+           member name, ``ValueError`` from ``__post_init__`` on a circular
+           ``DEFAULT``, or a defensive ``TypeError``) -- step 13 is the pass
+           that reports a malformed ``PIPELINE_*`` key with a precise,
+           key-pathed :class:`FieldDataError`; this pass must not surface a
+           bare exception from a resolve it does not own.
+        2. the resolved ``cfg.blind IS BlindMode.STOP_AT_LINE`` -- the SUBTLE
+           case: ``"STOP_AT_LINE"`` is a perfectly valid :class:`BlindMode`
+           member name, so ``from_field_data`` accepts it happily
+           (``__post_init__`` only rejects the ``DEFAULT`` sentinels) and case
+           1's exception guard never fires for it. But ADR-064 forbids
+           ``STOP_AT_LINE`` as the pipeline blind DEFAULT (a seek is authored
+           on the ``stop_at_line`` axis, not as a blind motion mode) --
+           step 13 (``_validate_pipeline_config``'s ``STOP_AT_LINE`` guard) is
+           the one place that reports THAT precise rejection
+           ("author stop_at_line: on"). Without this degrade, every
+           non-overridden BLIND pivot leg on such a field would classify
+           against the disallowed ``STOP_AT_LINE`` pipeline default one pass
+           early (via ``resolve_blind_mode``'s inherit-on-DEFAULT fallback in
+           ``_regime``'s EDGE_BLIND branch) and could trip a
+           REAR-impossible / board-count :class:`FieldDataError` FIRST --
+           changing which error the caller ultimately sees instead of the
+           precise ADR-064 one.
+
+        Asymmetric by design versus the sibling :func:`_pipeline_direction_default`:
+        that one degrades a SINGLE field (``PIPELINE_DIRECTION_MODE``) to
+        ``DirectionMode.DEFAULT`` on a bad name, because ``_static_direction_pin``
+        only ever needs that one enum. This one degrades the WHOLE resolved
+        :class:`PipelineConfig` to the singleton, because :func:`_regime` needs a
+        complete, always-constructible ``cfg`` to pass into
+        :func:`tools.path_planner.sim.runtime.resolve_blind_mode` (which reads
+        ``cfg.blind`` as its inherit-on-DEFAULT fallback), not one field in
+        isolation. Do not "fix" this asymmetry by making the two closures share
+        a shape -- each degrades exactly what its one caller needs.
+
+        .. note::
+           Returning the SINGLETON (not a synthesized default) on degrade is
+           load-bearing: the two tests that monkeypatch ``PIPELINE_CONFIG`` to
+           ``STOP_AT_LINE`` (``test_field_data.py``,
+           ``test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_default``
+           and ``..._incoming_blind_seeks_under_stop_at_line_pipeline_default``)
+           depend on the pivot pass still classifying ``"sensor"``, and it does.
+           That patched-singleton state is also the ONE regime where threading
+           the real arg3 differs from the old behavior: with the singleton
+           patched to ``STOP_AT_LINE``, an incoming leg carrying its OWN ``mode``
+           override now resolves to that override (correctly -- per-edge beats
+           pipeline, matching the compiler) instead of the pipeline
+           ``STOP_AT_LINE``, flipping it from ``"sensor"`` to ``"distance"``.
+           Unreachable from authored field data (ADR-064 forbids both spellings),
+           but both fixtures above sit one ``mode:`` key away from it -- hence
+           their explicit "no mode override" comments. Don't add one without
+           expecting the classification to change.
+
+        :return: a fully-resolved :class:`PipelineConfig`; the field-sourced one
+            when it resolves cleanly and clears the ``STOP_AT_LINE`` guard,
+            else the module-level :data:`PIPELINE_CONFIG` singleton.
+        """
+        try:
+            resolved = PipelineConfig.from_field_data(field_data)
+        except (KeyError, ValueError, TypeError):
+            return PIPELINE_CONFIG
+        if resolved.blind is BlindMode.STOP_AT_LINE:
+            return PIPELINE_CONFIG
+        return resolved
 
     def _pipeline_direction_default() -> "DirectionMode":
         """Return the field-sourced pipeline direction default as a DirectionMode.
@@ -714,6 +832,13 @@ def _validate_pivot_turns(field_data) -> None:
             return DirectionMode[value]
         except (KeyError, TypeError):
             return DirectionMode.DEFAULT
+
+    # The field-sourced pipeline config, resolved ONCE (not per-edge) -- fed
+    # into every _regime() call below so a field-authored PIPELINE_BLIND_MODE
+    # reaches the pivot pass's seek classification exactly as it reaches the
+    # compiler / sim / emitted routes.cpp (AC1). See _pipeline_cfg for the
+    # two-case degrade-to-singleton contract.
+    pipeline_cfg = _pipeline_cfg()
 
     # The field-wide direction default, resolved once. Folded into every leg's
     # "statically FRONT-pinned" test below (a per-edge pin still overrides it).
@@ -804,8 +929,8 @@ def _validate_pivot_turns(field_data) -> None:
                 f"('{v}','{w}') that is not authored -- add it to "
                 f"LINE_SEGMENTS / BLIND_EDGES / EDGES or fix the triple."
             )
-        in_type, in_distance, in_stop_override = in_attrs
-        out_type, out_distance, out_stop_override = out_attrs
+        in_type, in_distance, in_stop_override, in_edge_data = in_attrs
+        out_type, out_distance, out_stop_override, out_edge_data = out_attrs
 
         # Destination node types drive the regime (issue #64): a LINE hop into a
         # projection node is DISTANCE-terminated, a LINE hop into a junction line
@@ -851,8 +976,12 @@ def _validate_pivot_turns(field_data) -> None:
         # (LINE -> projection node is DISTANCE-terminated).
         in_auto_rule = auto_seek_enabled and is_projection_node(graph, v)
         out_auto_rule = auto_seek_enabled and is_projection_node(graph, w)
-        in_regime = _regime(in_type, in_dest_type, in_stop_override, in_auto_rule)
-        out_regime = _regime(out_type, out_dest_type, out_stop_override, out_auto_rule)
+        in_regime = _regime(
+            in_type, in_dest_type, in_stop_override, in_auto_rule, in_edge_data
+        )
+        out_regime = _regime(
+            out_type, out_dest_type, out_stop_override, out_auto_rule, out_edge_data
+        )
         if in_regime is None or out_regime is None:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an unsupported "
