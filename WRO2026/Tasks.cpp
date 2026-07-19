@@ -779,6 +779,7 @@ bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
     Drive.turnToYaw(90);
     Manipulator.boxClose();
     PathTracker.goTo("shovel2Put").setArrivalDirection(Direction::REAR);
+    Drive.turnToYaw(25);
     Manipulator.boxOpen();
     return true;
 }
@@ -794,6 +795,8 @@ bool TasksClass::pot(const TaskArgs& /*args*/)
 
 bool TasksClass::mosaic(const TaskArgs& /*args*/)
 {
+    Vision.getColor(0);
+    if (Vision.getColor(0) == Config::Color::BLUE)
     return true;
 }
 
