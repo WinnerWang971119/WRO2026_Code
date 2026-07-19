@@ -40,6 +40,7 @@
 #include "Vision.h"
 #include "WheelFloorHarness.h"
 #include "WROLineArray.h"
+#include "YawSource.h"
 
 /**
  * @brief Cooperative tick — every module's `update()` once, same order as
@@ -49,6 +50,9 @@
  */
 void cooperativeTick()
 {
+    // YawSource.update() runs FIRST, as in production: one gated gyro read refreshes the
+    // tick-scoped yaw cache the harness's readYawDeg calls then serve (issue #163, AC-5).
+    YawSource.update();
     LineArray.update();
     Drive.update();
     LineFollower.update();
@@ -70,10 +74,13 @@ void setup()
 
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
-    // All 11 begin()s, same order as WRO2026.ino::setup(). Drive.begin() is REQUIRED here — it
+    // All 12 begin()s, same order as WRO2026.ino::setup(). Drive.begin() is REQUIRED here — it
     // configures MiniR4.DriveDC with the project's left/right motor IDs and reverse flags, so the
-    // probe's Move() drives the wheels identically to the real turn.
+    // probe's Move() drives the wheels identically to the real turn. YawSource.begin() is equally
+    // required: it is the only place the gyro's I2C transport (Wire1 + mux channel) is wired, and
+    // the probe measures its floors off that yaw read.
     if (!LineArray.begin())    { Serial.println(F("[wheel_floor] LineArray begin() FAILED")); }
+    if (!YawSource.begin())    { Serial.println(F("[wheel_floor] YawSource begin() FAILED")); }
     if (!Drive.begin())        { Serial.println(F("[wheel_floor] Drive begin() FAILED")); }
     if (!LineFollower.begin()) { Serial.println(F("[wheel_floor] LineFollower begin() FAILED")); }
     if (!Intersection.begin()) { Serial.println(F("[wheel_floor] Intersection begin() FAILED")); }

@@ -46,6 +46,7 @@
 #include "TurnTuneHarness.h"
 #include "Vision.h"
 #include "WROLineArray.h"
+#include "YawSource.h"
 
 /**
  * @brief Cooperative tick — every module's `update()` exactly once, in the SAME order as
@@ -56,7 +57,7 @@
  * This sketch has no calibration menu, so the guard is always true here and is omitted;
  * `EventTrace.update()` runs unconditionally, doing exactly the same per-tick work.
  *
- * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator -> Tasks ->
+ * Order: YawSource -> LineArray -> Drive -> LineFollower -> Intersection -> Manipulator -> Tasks ->
  *     PathTracker -> Localization -> Mission -> EventTrace.
  */
 void cooperativeTick()
@@ -64,6 +65,11 @@ void cooperativeTick()
     // NOTE: mirror any change to WRO2026.ino::cooperativeTick() here too (and in
     // inoTest/turn_probe + inoTest/tick_bench) or this harness's measured turn dynamics silently
     // drift from what a real nav turn pays.
+
+    // YawSource.update() runs FIRST, as in production: one gated gyro read refreshes the
+    // tick-scoped yaw cache so Drive's in-turn readYawDeg (and this harness's own reads) serve
+    // that single device transaction instead of each triggering an inline re-read (#163, AC-5).
+    YawSource.update();
     LineArray.update();
     Drive.update();
     LineFollower.update();
@@ -85,10 +91,13 @@ void setup()
 
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
-    // All 11 begin()s, in the same order as WRO2026.ino::setup(). On a false return, print and
+    // All 12 begin()s, in the same order as WRO2026.ino::setup(). On a false return, print and
     // CONTINUE (do not halt) — a degraded module still lets the rest of the harness run, and the
     // failure is visible on Serial either way.
+    // YawSource.begin() is NOT optional here: it is the only place the gyro's I2C transport
+    // (Wire1 + mux channel) is wired, and Drive.turnDeg() closes its loop on that yaw read.
     if (!LineArray.begin())    { Serial.println(F("[turn_tune] LineArray begin() FAILED")); }
+    if (!YawSource.begin())    { Serial.println(F("[turn_tune] YawSource begin() FAILED")); }
     if (!Drive.begin())        { Serial.println(F("[turn_tune] Drive begin() FAILED")); }
     if (!LineFollower.begin()) { Serial.println(F("[turn_tune] LineFollower begin() FAILED")); }
     if (!Intersection.begin()) { Serial.println(F("[turn_tune] Intersection begin() FAILED")); }
