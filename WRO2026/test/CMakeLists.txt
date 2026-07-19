@@ -1638,6 +1638,60 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
+# Test executable — GyroDecodePolicy math (ADR-074, T6, TC1-TC12).
+#
+# `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` /
+# `gyroShortestDelta` / `gyroReadPlausible` are header-only inline policies
+# (`GyroDecodePolicy.h`) with NO Arduino / Config surface (only `<stdint.h>` +
+# `<math.h>`) -- the same `TurnSignPolicy.h` / `PivotTrimPolicy.h` precedent.
+#
+# Pure math with zero Arduino / Config.h surface, so this target needs no mocks /
+# SUT sources -- just the sketch include dir for the self-contained header (mirrors
+# `test_turn_sign_policy` immediately above, for the same reason).
+# =========================================================================================
+add_executable(test_gyro_decode_policy
+    ${TEST_DIR}/test_gyro_decode_policy.cpp
+)
+target_include_directories(test_gyro_decode_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME gyro_decode_policy COMMAND test_gyro_decode_policy)
+
+# =========================================================================================
+# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-074, TC22 / AC9, compile-fail).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when `Config::GYRO_YAW_SIGN` is not
+# exactly +/-1. Built with `-DGYRO_YAW_SIGN_DEFAULT=0.5f` (the `#ifndef`-guarded override
+# hook in `config/ConfigNav.h`), so `GYRO_YAW_SIGN == 0.5f` -- a value that would silently
+# scale rather than mirror the decoded gyro heading. The build is expected to FAIL; ctest
+# uses PASS_REGULAR_EXPRESSION on the metacharacter-free substring
+# `GYRO_YAW_SIGN must be exactly`. When PASS_REGULAR_EXPRESSION is set, ctest decides
+# pass/fail purely on whether the regex matches the captured build output and IGNORES the
+# process exit code -- so the test PASSES only when the intended assert fires, and FAILS if
+# the build broke for any unrelated reason.
+#
+# Mirrors `test_imu_yaw_sign_zero` EXACTLY: `EXCLUDE_FROM_ALL` +
+# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, and NO
+# `add_mock_force_includes(...)` so a typo in a mock header cannot mask the intended
+# diagnostic. Include dirs = sketch + mocks (via `COMMON_INCLUDES`) so the quoted
+# `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# =========================================================================================
+add_executable(test_gyro_config_fail
+    ${TEST_DIR}/test_gyro_config_fail.cpp
+)
+set_target_properties(test_gyro_config_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_gyro_config_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_config_fail PRIVATE GYRO_YAW_SIGN_DEFAULT=0.5f)
+
+add_test(NAME gyro_config_fail_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_gyro_config_fail --config $<CONFIG>
+)
+set_tests_properties(gyro_config_fail_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_YAW_SIGN must be exactly")
+
+# =========================================================================================
 # Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-045, TC7 / AC4, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::IMU_YAW_SIGN` is not
@@ -2652,6 +2706,62 @@ target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
 
 # =========================================================================================
+# External-gyro bridge pins (T3b, issue #163 / ADR-074).
+#
+# Every host target that links `src/nav/YawSource.cpp` also pulls the `MatrixColor` gyro mock,
+# whose `getColor` bridge synthesizes bytes from `mmL.mockYawDeg` so `readYawDeg` round-trips to
+# `mmL.mockYawDeg * IMU_YAW_SIGN`. That round-trip is EXACT only when the mock's bridge scale/sign
+# and production's `Config::GYRO_SCALE` / `GYRO_YAW_SIGN` are pinned to the same values. At the
+# shipped default `GYRO_SCALE = 0.997f` the bridge quantizes ~0.27 deg at 90 deg, which truncates
+# past the 0.5 deg turn tolerance and fails the turn-gated FSM suites. A target-wide
+# `target_compile_definitions` of `GYRO_SCALE_DEFAULT=1.0f` (and `GYRO_YAW_SIGN_DEFAULT=-1.0f`,
+# matching `IMU_YAW_SIGN`'s default) reaches BOTH the mock (`kBridge*`) and `Config.h` identically,
+# making the round-trip integer-exact. REQUIRED, not an optimization (proven while landing T4).
+#
+# KEEP IN SYNC: every target that links `${SKETCH_DIR}/src/nav/YawSource.cpp` must be listed here.
+# A new YawSource-linked target that omits these pins will fail the turn-tolerance FSM asserts.
+# `test_gyro_config_fail` is intentionally ABSENT: it does not link YawSource.cpp and carries its
+# own `GYRO_YAW_SIGN_DEFAULT=0.5f` compile-fail pin.
+# =========================================================================================
+foreach(_yawsrc_target IN ITEMS
+    test_path_tracker_passthrough_on
+    test_path_tracker_passthrough_off
+    test_path_tracker_bidirectional_on
+    test_path_tracker_bidirectional_off
+    test_path_tracker_stop_at_line
+    test_path_tracker_projection
+    test_path_tracker_pass_through_projection
+    test_path_tracker_parity_dump
+    test_localization_offset
+    test_return_to_node_dispatch
+    test_reanchor_at_wall
+    test_reanchor_at_wall_strict
+    test_path_tracker_reset_arrival
+    test_path_tracker_reset_arrival_strict
+    test_yaw_source
+    test_reanchor_heading
+    test_reanchor_heading_strict_off
+    test_path_tracker_heading_reset
+    test_path_tracker_heading_reset_junction_on
+    test_path_tracker_heading_reset_forced_reset
+    test_path_tracker_heading_reset_parity
+    test_path_tracker_blind_chain
+    test_path_tracker_blind_chain_disabled
+    test_path_tracker_blind_chain_hop_cap
+    test_path_tracker_blind_chain_distance_cap
+    test_path_tracker_speed_chain
+    test_path_tracker_settle
+    test_line_follower_real_setspeed
+    test_drive_decel_floor
+    test_drive_decel_floor_identity
+    test_drive_hardening
+    test_path_tracker_lost_line
+    test_turn_pd_integration
+)
+    target_compile_definitions(${_yawsrc_target} PRIVATE
+        GYRO_SCALE_DEFAULT=1.0f
+        GYRO_YAW_SIGN_DEFAULT=-1.0f)
+endforeach()
 # Test executable — Drive.isSeekingLine() + dispatch-tick order (2026-07-18
 # gate-line-array-tick plan, T5; TC1-TC6; AC7).
 #
@@ -2679,6 +2789,12 @@ target_include_directories(test_drive_seek_predicate PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
 add_path_force_includes(test_drive_seek_predicate)    # EventTrace + path_mocks peripherals
 add_test(NAME drive_seek_predicate COMMAND test_drive_seek_predicate)
+# Links src/nav/YawSource.cpp, so pin the MatrixColor gyro-mock round-trip like the
+# YawSource-linked foreach above (External-gyro bridge pins, ADR-074). Kept next to the
+# target since it is defined below that foreach.
+target_compile_definitions(test_drive_seek_predicate PRIVATE
+    GYRO_SCALE_DEFAULT=1.0f
+    GYRO_YAW_SIGN_DEFAULT=-1.0f)
 
 # =========================================================================================
 # Test executable #32 — `approach_ramp_dump` + freshness gate (2026-07-17

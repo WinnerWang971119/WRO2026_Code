@@ -223,6 +223,117 @@ namespace Config
     constexpr float IMU_YAW_SIGN = IMU_YAW_SIGN_DEFAULT;
 
     // =========================================================================================
+    // External gyro (MatrixColor board) raw-read config (ADR-074).
+    //
+    // The external gyro is a THIRD, physically independent I2C board masquerading as an MXColor
+    // device (addr 0x22) that packs a signed 16-bit heading into its G/R registers. `YawSource`
+    // is the sole reader of these five constants, decoding via
+    // `GyroDecodePolicy.h::decodeGyroYawDeg(hiG, loR, GYRO_SCALE, GYRO_YAW_SIGN)`.
+    //
+    // `GYRO_YAW_SIGN` converts the gyro's raw decoded heading into the app CCW-positive frame.
+    // It is PHYSICALLY INDEPENDENT from `IMU_YAW_SIGN` above, which converts app -> STM32-raw
+    // for the unchanged `MoveGyro*` write path (`YawSource::toHwHeading`). The external gyro and
+    // the STM32 coprocessor are two separate devices with independent handedness, so one sign
+    // constant can no longer serve both a read and a write — this is precisely the "third frame
+    // crossing" ADR-045's Trigger to revisit anticipated. Do NOT collapse these two constants,
+    // and do NOT apply either sign anywhere outside its one documented adapter point.
+    // =========================================================================================
+
+    /**
+     * @brief I2C port label the external gyro's `MatrixColor` board answers on.
+     *
+     * A port LABEL (I2C1..I2C4), matching the `LINE_FRONT_I2C_PORT` / `LINE_REAR_I2C_PORT`
+     * convention — the 0-based PCA9548A mux channel is `GYRO_I2C_PORT - 1`; do NOT pre-convert
+     * here.
+     *
+     * @note Default `3` (I2C3) is the mentor's wiring; the line boards sit on I2C1/I2C4 so
+     *       there is no conflict out of the box. A rewire is a one-constant change.
+     * @note A `static_assert` in `ConfigChecks.h` enforces the value is in `[1,4]` and distinct
+     *       from both `LINE_FRONT_I2C_PORT` and (when `LINE_BOARD_COUNT == 2`)
+     *       `LINE_REAR_I2C_PORT`.
+     * @note Consumer: `YawSource` (the I2C mux wiring in `begin()`).
+     */
+#ifndef GYRO_I2C_PORT_DEFAULT
+#define GYRO_I2C_PORT_DEFAULT 3
+#endif
+    constexpr uint8_t GYRO_I2C_PORT = GYRO_I2C_PORT_DEFAULT;
+
+    /**
+     * @brief Positive scale calibration applied to the gyro's raw decoded heading.
+     *
+     * @note Measured on this chassis's gyro via the `inoTest/gyro_calib/` SCALE phase (2026-07),
+     *       replacing the mentor's `0.997f` placeholder. Re-run that sketch and re-paste if the
+     *       gyro board is swapped.
+     * @note Deliberately carries NO value-pinning tripwire (unlike a tuned drive constant): this
+     *       constant is *meant* to be overwritten by the calibration output, not defended once
+     *       set to a specific number.
+     * @note A `static_assert` in `ConfigChecks.h` enforces only a sane band around `1.0f` — a
+     *       structural sanity gate, not a pin to this specific placeholder value.
+     * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource`.
+     */
+#ifndef GYRO_SCALE_DEFAULT
+#define GYRO_SCALE_DEFAULT 0.9945f
+#endif
+    constexpr float GYRO_SCALE = GYRO_SCALE_DEFAULT;
+
+    /**
+     * @brief Sign that converts the external gyro's raw decoded heading into the app
+     *        CCW-positive frame.
+     *
+     * Applied EXCLUSIVELY inside `GyroDecodePolicy.h::decodeGyroYawDeg` (via `YawSource`); no
+     * other module may apply it — a secondary application would double-negate the sign and
+     * reverse all gyro-sourced heading math, the same one-place rule `IMU_YAW_SIGN` documents
+     * above.
+     *
+     * @note Confirmed `-1.0f` on this chassis's gyro via the `inoTest/gyro_calib/` SIGN phase
+     *       (2026-07): the mentor's block code carries no sign, so handedness could only be read
+     *       off the bench. Re-run that sketch and re-paste if the gyro board is swapped.
+     * @note A `static_assert` in `ConfigChecks.h` enforces the value is exactly `+1.0f` or
+     *       `-1.0f` — mirrors the `IMU_YAW_SIGN` structural assert above.
+     * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource` only.
+     */
+#ifndef GYRO_YAW_SIGN_DEFAULT
+#define GYRO_YAW_SIGN_DEFAULT (-1.0f)
+#endif
+    constexpr float GYRO_YAW_SIGN = GYRO_YAW_SIGN_DEFAULT;
+
+    /**
+     * @brief Plausibility rate bound (deg/s) for the gyro's torn-read gate.
+     *
+     * The rate `GyroDecodePolicy.h::gyroReadPlausible` would use to reject a new reading whose
+     * time-normalized angular step from the last good read exceeds it — a defence against a torn
+     * I2C read decoding to a wildly-wrong-but-in-range heading.
+     *
+     * @note Default `1000.0f` deg/s is roughly 8 deg per ~8 ms cooperative tick — well above any
+     *       rotation rate this chassis can physically achieve.
+     * @warning **Currently UNCONSUMED at runtime.** The plausibility gate was deferred to bench
+     *          (issue #170); `YawSource` gates reads by dead-byte detection only. `gyroReadPlausible`
+     *          remains as pure, unit-tested code, and this constant is reserved for re-adding the
+     *          gate if the bench shows a real torn read.
+     */
+#ifndef GYRO_MAX_STEP_DEG_PER_S_DEFAULT
+#define GYRO_MAX_STEP_DEG_PER_S_DEFAULT 1000.0f
+#endif
+    constexpr float GYRO_MAX_STEP_DEG_PER_S = GYRO_MAX_STEP_DEG_PER_S_DEFAULT;
+
+    /**
+     * @brief Staleness backstop (ms) for `YawSource`'s tick-scoped yaw cache.
+     *
+     * `YawSource::update()` refreshes the cache once per cooperative tick; a consumer that reads
+     * before the first tick, or after `update()` has stopped being called, would otherwise be
+     * served an arbitrarily stale value forever. `readYawDeg` refreshes inline whenever the
+     * cache is absent or older than this many milliseconds.
+     *
+     * @note Default `12` ms is roughly 1.5x the measured ~8 ms cooperative tick — enough slack
+     *       to absorb normal tick jitter without masking a genuinely stuck `update()` loop.
+     * @note Consumer: `YawSource::readYawDeg` (the inline refresh-on-stale path).
+     */
+#ifndef GYRO_CACHE_MAX_AGE_MS_DEFAULT
+#define GYRO_CACHE_MAX_AGE_MS_DEFAULT 12
+#endif
+    constexpr uint8_t GYRO_CACHE_MAX_AGE_MS = GYRO_CACHE_MAX_AGE_MS_DEFAULT;
+
+    // =========================================================================================
     // Localization operator-offset integrator (ADR-042).
     //
     // The `Localization` 2D operator-offset delta (Pillar 1) accumulates how far the chassis

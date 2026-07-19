@@ -67,9 +67,12 @@
  *       active-move work `Drive`/`LineFollower` do mid-mission. This does not move the headline
  *       finding — `LineArray`'s per-tick I2C read dominates regardless of mission state.
  *
- * @note KEEP IN SYNC WITH cooperativeTick(): the 10 segments below (`LineArray, Drive, LineFollower,
- *       Intersection, Manipulator, Tasks, PathTracker, Localization, Mission, EventTrace`) and their
- *       order mirror `WRO2026.ino::cooperativeTick()` by hand. If a module is added to or removed
+ * @note KEEP IN SYNC WITH cooperativeTick(): the 11 segments below (`YawSource, LineArray, Drive,
+ *       LineFollower, Intersection, Manipulator, Tasks, PathTracker, Localization, Mission,
+ *       EventTrace`) and their order mirror `WRO2026.ino::cooperativeTick()` by hand. `YawSource`
+ *       ticks FIRST (it refreshes the tick-scoped gyro-yaw cache before any consumer reads it), but
+ *       its `begin()` mirrors setup()'s `LineArray -> YawSource -> Drive` order. If a module is added
+ *       to or removed
  *       from that function, mirror the change here in THREE places — the `addSegment()` registration
  *       list, the `benchTick()` call list, AND the `SEGMENT_COUNT` constant — or this benchmark
  *       silently drifts from what actually ships. `SEGMENT_COUNT` is the one edit with no compile
@@ -100,6 +103,7 @@
 #include "TickProfiler.h"
 #include "Vision.h"
 #include "WROLineArray.h"
+#include "YawSource.h"
 
 namespace
 {
@@ -113,16 +117,16 @@ namespace
     constexpr uint32_t TICK_GOOD_HZ = 45;
 
     /// @brief Number of ticked `cooperativeTick()` modules registered as profiler segments.
-    constexpr uint8_t SEGMENT_COUNT = 10;
+    constexpr uint8_t SEGMENT_COUNT = 11;
 
     /// @brief Segment indices, assigned in `setup()` in `cooperativeTick()` order.
-    uint8_t segLineArray, segDrive, segLineFollower, segIntersection, segManipulator;
-    uint8_t segTasks, segPathTracker, segLocalization, segMission, segEventTrace;
+    uint8_t segYawSource, segLineArray, segDrive, segLineFollower, segIntersection;
+    uint8_t segManipulator, segTasks, segPathTracker, segLocalization, segMission, segEventTrace;
 
     /// @brief Bench-local runtime gate mirroring #164's `LineFollower.isEnabled() ||
     ///        Drive.isSeekingLine()` predicate, NOT `Config::LINE_ARRAY_TICK_GATE_ENABLED` (a
     ///        compile-time constant cannot measure both paths in one run). `true` selects the
-    ///        gate-OPEN path (all 10 segments run, today's behavior); `false` selects gate-CLOSED
+    ///        gate-OPEN path (all 11 segments run, today's behavior); `false` selects gate-CLOSED
     ///        (`LineArray`, `LineFollower`, `Intersection` skipped). Alternates every completed
     ///        report window (see `loop()`) so one run measures both paths back-to-back (AC6).
     bool gateOpen = true;
@@ -185,7 +189,7 @@ void pollSerial()
 }
 
 /**
- * @brief One instrumented cooperative tick: call each of the 10 ticked modules' `update()` once, in
+ * @brief One instrumented cooperative tick: call each of the 11 ticked modules' `update()` once, in
  *        `cooperativeTick()` order, timing each call into its profiler segment, then the whole pass.
  * @note `Vision.update()` is deliberately NOT called here — `Vision` is capture-once via a task, not
  *       ticked in the real `cooperativeTick()`.
@@ -201,7 +205,9 @@ void benchTick()
 {
     const uint32_t t0 = micros();
 
-    uint32_t s;
+    uint32_t s = micros();
+    YawSource.update();
+    prof.sampleSegment(segYawSource, micros() - s);
 
     if (gateOpen)
     {
@@ -261,10 +267,12 @@ void setup()
 
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
-    // All 11 begin()s, in the same order as WRO2026.ino::setup() — INCLUDING Vision.begin(), even
+    // All 12 begin()s, in the same order as WRO2026.ino::setup() — INCLUDING Vision.begin(), even
     // though Vision is not a ticked segment below. On a false return, print and CONTINUE (do not
     // halt) — a degraded module just reports near-zero/degraded segment time, which is still useful.
+    // YawSource.begin() mirrors setup()'s position (after LineArray, before Drive), not the tick order.
     if (!LineArray.begin())     { Serial.println(F("[bench] LineArray begin() FAILED")); }
+    if (!YawSource.begin())     { Serial.println(F("[bench] YawSource begin() FAILED")); }
     if (!Drive.begin())         { Serial.println(F("[bench] Drive begin() FAILED")); }
     if (!LineFollower.begin())  { Serial.println(F("[bench] LineFollower begin() FAILED")); }
     if (!Intersection.begin())  { Serial.println(F("[bench] Intersection begin() FAILED")); }
@@ -280,7 +288,8 @@ void setup()
     // no blocking Drive move (no mission, no goTo), so no sync-blocking drain ever fires, and wiring
     // benchTick() as a tick callback would risk re-entering the profiler mid-segment.
 
-    // Register the 10 ticked segments, in cooperativeTick() order.
+    // Register the 11 ticked segments, in cooperativeTick() order.
+    segYawSource    = prof.addSegment("YawSource");
     segLineArray    = prof.addSegment("LineArray");
     segDrive        = prof.addSegment("Drive");
     segLineFollower = prof.addSegment("LineFollower");
@@ -295,8 +304,9 @@ void setup()
     // Fail LOUD on SEGMENT_COUNT drift: if a module was added above but SEGMENT_COUNT was left too
     // small, its addSegment() overflowed and returned TICK_INVALID_SEGMENT, silently dropping that
     // module from every report window. Catch it at boot instead (see the KEEP-IN-SYNC note above).
-    const uint8_t regd[] = { segLineArray, segDrive, segLineFollower, segIntersection, segManipulator,
-                             segTasks, segPathTracker, segLocalization, segMission, segEventTrace };
+    const uint8_t regd[] = { segYawSource, segLineArray, segDrive, segLineFollower, segIntersection,
+                             segManipulator, segTasks, segPathTracker, segLocalization, segMission,
+                             segEventTrace };
     for (uint8_t i = 0; i < sizeof(regd) / sizeof(regd[0]); ++i)
     {
         if (regd[i] == TICK_INVALID_SEGMENT)
