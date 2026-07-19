@@ -380,6 +380,43 @@ public:
     bool readBoard(uint8_t boardIdx, uint8_t out[8]);
 
     /**
+     * @brief Value-blind I2C liveness probe for a specific board — an address ACK, not
+     *        a channel read.
+     *
+     * @param boardIdx `0` for the front board, `1` for the rear board.
+     * @return `true` if the board ACKed its I2C address on its mux channel; `false` if
+     *         `boardIdx >= 2 || boardIdx >= Config::LINE_BOARD_COUNT`, or if the
+     *         address-probe `endTransmission()` did not return `0`.
+     *
+     * @details
+     * Selects the board's mux channel on its `TwoWire` bus — `beginTransmission(ADDR_PCA954X)`,
+     * `write(1 << _ch)`, `endTransmission(1)`, then the same `delayMicroseconds(300)`
+     * settle that `MatrixColor::i2cMUXSelect()` performs after the channel write (private
+     * vendor method — mirrored here rather than called; see
+     * `MiniR4ColorSensorExt.cpp` around line 189) — then probes the device address:
+     * `beginTransmission(MatrixColor_ADDR)` followed by `endTransmission() == 0`.
+     *
+     * This method proves ONLY that the board answered its I2C address on its mux
+     * channel. It inspects NO channel value, writes NO device register, and calls
+     * neither `setLight(...)` nor `MatrixColor::begin()` — the latter ID-checks
+     * `Device_ID == 0x43` but also resets `Device_CONFIG` and blocks ~550 ms, which
+     * would destroy the Layer-1 firmware illumination calibration that
+     * `WROLineArray::begin()` latched (volatile, not re-applied anywhere else — see
+     * the two-layer calibration contract in the file-level doxygen). `_lastChannels`,
+     * `_lastOnline`, and the `_activeBoard` selection are left completely untouched.
+     * Cost is ~1 ms (two short I2C transactions plus a 300 us settle).
+     *
+     * @note **Not a substitute for, nor equivalent to, `readBoard()`.** `readBoard()`'s
+     *       `true` return is NOT a liveness signal: `MatrixColor::getColor()` has no
+     *       I2C error return, so a bus failure surfaces as a `0` byte indistinguishable
+     *       from a legitimately dark channel, and `_readBoardInternal()` "accept[s] the
+     *       read at face value and return[s] true" (see that method's doxygen). An
+     *       address ACK is the only value-blind liveness signal available — that is
+     *       precisely why this method exists.
+     */
+    bool probeBoard(uint8_t boardIdx);
+
+    /**
      * @brief Software per-channel calibration routine — captures min/max over a per-board
      *        5 s sweep (sequential for 2-board configs) and prints a Config-paste-ready
      *        block to Serial.
