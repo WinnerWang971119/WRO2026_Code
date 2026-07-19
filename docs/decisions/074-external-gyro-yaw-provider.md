@@ -48,12 +48,12 @@ sidesteps that class of bug entirely; it is not the reason for this ADR.)
 
 ## Trigger to revisit
 
-- The STM32 gyro-PID **write** path still steers on the STM32's own onboard IMU while yaw is now
-  **read** from the external gyro — an accepted, tracked split-brain (**#169**): a `MoveGyro*`
-  target derived from the external gyro's zero is serviced against the STM32's own zero, so the
-  first GYRO move after this change is wrong by a large angle, not a slow drift. The fix (an R4-side
-  heading hold that replaces the STM32 gyro-PID write) is in progress on another branch; when it
-  lands, `toHwHeading` and `IMU_YAW_SIGN` likely retire and this ADR should be revisited.
+- **Resolved by [ADR-075](./075-gyro-move-r4-hold.md).** The STM32 gyro-PID **write**
+  path no longer steers on the STM32's own onboard IMU — the accepted, tracked
+  split-brain this line named (**#169**, a `MoveGyro*` target derived from the external
+  gyro's zero serviced against the STM32's own zero) is closed: `Drive::_emitGyroHold`
+  now holds heading with an R4-side per-tick PD against the same external-gyro read this
+  ADR established, and `toHwHeading`/`IMU_YAW_SIGN` have retired.
 - If bench testing (#170) shows an actual torn read (a garbled high/low byte pair spanning two
   samples), re-add the plausibility gate — `GyroDecodePolicy.h::gyroReadPlausible` already exists,
   is pure, and is unit-tested; it is simply not called by `YawSource` yet.
@@ -64,6 +64,9 @@ sidesteps that class of bug entirely; it is not the reason for this ADR.)
   rule this ADR extends to a second, independent device frame; not superseded.
 - [ADR-019](./019-8channel-custom-line-sensor.md) — the `WROLineArray` / `MatrixColor` MXColor
   protocol driver this ADR's gyro read reuses.
-- Issue #169 — GYRO write-path split-brain (STM32 IMU write vs. external-gyro read), tracked
-  follow-up.
+- [ADR-075](./075-gyro-move-r4-hold.md) — resolves the #169 split-brain this ADR's *Trigger to
+  revisit* named: the STM32 gyro-PID write path retires, closing the loop entirely against the
+  external-gyro read this ADR established.
+- Issue #169 — GYRO write-path split-brain (STM32 IMU write vs. external-gyro read) — resolved by
+  ADR-075.
 - Issue #170 — bench verification of the deferred torn-read plausibility gate.

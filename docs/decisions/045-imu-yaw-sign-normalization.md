@@ -3,6 +3,14 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 2)
 
+> **Write half superseded by [ADR-075](./075-gyro-move-r4-hold.md).** The STM32
+> gyro-PID write path (`YawSource::toHwHeading`, `Config::IMU_YAW_SIGN`) is retired —
+> GYRO-straight heading-hold no longer writes a heading target to the STM32's own gyro
+> PID at all; `Drive::_emitGyroHold` closes the loop on the R4 itself. The read half is
+> unaffected by this ADR (it was already moved off the STM32 IMU onto the external gyro
+> board by ADR-074, `Config::GYRO_YAW_SIGN`). This ADR's write-half rule is kept verbatim
+> below as the historical record.
+
 ## Rule
 
 All raw IMU yaw I/O goes through the single `YawSource` module, which applies the per-chassis
@@ -73,3 +81,6 @@ header-only policy that the host harness can reach directly.
 - [ADR-074](./074-external-gyro-yaw-provider.md) — the "third frame crossing" this ADR's *Trigger to
   revisit* anticipated: `YawSource`'s read provider moves to an external gyro board, adding a second,
   independent frame-crossing sign (`GYRO_YAW_SIGN`) alongside the unchanged `IMU_YAW_SIGN` write.
+- [ADR-075](./075-gyro-move-r4-hold.md) — supersedes this ADR's write half (`toHwHeading`,
+  `IMU_YAW_SIGN`); GYRO-straight heading-hold moves to an R4-side PD, retiring the STM32
+  gyro-PID write entirely. The read half (`GYRO_YAW_SIGN`, ADR-074) is unaffected.

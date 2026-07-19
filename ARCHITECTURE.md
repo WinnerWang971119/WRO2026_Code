@@ -38,7 +38,7 @@ WRO2026_Code/
 │   │   │   ├── FieldMap.h            # header-only namespace over Routes::*
 │   │   │   ├── NavTypes.h            # shared nav enums/structs (Direction, StopAtLine, ...)
 │   │   │   ├── Localization.h / .cpp # single-writer node + IMU-yaw offset
-│   │   │   ├── YawSource.h / .cpp    # sole owner of external-gyro yaw read (GYRO_YAW_SIGN) + STM32 gyro-PID write sign (IMU_YAW_SIGN)
+│   │   │   ├── YawSource.h / .cpp    # sole owner of external-gyro yaw read (GYRO_YAW_SIGN)
 │   │   │   └── *Policy.h             # DirectionPolicy, StopAtLinePolicy, EdgeDispatchPolicy, PivotTrimPolicy, ReturnToNodePolicy
 │   │   │
 │   │   ├── mission/
@@ -104,10 +104,10 @@ WRO2026.ino
                     re-anchors via reanchorAtWall, ADR-043;
                     reads its raw yaw through YawSource)
   YawSource ────── (sole owner of the EXTERNAL GYRO yaw read — MXColor board on I2C3, decoded via
-                    GyroDecodePolicy.h and Config::GYRO_YAW_SIGN — plus the STM32 gyro-PID write
-                    sign Config::IMU_YAW_SIGN (toHwHeading, unchanged); no longer reads the STM32
-                    IMU for yaw; read by Drive — turn loop + gyro-straight writes — and
-                    Localization — heading; ADR-045, extended by ADR-074)
+                    GyroDecodePolicy.h and Config::GYRO_YAW_SIGN; no longer reads the STM32
+                    IMU for yaw; read by Drive — turn loop + the R4-side GYRO heading-hold
+                    (_emitGyroHold, ADR-075) — and Localization — heading; ADR-045, extended by
+                    ADR-074 and ADR-075)
   EncoderSource ── (util layer, sits BELOW Drive / LineFollower / ManipBelt; sole owner of
                     lower-MCU per-motor encoder + drive task-done reads, surfacing the MMLower
                     RESULT the vendor read paths discard; readDegrees (surfacing) / readDegreesOr
@@ -142,12 +142,12 @@ writer module does not.
 | Module | Owns | Key surface |
 |---|---|---|
 | `Config` | umbrella over `config/` per-domain sub-headers (Global/Drive/Line/Nav/Mission/Manipulator/Vision/Checks) | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
-| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; wall-zero push via `wallStop` (reuses the stall watchdog inverted, ADR-043); shared resolvers via header-only policies `StopAtLinePolicy.h` / `DirectionPolicy.h` / `PivotTrimPolicy.h` / `TurnSignPolicy.h`; reads raw yaw + writes gyro headings via `YawSource` (ADR-045) | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `wallStop(cm).setReverse(...).setBackOff(...).setTimeout(...)`, `wallStopTimedOut()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
+| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; wall-zero push via `wallStop` (reuses the stall watchdog inverted, ADR-043); shared resolvers via header-only policies `StopAtLinePolicy.h` / `DirectionPolicy.h` / `PivotTrimPolicy.h` / `TurnSignPolicy.h`; reads raw yaw via `YawSource` for its R4-side GYRO heading-hold PD (`_emitGyroHold`, ADR-072) | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `wallStop(cm).setReverse(...).setBackOff(...).setTimeout(...)`, `wallStopTimedOut()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
 | `TurnSignPolicy` | header-only turn-direction math extracted from `Drive.cpp` (host-testable, zero Arduino surface) | `normalizeTurnDelta(delta) → int32_t`, `turnSign(foldedDelta) → int8_t`, `turnWheelPattern(sign,pwm,mode) → TurnWheels` |
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |
-| `YawSource` | sole owner of the EXTERNAL GYRO yaw read (MXColor board, I2C3) — decodes the board's raw 16-bit heading via `GyroDecodePolicy.h` and applies `Config::GYRO_YAW_SIGN` once — plus the app→STM32 gyro-PID write sign `Config::IMU_YAW_SIGN` (`toHwHeading`, unchanged); no longer reads the STM32 IMU for yaw (ADR-045, extended by ADR-074); read by `Drive` + `Localization` | `begin() → bool`, `update()`, `zeroHardware()`, `isHealthy() → bool`, `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
+| `YawSource` | sole owner of the EXTERNAL GYRO yaw read (MXColor board, I2C3) — decodes the board's raw 16-bit heading via `GyroDecodePolicy.h` and applies `Config::GYRO_YAW_SIGN` once; no longer reads the STM32 IMU for yaw (ADR-045, extended by ADR-074); read by `Drive` + `Localization` | `begin() → bool`, `update()`, `zeroHardware()`, `isHealthy() → bool`, `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double` |
 | `EncoderSource` | sole owner of lower-MCU per-motor encoder + drive task-done reads; surfaces the `MMLower` RESULT the vendor read paths discard (ADR-066); surfacing vs last-good policy + per-motor last-good cache; read by `Drive` (profile / seek / wall-push / calibration / `getEncL`/`getEncR` / task-done) + `ManipBelt` (belt position); `LineFollower` reaches it via `Drive.getEncL`/`getEncR` | `readDegrees(id,int32_t&) → bool`, `readDegreesOr(id,fallback) → int32_t`, `resetCache(id)`, `isPrevTaskDone() → bool` |
 | `Localization` | current node + IMU-yaw offset (single writer); reads its raw yaw through `YawSource` | `zeroHeadingFromCurrent()`, `getCurrentNode()`, `getHeadingDeg()`, `toImuYaw(world)`, `onIntersection(advanceTo)`, `onDeadReckonedAdvance(advanceTo)`, `reanchorAtWall(axis,coord,heading)` (wall-zero re-anchor, ADR-043) |
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |
@@ -195,7 +195,7 @@ No `new` for system objects. No passing `Drive&` into every constructor. One ins
 | Motor speed → PWM | **STM32 firmware (vendor).** Not ours. |
 | Motor position → speed | **STM32 firmware (vendor).** Not ours. |
 | Sync mode (left vs right encoder match) | STM32 firmware (`MoveSync`). Gains in `Config::SYNC_PID_*`. |
-| Gyro mode (yaw lock during straights) | STM32 firmware (`MoveGyro`). Gains in `Config::GYRO_PID_*`. |
+| Gyro mode (yaw lock during straights) | **App code**, in `Drive::_emitGyroHold` (per-tick PD, ADR-072). Gains in `Config::GYRO_HOLD_KP` / `GYRO_HOLD_KD`. |
 | Turn (IMU yaw → wheel diff) | **App code**, in `Drive::_updateTurnProfile` (per-tick PD, ADR-068). Gains in `Config::TURN_KP` / `TURN_KD`, plus the `TURN_CREEP_PWM` / `TURN_BREAKAWAY_PWM` / `TURN_SLEW_PWM_PER_TICK` floors. |
 | Line offset → wheel-speed difference | **App code**, in `LineFollower::update()`. |
 
@@ -222,4 +222,4 @@ When writing or reviewing any module, confirm:
 - [ ] All public methods are either pure queries (`isDone()`, `getError()`) or one-shot commands (`start()`, `setSpeed()`); no method does both
 - [ ] Loop iteration count or time bound is provable for any internal `for`/`while`
 - [ ] Verbs with 3+ knobs use the fluent builder pattern; 0–2 knobs use direct calls (see [DECISIONS.md](./DECISIONS.md))
-- [ ] Continuous primitives (`setSpeed`, `setSpeedSync`, `forwardGyro`, `stop`) bypass the Drive queue; bounded/profiled moves go through it
+- [ ] Continuous primitives (`setSpeed`, `setSpeedSync`, `stop`) bypass the Drive queue; bounded/profiled moves go through it

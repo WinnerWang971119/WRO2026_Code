@@ -162,6 +162,37 @@ namespace Config
                   "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
                   "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
 
+    // -----------------------------------------------------------------------------------------
+    // GYRO straight heading-hold PD checks (ConfigDrive.h, ADR-075, issue #169)
+    //
+    // `Drive::_emitGyroHold` (via `GyroHoldPolicy.h`) is a per-tick PD + never-reverse clamp
+    // driven by the external gyro. These four asserts pin the basic sign/range sanity of the
+    // hold's knobs — the gains themselves ship UNVERIFIED (mentor `gyro_move` placeholders,
+    // AC9 hardware-gated), so this is a structural gate, not a value pin.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(GYRO_HOLD_KP > 0.0f,
+                  "Config::GYRO_HOLD_KP must be > 0 — a zero or negative proportional gain would "
+                  "either apply no heading correction at all or steer AWAY from the target, and "
+                  "Drive::_emitGyroHold has no other authority source to hold a GYRO straight to "
+                  "heading.");
+
+    static_assert(GYRO_HOLD_KD >= 0.0f,
+                  "Config::GYRO_HOLD_KD must be >= 0 — a negative derivative gain would invert "
+                  "the damping term into positive feedback on yaw rate, amplifying oscillation "
+                  "instead of damping it.");
+
+    static_assert(GYRO_HOLD_MAX_CORR_PWM > 0 && GYRO_HOLD_MAX_CORR_PWM <= PWM_MAX,
+                  "Config::GYRO_HOLD_MAX_CORR_PWM must be in (0, PWM_MAX] — zero or negative "
+                  "disables all heading correction (a zero-width or inverted clamp), and a value "
+                  "above PWM_MAX could command a per-wheel PWM beyond the legal range before the "
+                  "final ±PWM_MAX cap in GyroHoldPolicy.h::gyroHoldWheels.");
+
+    static_assert(GYRO_HOLD_STALE_MS > 0,
+                  "Config::GYRO_HOLD_STALE_MS must be > 0 — zero would force the derivative term "
+                  "to 0 on every tick (even back-to-back ones), silently degrading the GYRO "
+                  "heading hold to P-only.");
+
     // Line-junction predicate checks (ConfigLine.h, issue #152).
     //
     // COUPLED SITE: WROLineArrayClass::getJunctionType() classifies against these three knobs
@@ -334,16 +365,9 @@ namespace Config
     // -----------------------------------------------------------------------------------------
     // Localization / IMU checks (ConfigNav.h)
     //
-    // COUPLED SITES: Config::IMU_YAW_SIGN is the per-chassis CW->CCW yaw sign applied by
-    // YawSource::readYawDeg (raw STM32 read -> app frame) and YawSource::toHwHeading (app
-    // heading -> STM32 gyro-PID target). It is a PURE SIGN, never a scale factor: every read
-    // and every gyro-heading write multiplies by it exactly once, so any magnitude other than
-    // +/-1 would silently scale all heading math. Pin it here next to the coupled call sites.
-    // -----------------------------------------------------------------------------------------
-    static_assert(IMU_YAW_SIGN == 1.0f || IMU_YAW_SIGN == -1.0f,
-                  "Config::IMU_YAW_SIGN must be exactly 1.0f or -1.0f -- it is the pure "
-                  "CW-to-CCW sign applied by YawSource::readYawDeg and YawSource::toHwHeading, "
-                  "not a scale factor. See config/ConfigNav.h.");
+    // Config::IMU_YAW_SIGN and its tripwire were RETIRED in issue #169 (ADR-075): the STM32
+    // gyro-PID write path (YawSource::toHwHeading) is gone, so nothing applies an app->STM32 yaw
+    // sign anymore. The surviving read-path sign is Config::GYRO_YAW_SIGN, checked below.
 
     // -----------------------------------------------------------------------------------------
     // External gyro checks (ConfigNav.h, ADR-074)

@@ -619,7 +619,6 @@ public:
     // --- Continuous primitives — no-op. ---
     uint8_t setSpeed(int16_t, int16_t) { return 0x00; }
     uint8_t setSpeedSync(int16_t, int16_t) { return 0x00; }
-    uint8_t forwardGyro(int16_t) { return 0x00; }
 
     /**
      * @brief Records a `stop` drive op so a task-body `Drive.stop()` stays in

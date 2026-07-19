@@ -27,10 +27,10 @@
  * comment above `test_path_tracker_passthrough_on` in CMakeLists.txt — MINUS PathTracker.cpp /
  * Localization.cpp / the fixture routes, since this target drives `Drive` directly and never
  * touches PathTracker):
- *   - Links the REAL `Drive.cpp` + `YawSource.cpp` (Drive.cpp's turn-profile state machine calls
- *     `YawSource::readYawDeg` / `readYawDegOr`, and its GYRO emit branch references
- *     `YawSource::toHwHeading` — the symbol must resolve at link time even though every
- *     scenario here uses the default SYNC mode and never executes that branch) + `path_mocks.cpp`
+ *   - Links the REAL `Drive.cpp` + `YawSource.cpp` (Drive.cpp's turn-profile state machine and its
+ *     GYRO heading-hold both call `YawSource::readYawDeg` / `readYawDegOr` — the symbols must
+ *     resolve at link time even though every scenario here uses the default SYNC mode and never
+ *     executes that branch) + `path_mocks.cpp`
  *     (facade globals: `MiniR4` / `Serial` / `Serial1` / `EventTrace` / `g_mockMillis` — NOT
  *     `Drive`, so it never collides with the real `Drive.cpp`, the sole definer of `Drive`).
  *   - `${SKETCH_DIR}` leads the include path (the inversion) so the real `Drive.h` / `YawSource.h`
@@ -396,16 +396,18 @@ void tc9_wallstop_square_fault_guard()
     // _wallState == PUSH and _moveDone == false, so this would read false.
     ASSERT_TRUE(Drive.isIdle());
 
-    const uint32_t moveGyroCallsAfterFault = MiniR4.DriveDC.moveGyroCallCount;
+    const uint32_t moveCallsAfterFault = MiniR4.DriveDC.moveCallCount;
 
-    // One further tick. If PUSH had wrongly started (the bug), _updateWallStop's PUSH branch
-    // would command the flat push PWM via `_emitContinuous(DriveMode::GYRO, ...)` ->
-    // `MiniR4.DriveDC.MoveGyro(...)` (wallStop's default mode is GYRO — see WallStopBuilder). With
-    // the fix _wallState is already IDLE, so _updateWallStop() short-circuits at its very first
-    // line and nothing fires.
+    // One further tick. If PUSH had wrongly started (the bug), _updateWallStop's PUSH branch would
+    // command the flat push PWM via `_emitContinuous(DriveMode::GYRO, ...)` (wallStop's default mode
+    // is GYRO — see WallStopBuilder), which post issue #169 runs the R4 heading hold and dispatches
+    // `MiniR4.DriveDC.Move(...)` (raw), NOT `MoveGyro`. So the escaped-PUSH tell is now a NEW raw
+    // `Move` this tick. The fault already fired ABOVE (its stop is counted before this capture), so
+    // this single idle tick is a clean window. With the fix _wallState is already IDLE, so
+    // _updateWallStop() short-circuits at its very first line and nothing fires.
     Drive.update();
 
-    ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, moveGyroCallsAfterFault);
+    ASSERT_EQ(MiniR4.DriveDC.moveCallCount, moveCallsAfterFault);
     ASSERT_TRUE(Drive.isIdle());
 }
 

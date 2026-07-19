@@ -109,11 +109,13 @@ constexpr float kClearedOffsetEpsCm = 0.01f;
 // along that heading through the real integrator, then `goTo(anchor).async()` so
 // the DEQUEUE return prologue fires. The return drives FORWARD toward
 // `atan2(-off.y, -off.x)` == `pushHeadingDeg + 180`, so park that return heading
-// every tick (the `driveToSeekInFlight` idiom) until the return DRIVE emits — for a
-// LINE-seek that is the GYRO `MoveGyro` continuous emission; for a dead-reckon
-// return that is the profiled SYNC `MoveSync` emission. The shared pre-turn runs
-// `Move(L,R)` (NOT MoveSync/MoveGyro), so a non-zero `moveSync`/`moveGyro` count
-// cleanly distinguishes "return drive in flight" from "still turning".
+// every tick (the `driveToSeekInFlight` idiom) until the return DRIVE is dispatched —
+// for a LINE-seek that is the seek's `LineArray.setReverseActive(...)` board flip at
+// dispatch (post issue #169 the GYRO seek runs the R4 heading hold over raw `Move`, so
+// there is no `MoveGyro` to wait on); for a dead-reckon return that is the profiled SYNC
+// `MoveSync` emission. Only the seek touches `LineArray`, and the dead-reckon SYNC drive
+// is the only `MoveSync` emitter (the shared pre-turn runs raw `Move`, never MoveSync),
+// so each signal cleanly distinguishes "return drive dispatched" from "still turning".
 //
 // The caller then retires the in-flight drive with `expectStopAtLine` (seek) or
 // `expectBlindHop` (dead-reckon) and asserts the re-anchor / fault outcome.
@@ -122,7 +124,7 @@ constexpr float kClearedOffsetEpsCm = 0.01f;
 // @param pushCm         Operator-offset magnitude to manufacture (cm). Must be > the
 //                       return trigger threshold (3) and <= the cap (50).
 // @param pushHeadingDeg App-frame heading the hand-push runs along (the seated facing).
-// @param usesSeek       `true`  -> a LINE-seek return (wait for `moveGyroCallCount`);
+// @param usesSeek       `true`  -> a LINE-seek return (wait for the seek's LineArray board flip);
 //                       `false` -> a dead-reckon return (wait for `moveSyncCallCount`).
 // @return The achieved operator-offset magnitude (so the caller can size
 //         `expectStopAtLine(mag, ...)` from the same value the dispatch clamped to).
@@ -157,11 +159,14 @@ float driveReturnInFlight(const char* anchorName, float pushCm, int16_t pushHead
     {
         mmL.mockYawDeg = (double) hwReturnHeading;
         cooperativeTick();
-        const bool emitted = usesSeek ? (MiniR4.DriveDC.moveGyroCallCount > 0)
-                                      : (MiniR4.DriveDC.moveSyncCallCount > 0);
-        if (emitted)
+        // Seek dispatch flips the line-array board (only the seek FSM touches LineArray); the
+        // dead-reckon return emits the profiled SYNC MoveSync. Post issue #169 the GYRO seek runs
+        // the R4 heading hold over raw Move, so the board flip — not a MoveGyro — marks the seek.
+        const bool dispatched = usesSeek ? (LineArray.mockSetReverseCallCount() > 0u)
+                                         : (MiniR4.DriveDC.moveSyncCallCount > 0);
+        if (dispatched)
         {
-            return pushedMag;    // return drive dispatched + emitting; M2 still at the baseline
+            return pushedMag;    // return drive dispatched; M2 still at the baseline
         }
     }
 
@@ -272,9 +277,11 @@ void test_TC_RN_line_ok_seek_reanchors_via_on_intersection()
     const float expectedCm = driveReturnInFlight("Inter1", /*pushCm*/ 20.0f,
                                                  /*pushHeadingDeg*/ 0, /*usesSeek*/ true);
 
-    // The return seek is in flight: the real GYRO seek emitted its continuous drive
-    // (the representative lower-MCU seek call — RETURN line-seek is GYRO, not SYNC).
-    ASSERT_GT(MiniR4.DriveDC.moveGyroCallCount, 0u);
+    // The return seek is in flight: the seek dispatched (its LineArray board flip fired) and it is
+    // the GYRO seek, NOT a SYNC dead-reckon — post issue #169 the GYRO seek runs the R4 heading
+    // hold over raw `Move`, so it stamps NO `MoveSync` (the SYNC dead-reckon signature).
+    ASSERT_GT(LineArray.mockSetReverseCallCount(), 0u);
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncCallCount, 0u);
     ASSERT_FALSE(Drive.hasFault());
     ASSERT_FALSE(PathTracker.hasFault());
 
@@ -324,7 +331,8 @@ void test_TC_RN_line_noline_routes_off_node_under_fault_gate()
 
     const float expectedCm = driveReturnInFlight("Inter1", /*pushCm*/ 20.0f,
                                                  /*pushHeadingDeg*/ 0, /*usesSeek*/ true);
-    ASSERT_GT(MiniR4.DriveDC.moveGyroCallCount, 0u);
+    ASSERT_GT(LineArray.mockSetReverseCallCount(), 0u);    // the GYRO seek dispatched (board flip)
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncCallCount, 0u);       // GYRO seek, not a SYNC dead-reckon
 
     // Over-advance the encoder past the max margin with the marker held NONE: the real
     // seek's max-distance gate latches LINE_NOT_FOUND (stop + clear queue, so isIdle()).
@@ -373,10 +381,10 @@ void test_TC_RN4c_short_line_return_dead_reckons_via_clear_offset()
                                                  /*pushHeadingDeg*/ 0, /*usesSeek*/ false);
     (void) expectedCm;
 
-    // It DID NOT seek — the dead-reckon branch issues a SYNC `driveDist`, never a GYRO seek
-    // (so no `MoveGyro` and no `LINE_NOT_FOUND` path can fire). This is the load-bearing proof
-    // that the distance gate (not the LINE kind) routed the return.
-    ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, 0u);
+    // It DID NOT seek — the dead-reckon branch issues a SYNC `driveDist`, never a seek (so the
+    // LineArray board is never flipped and no `LINE_NOT_FOUND` path can fire). This is the
+    // load-bearing proof that the distance gate (not the LINE kind) routed the return.
+    ASSERT_EQ(LineArray.mockSetReverseCallCount(), 0u);    // no seek dispatched
     ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, 0u);
     ASSERT_FALSE(Drive.hasFault());
 
@@ -394,7 +402,7 @@ void test_TC_RN4c_short_line_return_dead_reckons_via_clear_offset()
     const Offset2D off = Localization.getOffsetFromNode();
     ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < kClearedOffsetEpsCm);
     ASSERT_FALSE(PathTracker.hasFault());
-    ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, 0u);    // re-affirm: never seeked
+    ASSERT_EQ(LineArray.mockSetReverseCallCount(), 0u);    // re-affirm: never seeked
 }
 
 // ===========================================================================
@@ -419,9 +427,9 @@ void test_TC_RN_blind_ok_dead_reckon_reanchors_via_clear_offset()
                                                  /*pushHeadingDeg*/ 0, /*usesSeek*/ false);
     (void) expectedCm;
 
-    // Dead-reckon: SYNC drive emitted, no seek.
+    // Dead-reckon: SYNC drive emitted, no seek (LineArray board never flipped).
     ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, 0u);
-    ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, 0u);
+    ASSERT_EQ(LineArray.mockSetReverseCallCount(), 0u);
     ASSERT_FALSE(Drive.hasFault());
 
     expectBlindHop(expectedCm);
