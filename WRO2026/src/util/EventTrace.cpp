@@ -137,9 +137,14 @@ void EventTraceClass::update()
     _emitHeartbeat();
 
     // -----------------------------------------------------------------------------------------
-    // Render only when something new arrived this tick.
+    // Render only when something new arrived this tick AND rendering is not suppressed.
+    //
+    // Suppression (setRenderEnabled(false)) gates ONLY this OLED write — polling and the
+    // heartbeat above already ran unconditionally. `_dirty` is deliberately left set while
+    // suppressed rather than cleared, so the next update() after render re-enables repaints the
+    // full accumulated ring instead of silently dropping whatever arrived in the meantime.
     // -----------------------------------------------------------------------------------------
-    if (_dirty)
+    if (_dirty && _renderEnabled)
     {
         _render();
         _dirty = false;
