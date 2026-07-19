@@ -133,29 +133,50 @@ def final_heading_after(
     path: List[str],
     start_heading_deg: float,
     graph: nx.DiGraph,
+    field_data=None,
 ) -> float:
     """Return the chassis body heading the robot would have at ``path[-1]``.
 
-    Mirrors :func:`compile_path`'s per-hop direction resolution so the two
-    can never disagree: every hop is run through
-    :func:`tools.path_planner.sim.runtime.resolve_direction` with the same
-    inputs ``compile_path`` uses (per-edge ``direction_override``, the global
-    :data:`PIPELINE_CONFIG.direction`, ``Direction.AUTO`` builder overrides,
-    the running heading, the edge's forward heading, the last-hop flag, and
-    the module-level kill-switch / board-count constants). The body-target
-    heading is ``edge_heading`` for FRONT hops and ``(edge_heading + 180) %
-    360`` for REAR hops, and the running heading advances onto that body-target
-    UNCONDITIONALLY every hop (the one logical-heading rule of #147, identical to
-    ``compile_path`` and ``_emit_turn_to``) -- so a REAR final hop returns the
-    ``+180`` chassis heading the robot is actually left on rather than the raw
-    forward edge heading, and a chain of individually sub-tolerance hops can
-    never leave a residual that this function would report differently from the
-    heading ``compile_path`` drives.
+    Mirrors :func:`compile_path`'s per-hop direction resolution: every hop is
+    run through :func:`tools.path_planner.sim.runtime.resolve_direction` with
+    the same inputs ``compile_path`` uses (per-edge ``direction_override``,
+    the field-sourced ``cfg.direction`` -- see ``field_data`` below --,
+    ``Direction.AUTO`` builder overrides, the running heading, the edge's
+    forward heading, the last-hop flag, and the module-level kill-switch /
+    board-count constants). The body-target heading is ``edge_heading`` for
+    FRONT hops and ``(edge_heading + 180) % 360`` for REAR hops, and the
+    running heading advances onto that body-target UNCONDITIONALLY every hop
+    (the one logical-heading rule of #147, identical to ``compile_path`` and
+    ``_emit_turn_to``) -- so a REAR final hop returns the ``+180`` chassis
+    heading the robot is actually left on rather than the raw forward edge
+    heading, and a chain of individually sub-tolerance hops can never leave a
+    residual that this function would report differently from the heading
+    ``compile_path`` drives.
+
+    This function can only be guaranteed to agree with ``compile_path`` when
+    BOTH are given the SAME ``field_data`` (#148). The pipeline direction
+    default is resolved per-call via
+    :meth:`~tools.path_planner.pipeline_config.PipelineConfig.from_field_data`,
+    so calling this function with one ``field_data`` (or none) while
+    ``compile_path`` is compiling the same path against a different
+    ``field_data`` can legitimately resolve a different ``pipeline_default``
+    and disagree on a field that authors a non-default
+    ``PIPELINE_DIRECTION_MODE`` -- there is no implicit sharing between the
+    two calls.
 
     :param path: ordered list of node names; first element is the chassis's
         current node.
     :param start_heading_deg: heading at ``path[0]`` in degrees.
     :param graph: directed graph from :func:`build_graph`.
+    :param field_data: field data module (or any object exposing the optional
+        ``PIPELINE_*`` attributes) to field-source the pipeline direction
+        default from. ``None`` (the default) makes
+        :meth:`~tools.path_planner.pipeline_config.PipelineConfig.from_field_data`
+        fall back to the module-level
+        :data:`~tools.path_planner.pipeline_config.PIPELINE_CONFIG` singleton
+        (every ``getattr`` lookup misses) -- byte-identical to this
+        function's behavior before ``field_data`` existed, so every
+        pre-#148 caller that omits this argument is unaffected.
     :return: chassis body heading in degrees at ``path[-1]``.
     """
     if len(path) <= 1:
@@ -164,7 +185,7 @@ def final_heading_after(
     # Local imports mirror ``compile_path``: ``sim.runtime`` imports the ACT_*
     # tags and ``normalize_turn`` from this module, so the direction-resolution
     # machinery is deferred to call time to avoid the circular dependency.
-    from tools.path_planner.pipeline_config import PIPELINE_CONFIG
+    from tools.path_planner.pipeline_config import PipelineConfig
     from tools.path_planner.sim.runtime import (
         BIDIRECTIONAL_AUTO_ENABLED,
         LINE_BOARD_COUNT,
@@ -172,6 +193,13 @@ def final_heading_after(
         _read_edge_dir_override,
         resolve_direction,
     )
+
+    # Field-source the pipeline direction default exactly as ``compile_path``
+    # does: a ``field_data`` that omits ``PIPELINE_DIRECTION_MODE`` (including
+    # ``None``) falls back to the ``PIPELINE_CONFIG`` singleton, so this stays
+    # byte-identical to the old singleton read for every caller that does not
+    # pass ``field_data``.
+    cfg = PipelineConfig.from_field_data(field_data)
 
     current_heading = start_heading_deg
     last_index = len(path) - 1
@@ -183,7 +211,7 @@ def final_heading_after(
 
         direction = resolve_direction(
             edge_dir_override=_read_edge_dir_override(edge),
-            pipeline_default=PIPELINE_CONFIG.direction,
+            pipeline_default=cfg.direction,
             builder_arrival=Direction.AUTO,
             builder_route=Direction.AUTO,
             current_heading=current_heading,
@@ -229,11 +257,11 @@ def compile_path(
        * Resolve the chassis travel direction for the hop via
          :func:`tools.path_planner.sim.runtime.resolve_direction` (the
          same helper the runtime FSM and ``PathTrackerSim.go_to`` call).
-         Inputs are the per-edge ``direction_override``, the global
-         :data:`PIPELINE_CONFIG.direction`, the running ``current_heading``,
-         the edge's forward heading, whether this is the last hop, and the
-         module-level kill-switch / board-count constants from
-         :mod:`tools.path_planner.sim.runtime`. Builder overrides
+         Inputs are the per-edge ``direction_override``, the field-sourced
+         ``cfg.direction`` (see ``field_data`` below), the running
+         ``current_heading``, the edge's forward heading, whether this is
+         the last hop, and the module-level kill-switch / board-count
+         constants from :mod:`tools.path_planner.sim.runtime`. Builder overrides
          (``arrival`` / ``route``) are always
          :class:`~tools.path_planner.sim.runtime.Direction.AUTO` at
          compile time -- those are runtime-only.
@@ -280,11 +308,16 @@ def compile_path(
         chassis's current node.
     :param start_heading_deg: heading at ``path[0]`` in ``[0, 360)``.
     :param graph: directed graph from :func:`build_graph`.
-    :param field_data: read for ``BLIND_PROJECTION_AUTO_SEEK`` (the local
-        auto-rule that fires a ``stop_at_line`` / ``stop_at_line_reverse``
-        seek on a blind hop whose *destination* node is a ``projection``
-        node). ``getattr`` fallback to ``True`` keeps old callers that
-        predate T11 working unchanged.
+    :param field_data: read for two things. (1) ``BLIND_PROJECTION_AUTO_SEEK``
+        (the local auto-rule that fires a ``stop_at_line`` /
+        ``stop_at_line_reverse`` seek on a blind hop whose *destination* node
+        is a ``projection`` node); ``getattr`` fallback to ``True`` keeps old
+        callers that predate T11 working unchanged. (2) the four mission-wide
+        ``PIPELINE_*`` defaults, via
+        :meth:`PipelineConfig.from_field_data` -- the same field-sourced
+        ``cfg`` :func:`final_heading_after` resolves, which is what lets the
+        two agree (#148). ``None`` falls back to the ``PIPELINE_CONFIG``
+        singleton for every absent key, so old callers stay unchanged.
     :return: list of :data:`Primitive` tuples.
     :raises ValueError: if ``start_heading_deg`` is not in ``[0, 360)``
         or an edge has an unknown type tag.
