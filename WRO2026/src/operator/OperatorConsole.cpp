@@ -73,6 +73,241 @@ namespace
     const uint8_t kBootFlagCount = 13;
 
     /**
+     * @brief `VisionClass::Fault::NONE` as carried by `DiagSample::visionFaultKind`.
+     *
+     * Mirrored as a plain code rather than the enum itself: `Vision.h` is an Arduino-facing
+     * header and including it here would destroy this translation unit's host-linkability. The
+     * four codes below are therefore a COPY of the `VisionClass::Fault` contract, which is
+     * precisely why `judgeVision()` refuses to guess at a value it does not find here.
+     */
+    const uint8_t kVisionFaultNone = 0;
+
+    /** @brief `VisionClass::Fault::READ_TIMEOUT` as carried by `DiagSample::visionFaultKind`. */
+    const uint8_t kVisionFaultReadTimeout = 1;
+
+    /** @brief `VisionClass::Fault::BAD_CHECKSUM` as carried by `DiagSample::visionFaultKind`. */
+    const uint8_t kVisionFaultBadChecksum = 2;
+
+    /** @brief `VisionClass::Fault::BAD_CELL` as carried by `DiagSample::visionFaultKind`. */
+    const uint8_t kVisionFaultBadCell = 3;
+
+    /**
+     * @brief Outcome of judging one SELF TEST check against the current sample.
+     *
+     * `PENDING` is NOT "no data yet" — freshness is decided before a judge is even attempted.
+     * It means the check saw fresh data that is legitimately inconclusive (a battery read whose
+     * non-blocking retry is still in flight) and must keep waiting, bounded by the check's
+     * `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` deadline like any other wait.
+     */
+    enum class CheckVerdict : uint8_t
+    {
+        PENDING = 0,  ///< Fresh but inconclusive; keep waiting until the deadline.
+        PASS    = 1,  ///< The subsystem is fit to run.
+        FAIL    = 2,  ///< The subsystem failed; the sequence halts here.
+    };
+
+    /**
+     * @brief Whether @p check may be run against live hardware at all (AC25).
+     *
+     * Consulted BEFORE the sample: a module whose `begin()` failed is reported straight from the
+     * boot report, with no `ActionRequest` ever issued against it.
+     *
+     * @param check The check about to be entered.
+     * @param boot  The boot health report.
+     * @return `false` if the owning module did not come up, so @p check FAILs without reading.
+     * @note `Check::BATT` answers `true` even when `boot.batt` is `false`. That flag is a
+     *       VOLTAGE verdict sampled once at boot, not an init verdict — `MiniR4.PWR` comes up
+     *       inside `MiniR4.begin()` — and a pack that was low at boot may have been swapped or
+     *       recovered since, so the battery check always takes the live reading.
+     */
+    bool selfTestBootAllows(Console::Check check, const Console::BootReport& boot)
+    {
+        switch (check)
+        {
+        case Console::Check::BATT:
+            return true;
+        case Console::Check::GYRO:
+            return boot.yaw;
+        case Console::Check::VISION:
+            return boot.vision;
+        case Console::Check::LINE:
+            return boot.lineArray;
+        case Console::Check::DONE:
+            return true;
+        }
+        return true;
+    }
+
+    /**
+     * @brief The read @p check must dispatch on entry, if it has one.
+     * @param check The check being entered.
+     * @return `READ_MOSAIC` for `Check::VISION`, `READ_LINE_BOARDS` for `Check::LINE`,
+     *         `ActionRequest::NONE` for the checks served by the PUSHED sample.
+     */
+    Console::ActionRequest selfTestRead(Console::Check check)
+    {
+        switch (check)
+        {
+        case Console::Check::VISION:
+            return Console::ActionRequest::READ_MOSAIC;
+        case Console::Check::LINE:
+            return Console::ActionRequest::READ_LINE_BOARDS;
+        default:
+            return Console::ActionRequest::NONE;
+        }
+    }
+
+    /**
+     * @brief The check that follows @p check in the fixed BATT -> GYRO -> VISION -> LINE order.
+     * @param check The check that just passed.
+     * @return The next check, or `Check::DONE` once `Check::LINE` has passed.
+     */
+    Console::Check selfTestNext(Console::Check check)
+    {
+        switch (check)
+        {
+        case Console::Check::BATT:
+            return Console::Check::GYRO;
+        case Console::Check::GYRO:
+            return Console::Check::VISION;
+        case Console::Check::VISION:
+            return Console::Check::LINE;
+        case Console::Check::LINE:
+        case Console::Check::DONE:
+            return Console::Check::DONE;
+        }
+        return Console::Check::DONE;
+    }
+
+    /**
+     * @brief Judge the battery check against a fresh sample.
+     * @param sample The fresh sample.
+     * @return `PENDING` while a non-blocking retry is in flight, `FAIL` on a flat or unreadable
+     *         pack, else `PASS`.
+     * @note `0.0f` is the documented read-failed sentinel for `battVolts`, so it is tested
+     *       explicitly even though it also trips the threshold — the verdict must read as
+     *       "unreadable", not merely "low".
+     */
+    CheckVerdict judgeBattery(const Console::DiagSample& sample)
+    {
+        if (sample.battRetryPending)
+        {
+            return CheckVerdict::PENDING;
+        }
+        if (sample.battVolts == 0.0f || sample.battVolts < Config::BATT_MIN_VOLTAGE_V)
+        {
+            return CheckVerdict::FAIL;
+        }
+        return CheckVerdict::PASS;
+    }
+
+    /**
+     * @brief Judge the gyro check against a fresh sample.
+     * @param sample The fresh sample.
+     * @return `FAIL` if the yaw read failed or the sensor reports itself unhealthy, else `PASS`.
+     */
+    CheckVerdict judgeGyro(const Console::DiagSample& sample)
+    {
+        if (!sample.gyroReadOk || !sample.gyroHealthy)
+        {
+            return CheckVerdict::FAIL;
+        }
+        return CheckVerdict::PASS;
+    }
+
+    /**
+     * @brief Judge the vision check against a sample refreshed by a COMPLETED `READ_MOSAIC`.
+     *
+     * Link health only (AC14): `READ_TIMEOUT` / `BAD_CHECKSUM` mean the camera did not answer
+     * intelligibly and FAIL. `BAD_CELL` PASSes — it fires when a cell classifies `UNKNOWN`,
+     * which is the expected pre-run state with no game elements placed; judging cell CONTENT
+     * would repeat the mistake already vetoed for the line channels.
+     *
+     * @param sample The fresh sample.
+     * @return `PASS` only for `NONE` and `BAD_CELL`; `FAIL` for every other code.
+     * @note The caller is responsible for only ever handing this a post-read sample. `NONE` is a
+     *       PASS solely because a completed read produced it; `Vision::begin()` clears the fault,
+     *       so the BOOT-state `NONE` would pass an unplugged camera.
+     */
+    CheckVerdict judgeVision(const Console::DiagSample& sample)
+    {
+        // ALLOW-LIST, and deliberately so. Only the two codes proven compatible with a working
+        // camera link PASS; everything else FAILs, INCLUDING codes that do not exist today. The
+        // fault codes above are a hand-mirrored copy of `VisionClass::Fault`, so an unrecognised
+        // value means that contract has changed underneath the console — and the safe reading of
+        // "I do not recognise this" is "not fit to run", never "fine". Written as a deny-list it
+        // would silently PASS every future fault kind, in an advisory that gates a competition
+        // run; every other judge in this sequencer fails closed, and so does this one.
+        switch (sample.visionFaultKind)
+        {
+        case kVisionFaultNone:
+        case kVisionFaultBadCell:
+            return CheckVerdict::PASS;
+
+        case kVisionFaultReadTimeout:
+        case kVisionFaultBadChecksum:
+            return CheckVerdict::FAIL;
+
+        default:
+            return CheckVerdict::FAIL;
+        }
+    }
+
+    /**
+     * @brief Judge the line check against a sample refreshed by a completed `READ_LINE_BOARDS`.
+     *
+     * PASSes iff every CONFIGURED board answered its `probeBoard()` I2C address ACK.
+     *
+     * @param sample The fresh sample.
+     * @return `PASS` iff `lineBoardPresent[b]` holds for every `b < lineBoardCount`.
+     * @note Deliberately inspects NEITHER `lineRaw` NOR `lineBoardOk`. `readBoard()` has no error
+     *       return and accepts an all-zero dead-bus read at face value, so `lineBoardOk` proves
+     *       nothing about liveness (it is display validity only), and channel values false-fail a
+     *       perfectly live bar held off the mat. The address ACK is the sole liveness verdict.
+     */
+    CheckVerdict judgeLineBoards(const Console::DiagSample& sample)
+    {
+        uint8_t boards = sample.lineBoardCount;
+        if (boards > kLineBoardMax)
+        {
+            boards = kLineBoardMax;
+        }
+
+        for (uint8_t b = 0; b < boards; ++b)
+        {
+            if (!sample.lineBoardPresent[b])
+            {
+                return CheckVerdict::FAIL;
+            }
+        }
+        return CheckVerdict::PASS;
+    }
+
+    /**
+     * @brief Dispatch @p check to its judge.
+     * @param check  The active check.
+     * @param sample The sample, already proven fresh by the caller.
+     * @return The check's verdict; `PASS` for `Check::DONE`, which has nothing to judge.
+     */
+    CheckVerdict selfTestJudge(Console::Check check, const Console::DiagSample& sample)
+    {
+        switch (check)
+        {
+        case Console::Check::BATT:
+            return judgeBattery(sample);
+        case Console::Check::GYRO:
+            return judgeGyro(sample);
+        case Console::Check::VISION:
+            return judgeVision(sample);
+        case Console::Check::LINE:
+            return judgeLineBoards(sample);
+        case Console::Check::DONE:
+            break;
+        }
+        return CheckVerdict::PASS;
+    }
+
+    /**
      * @brief Short display name for a `VisionClass::Fault` value.
      * @param kind `DiagSample::visionFaultKind`.
      * @return A stable short name; `"?"` for an unknown value.
@@ -81,13 +316,13 @@ namespace
     {
         switch (kind)
         {
-        case 0:
+        case kVisionFaultNone:
             return "NONE";
-        case 1:
+        case kVisionFaultReadTimeout:
             return "TIMEOUT";
-        case 2:
+        case kVisionFaultBadChecksum:
             return "CHKSUM";
-        case 3:
+        case kVisionFaultBadCell:
             return "BADCELL";
         default:
             return "?";
@@ -214,6 +449,7 @@ void OperatorConsoleClass::begin()
 
     _check                 = Console::Check::BATT;
     _selfTestLineDataWanted = false;
+    _selfTest               = SelfTestState();
 
     for (uint8_t r = 0; r < Console::FRAME_ROWS; ++r)
     {
@@ -456,6 +692,7 @@ void OperatorConsoleClass::_close()
 
     _check                 = Console::Check::BATT;
     _selfTestLineDataWanted = false;
+    _selfTest               = SelfTestState();
 
     for (uint8_t r = 0; r < Console::FRAME_ROWS; ++r)
     {
@@ -496,11 +733,11 @@ bool OperatorConsoleClass::_stateOwnsRead(Console::State state, Console::ActionR
     switch (read)
     {
     case Console::ActionRequest::READ_LINE_BOARDS:
-        // VIEW_LINE's pull cadence, and T4's Check::LINE.
+        // VIEW_LINE's pull cadence, and the SELF TEST sequencer's Check::LINE.
         return state == Console::State::VIEW_LINE || state == Console::State::SELF_TEST;
 
     case Console::ActionRequest::READ_MOSAIC:
-        // VIEW_VISION's pull cadence, and T4's Check::VISION.
+        // VIEW_VISION's pull cadence, and the SELF TEST sequencer's Check::VISION.
         return state == Console::State::VIEW_VISION || state == Console::State::SELF_TEST;
 
     default:
@@ -549,6 +786,9 @@ void OperatorConsoleClass::_enterState(Console::State next)
     case Console::State::SELF_TEST:
         _check                 = Console::Check::BATT;
         _selfTestLineDataWanted = false;
+        // A re-entered SELF TEST must never inherit the previous run's freshness or dwell
+        // baselines — a stale `entryMs` would time the first check out on its very first tick.
+        _selfTest = SelfTestState();
         break;
 
     default:
@@ -647,6 +887,17 @@ void OperatorConsoleClass::_handleViewButtons(const Console::ConsoleInput& in, b
         // An advisory diagnostic must never leave a latched fault for the mission.
         _clearVisionPending = true;
     }
+    else if (_state == Console::State::SELF_TEST && _check == Console::Check::VISION &&
+             _selfTest.readSent)
+    {
+        // The SELF TEST vision check owes the same clear, and this is the ONLY place it can be
+        // discharged on the abort route: update() runs this handler first and then calls
+        // _updateSelfTest() only while `_state` is STILL State::SELF_TEST, so the sequencer body
+        // never executes on the aborting tick. Gated on `readSent` so a vision module that never
+        // came up (AC25) is never commanded — and so an aborted BATT/GYRO/LINE check, which owes
+        // nothing, never emits a spurious clear.
+        _clearVisionPending = true;
+    }
 
     // Cursor is preserved — the operator returns to the entry they came from.
     _enterState(Console::State::LIST);
@@ -723,35 +974,217 @@ void OperatorConsoleClass::_scrollWindowTop()
     }
 }
 
+// =============================================================================================
+// SELF TEST sequencer
+//
+// Every check runs the same three phases, and the order is load-bearing:
+//
+//   latch  — record `DiagSample::seq` and `nowMs` at check entry and emit the check's read, if
+//            it has one. The boot report is consulted BEFORE the sample, so a module that never
+//            came up is failed from the report with no request issued against it (AC25).
+//   await  — judge NOTHING until the data is provably fresher than that baseline (AC22). This is
+//            the whole point of the sequencer: `Vision::begin()` clears the latched fault, so a
+//            vision check that judged the sample it was handed on entry would PASS an unplugged
+//            camera. A check that never goes fresh FAILs on
+//            `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` — fail-closed, never a PASS and never a
+//            stall.
+//   judge   — verdict, then hold it on screen for at least `Config::UI_SELFTEST_STEP_MS`. The
+//   + dwell   dwell is a readability minimum that runs AFTER the verdict, never in place of it.
+//
+// The sequence halts on the first FAIL with `_check` left ON the failing check, so the screen
+// names the subsystem and no later check is ever run (AC11).
+// =============================================================================================
+
 void OperatorConsoleClass::_updateSelfTest(const Console::ConsoleInput& in)
 {
-    // -----------------------------------------------------------------------------------------
-    // OWNED BY TASK T4 — the SELF TEST sequencer body.
-    //
-    // T3 wires everything around this seam and deliberately implements none of it: state entry
-    // (`_enterState` homes `_check` to `Console::Check::BATT`), the BTN_DOWN escape back to the
-    // list, the screen (`_renderSelfTest`), the single-slot action emitter (`_requestAction`),
-    // the read in-flight interlock (`_readInFlight` / `notifyReadDone`) and the
-    // `wantsLineData()` participation (`_selfTestLineDataWanted`, raised from the tick
-    // `READ_LINE_BOARDS` is emitted until the line verdict is recorded).
-    //
-    // T4 fills in: latch -> await-fresh -> judge -> dwell per check, the boot-report consult
-    // that fails a subsystem without sampling it, the fail-closed
-    // `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` deadline, and `_signal`.
-    //
-    // T4 also owns the vision check's exit obligation: leaving `Check::VISION` by ANY route,
-    // including the BTN_DOWN abort above, must raise `_clearVisionPending`. The view-side half
-    // of that rule is already handled in `_handleViewButtons`, which only sees `VIEW_VISION`.
-    //
-    // Two seam properties T4 can rely on:
-    //  - `State::SELF_TEST` owns BOTH reads (`_stateOwnsRead`), so a read stays in flight across
-    //    a check advance; only leaving SELF_TEST releases the slot. T4 therefore still needs its
-    //    own `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` deadline to fail a check closed — the slot
-    //    drop is a session-scope safety net, not a per-check timeout.
-    //  - Advancing `_check` must NOT go through `_enterState(State::SELF_TEST)`; that is a
-    //    self-transition which re-homes `_check` to `Check::BATT`. Assign `_check` directly.
-    // -----------------------------------------------------------------------------------------
-    (void) in;
+    if (_check == Console::Check::DONE)
+    {
+        // Every check passed; the result screen stands until the operator leaves.
+        return;
+    }
+    if (_selfTest.judged && !_selfTest.passed)
+    {
+        // Halted on the first FAIL (AC11). `_check` deliberately stays on the failing check.
+        return;
+    }
+
+    if (!_selfTest.latched && !_selfTestBeginCheck(in))
+    {
+        // The single per-frame action slot was already taken; retry the whole latch next tick.
+        return;
+    }
+
+    if (!_selfTest.judged)
+    {
+        _selfTestJudgeCheck(in);
+        if (!_selfTest.judged)
+        {
+            return;    // Still awaiting fresh data, and the deadline has not expired.
+        }
+    }
+
+    _selfTestAdvance(in);
+}
+
+bool OperatorConsoleClass::_selfTestBeginCheck(const Console::ConsoleInput& in)
+{
+    // AC25: the boot report is consulted BEFORE the sample. A module whose begin() failed is
+    // failed straight from the report — never read, never sampled, never commanded.
+    const bool                   bootOk = selfTestBootAllows(_check, in.boot);
+    const Console::ActionRequest read   = selfTestRead(_check);
+
+    bool sent = false;
+    if (bootOk && read != Console::ActionRequest::NONE)
+    {
+        // Emit BEFORE latching anything. A check latched without the read it depends on would
+        // sit in await until it timed out, turning a busy action slot into a spurious FAIL.
+        if (!_requestAction(read))
+        {
+            return false;
+        }
+        _readInFlight = read;
+        sent          = true;
+    }
+
+    _selfTest.entrySeq  = in.sample.seq;
+    _selfTest.entryMs   = in.nowMs;
+    _selfTest.verdictMs = in.nowMs;
+    _selfTest.latched   = true;
+    _selfTest.readSent  = sent;
+    _selfTest.judged    = false;
+    _selfTest.passed    = false;
+    _selfTest.timedOut  = false;
+
+    if (sent && read == Console::ActionRequest::READ_LINE_BOARDS)
+    {
+        // Held true from the tick READ_LINE_BOARDS is emitted until the line verdict lands, so
+        // the sketch's line-array tick gate stays forced open for the duration (AC5).
+        _selfTestLineDataWanted = true;
+    }
+
+    if (!bootOk)
+    {
+        _selfTestRecord(in, false, false);
+    }
+    return true;
+}
+
+void OperatorConsoleClass::_selfTestJudgeCheck(const Console::ConsoleInput& in)
+{
+    if (_selfTestDataFresh(in))
+    {
+        const CheckVerdict verdict = selfTestJudge(_check, in.sample);
+        if (verdict != CheckVerdict::PENDING)
+        {
+            _selfTestRecord(in, verdict == CheckVerdict::PASS, false);
+            return;
+        }
+        // PENDING (a battery retry in flight) falls through to the deadline below: an
+        // inconclusive check still has to settle inside its timeout budget.
+    }
+
+    // Fail-closed. `State::SELF_TEST` owns BOTH reads, so `_enterState`'s destination-keyed slot
+    // release never fires while the sequencer is running — this deadline is the only thing
+    // standing between a silent subsystem and an unbounded stall.
+    if ((uint32_t) (in.nowMs - _selfTest.entryMs) >= Config::UI_SELFTEST_CHECK_TIMEOUT_MS)
+    {
+        _selfTestRecord(in, false, true);
+    }
+}
+
+bool OperatorConsoleClass::_selfTestDataFresh(const Console::ConsoleInput& in) const
+{
+    // Rollover-safe spelling of `seq > entrySeq` for a monotonic counter: after ~4.3e9 refreshes
+    // `seq` wraps, and `>` would then reject every subsequent sample forever.
+    if (in.sample.seq == _selfTest.entrySeq)
+    {
+        return false;
+    }
+
+    // A check that dispatched a read additionally needs that read's notifyReadDone(). Without
+    // this clause the adapter's PUSHED cadence — which bumps `seq` every
+    // Config::UI_VIEW_SAMPLE_MS regardless of any read — would make the boot-state sample look
+    // "fresh" and let Check::VISION PASS a camera that never answered.
+    if (_selfTest.readSent && _readInFlight != Console::ActionRequest::NONE)
+    {
+        return false;
+    }
+    return true;
+}
+
+void OperatorConsoleClass::_selfTestRecord(
+    const Console::ConsoleInput& in,
+    bool                         passed,
+    bool                         timedOut)
+{
+    _selfTest.judged    = true;
+    _selfTest.passed    = passed;
+    _selfTest.timedOut  = timedOut;
+    _selfTest.verdictMs = in.nowMs;
+
+    if (_check == Console::Check::LINE)
+    {
+        // The line verdict is recorded, so the forced-open tick gate is no longer owed.
+        _selfTestLineDataWanted = false;
+    }
+
+    if (!passed)
+    {
+        // SECOND writer of `_signal` — `notifyActionDone()` publishes the CAL_LINE / CAL_MOTOR /
+        // GYRO_ZERO verdicts. Last-write-wins is deliberate, not accidental: a SELF TEST verdict
+        // is always the more recent statement about the robot's fitness, so it must override a
+        // stale action verdict the adapter has not finished acknowledging. Published at VERDICT
+        // time rather than after the dwell so the LEDs and the buzzer start the moment the
+        // failure is known.
+        _signal = Console::Signal::FAIL;
+    }
+}
+
+void OperatorConsoleClass::_selfTestAdvance(const Console::ConsoleInput& in)
+{
+    // Readability dwell — AFTER the verdict, never instead of one.
+    if ((uint32_t) (in.nowMs - _selfTest.verdictMs) < Config::UI_SELFTEST_STEP_MS)
+    {
+        return;
+    }
+
+    if (!_selfTest.passed)
+    {
+        // Halt on the first FAIL: `_check` stays put so `_renderSelfTest` keeps naming it.
+        return;
+    }
+
+    if (_check == Console::Check::VISION)
+    {
+        // Leaving Check::VISION owes a CLEAR_VISION_FAULT — an advisory diagnostic must never
+        // hand the mission a latched fault. This covers the PASS route; the BTN_DOWN abort route
+        // is hooked in _handleViewButtons(), because update() stops calling this function the
+        // moment that handler leaves State::SELF_TEST.
+        _clearVisionPending = true;
+    }
+
+    const Console::Check next = selfTestNext(_check);
+    if (next == Console::Check::DONE)
+    {
+        // All four checks passed. Same last-write-wins precedence as the FAIL path above.
+        //
+        // The placement is deliberately ASYMMETRIC with that FAIL: a failure is published the
+        // moment the verdict lands, whereas a pass is published only after the final check's
+        // dwell has elapsed (this function early-returns until then). A failure is urgent and
+        // should light the LEDs immediately; a pass is not, and firing it at verdict time would
+        // sound the all-clear while the last check's result was still being read off the screen.
+        _signal = Console::Signal::PASS;
+    }
+
+    // Assign `_check` DIRECTLY. `_enterState(State::SELF_TEST)` would re-home it to
+    // `Check::BATT` — the case has no self-transition guard — looping the sequencer on the
+    // battery check forever.
+    _check             = next;
+    _selfTest.latched  = false;
+    _selfTest.readSent = false;
+    _selfTest.judged   = false;
+    _selfTest.passed   = false;
+    _selfTest.timedOut = false;
 }
 
 bool OperatorConsoleClass::_requestAction(Console::ActionRequest action)
@@ -1158,6 +1591,30 @@ void OperatorConsoleClass::_renderSelfTest(Console::ConsoleFrame& out) const
 
     uint8_t pos = _rowAppend(out.rows[1], 0, "CHECK: ");
     _rowAppend(out.rows[1], pos, checkName(_check));
+
+    if (_check == Console::Check::DONE)
+    {
+        _rowSet(out.rows[2], "ALL PASS");
+    }
+    else if (!_selfTest.judged)
+    {
+        _rowSet(out.rows[2], "RUNNING...");
+    }
+    else
+    {
+        // The failing check is still `_check` (the sequence halts on it), so naming it here
+        // names the failed subsystem (AC11). A timeout is called out separately from a real
+        // verdict: "NO DATA" tells the operator the subsystem never answered at all.
+        pos = _rowAppend(out.rows[2], 0, checkName(_check));
+        if (_selfTest.timedOut)
+        {
+            _rowAppend(out.rows[2], pos, " NO DATA");
+        }
+        else
+        {
+            _rowAppend(out.rows[2], pos, _selfTest.passed ? " PASS" : " FAIL");
+        }
+    }
 
     _rowSet(out.rows[3], "DOWN = ABORT");
 }

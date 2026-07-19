@@ -35,9 +35,11 @@
  *  - `notifyFrameRendered()` / `notifySignalDone()` acknowledge the level-triggered `dirty` and
  *    `signal` outputs, so a repaint suppressed by the adapter's repaint cadence is never lost.
  *
- * @note The `Console::State::SELF_TEST` sequencer body is deliberately NOT implemented here —
- *       `_updateSelfTest()` is the seam owned by task T4. Everything else the state machine
- *       needs (entry, escape, rendering hook, `wantsLineData()` participation) is wired.
+ * @note The `Console::State::SELF_TEST` sequencer runs strictly on FRESH data: every check
+ *       latches `DiagSample::seq` (plus, for a check that dispatches a read, that read's
+ *       `notifyReadDone()`) on entry and judges nothing until both advance, failing closed on
+ *       `Config::UI_SELFTEST_CHECK_TIMEOUT_MS`. That is what stops the vision check PASSing an
+ *       unplugged camera off the boot state, which `Vision::begin()` leaves fault-free.
  */
 
 #ifndef OPERATORCONSOLE_H
@@ -61,7 +63,8 @@
  *    confirms.
  *  - `VIEW_LINE` / `VIEW_VISION` / `VIEW_GYRO` / `VIEW_BATT` — live screens. BTN_DOWN returns to
  *    `LIST` with the cursor preserved. **No view has a timeout.**
- *  - `SELF_TEST` — the T4 sequencer.
+ *  - `SELF_TEST` — the four-check sequencer (`BATT` -> `GYRO` -> `VISION` -> `LINE`), halting on
+ *    the first failure. BTN_DOWN aborts back to `LIST`.
  *  - `WAIT_RELEASE` — two distinct waits sharing one state, discriminated by an explicit
  *    pending-action flag: an *await-release* (both buttons were held, so no edge may be trusted
  *    until both read released for one tick) and an *await-completion* (a side-effect action is in
@@ -263,8 +266,9 @@ private:
      *
      * @param next The state to enter.
      * @note Latching a `CLEAR_VISION_FAULT` on leaving `VIEW_VISION` is NOT an entry effect —
-     *       it belongs to the BTN_DOWN handler (`_handleViewButtons`) and to T4's vision check,
-     *       so that a chord *resume* back into `VIEW_VISION` never owes a spurious clear.
+     *       it belongs to the BTN_DOWN handler (`_handleViewButtons`) and to the SELF TEST vision
+     *       check (`_selfTestAdvance()`), so that a chord *resume* back into `VIEW_VISION` never
+     *       owes a spurious clear.
      */
     void _enterState(Console::State next);
 
@@ -376,13 +380,80 @@ private:
     void _publishFrame(const Console::ConsoleInput& in, Console::ConsoleFrame& out);
 
     /**
-     * @brief SELF TEST sequencer step.
+     * @brief SELF TEST sequencer step: latch -> await-fresh -> judge -> dwell, per check.
+     *
+     * Runs the four checks in the order `Console::Check::BATT` -> `GYRO` -> `VISION` -> `LINE`,
+     * halting on the first FAIL (AC11) with `_check` left ON the failing check so the screen can
+     * name it. Judges only a sample proven fresh since the active check began (AC22), and fails
+     * closed on `Config::UI_SELFTEST_CHECK_TIMEOUT_MS`.
      *
      * @param in This tick's input.
-     * @note **STUB — owned by task T4.** T3 deliberately implements no check logic; see the
-     *       comment on the definition in `OperatorConsole.cpp`.
+     * @note Never advances `_check` through `_enterState(State::SELF_TEST)` — that
+     *       self-transition re-homes `_check` to `Check::BATT` and would loop BATT forever.
      */
     void _updateSelfTest(const Console::ConsoleInput& in);
+
+    /**
+     * @brief SELF TEST **latch** phase: baseline the active check and emit its read, if any.
+     *
+     * Consults `in.boot` BEFORE the sample (AC25) — a subsystem whose `begin()` failed is failed
+     * straight from the boot report and is never read, sampled or commanded. Otherwise records
+     * `DiagSample::seq` and `nowMs` as the freshness / deadline baseline and dispatches the
+     * check's read (`READ_MOSAIC` for `Check::VISION`, `READ_LINE_BOARDS` for `Check::LINE`).
+     *
+     * @param in This tick's input.
+     * @return `true` if the check is latched; `false` if this frame's single action slot was
+     *         already taken, in which case NOTHING was mutated and the caller retries next tick
+     *         (a check latched without its read would only time out).
+     */
+    bool _selfTestBeginCheck(const Console::ConsoleInput& in);
+
+    /**
+     * @brief SELF TEST **await + judge** phase for the active check.
+     *
+     * Judges nothing until `_selfTestDataFresh()` holds. On expiry of
+     * `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` measured from the check's entry `nowMs`, records a
+     * fail-closed timeout verdict rather than PASSing on stale data or stalling forever.
+     *
+     * @param in This tick's input.
+     */
+    void _selfTestJudgeCheck(const Console::ConsoleInput& in);
+
+    /**
+     * @brief Record the active check's verdict and start its `Config::UI_SELFTEST_STEP_MS` dwell.
+     *
+     * @param in       This tick's input; `in.nowMs` becomes the dwell base.
+     * @param passed   The verdict.
+     * @param timedOut `true` when @p passed is `false` because the freshness deadline expired
+     *                 (the screen then reads `<SUBSYS> NO DATA` rather than `<SUBSYS> FAIL`).
+     */
+    void _selfTestRecord(const Console::ConsoleInput& in, bool passed, bool timedOut);
+
+    /**
+     * @brief SELF TEST **dwell + advance** phase; called only once a verdict is recorded.
+     *
+     * Holds the verdict on screen for at least `Config::UI_SELFTEST_STEP_MS` — a readability
+     * minimum that runs AFTER the verdict, never in place of it — then either halts on a failure
+     * (leaving `_check` on the failing check) or moves to the next check, publishing
+     * `Console::Signal::PASS` when the last check passes.
+     *
+     * @param in This tick's input.
+     */
+    void _selfTestAdvance(const Console::ConsoleInput& in);
+
+    /**
+     * @brief Whether the active check's data is provably fresher than its entry baseline (AC22).
+     *
+     * Requires `DiagSample::seq` to have advanced past the value latched at check entry, AND —
+     * for a check that dispatched a read — the matching `notifyReadDone()` to have arrived. The
+     * second half is what stops `Check::VISION` PASSing on the boot state: `Vision::begin()`
+     * clears the latched fault, so a `Fault::NONE` never preceded by a completed read would
+     * otherwise pass an unplugged camera.
+     *
+     * @param in This tick's input.
+     * @return `true` if the sample may be judged.
+     */
+    bool _selfTestDataFresh(const Console::ConsoleInput& in) const;
 
     /**
      * @brief Emit at most one request per frame into the tick's action slot.
@@ -396,8 +467,8 @@ private:
     /**
      * @brief Whether @p state is allowed to have @p read outstanding — the read's owning view.
      *
-     * `READ_LINE_BOARDS` is owned by `State::VIEW_LINE` and by `State::SELF_TEST` (T4's
-     * `Check::LINE`); `READ_MOSAIC` by `State::VIEW_VISION` and `State::SELF_TEST`
+     * `READ_LINE_BOARDS` is owned by `State::VIEW_LINE` and by `State::SELF_TEST`
+     * (`Check::LINE`); `READ_MOSAIC` by `State::VIEW_VISION` and `State::SELF_TEST`
      * (`Check::VISION`). Anything else — including `ActionRequest::NONE`, which is the free
      * slot and needs no owner — answers `false`.
      *
@@ -444,7 +515,7 @@ private:
     /** @brief Render `State::WAIT_RELEASE`: which of the two waits is holding the console. */
     void _renderWaitRelease(Console::ConsoleFrame& out) const;
 
-    /** @brief Render `State::SELF_TEST`: the sequencer screen (T4 owns the check detail). */
+    /** @brief Render `State::SELF_TEST`: active check, its verdict or `RUNNING...`, abort hint. */
     void _renderSelfTest(Console::ConsoleFrame& out) const;
 
     /**
@@ -553,14 +624,46 @@ private:
     /// reason as `_lastRows`.
     char _shownRows[Console::FRAME_ROWS][Console::FRAME_COLS] = {};
 
-    // --- SELF TEST seam (owned by T4) ---------------------------------------------------------
+    // --- SELF TEST sequencer ---------------------------------------------------------------
 
-    /// Current SELF TEST check. Homed to `Check::BATT` on entry; advanced by T4.
+    /// Current SELF TEST check. Homed to `Check::BATT` on entry by `_enterState()`; advanced by
+    /// `_selfTestAdvance()`, which leaves it ON a failing check so the screen can name it.
     Console::Check _check = Console::Check::BATT;
 
-    /// Raised by T4 from the tick it emits `READ_LINE_BOARDS` until the line verdict is
-    /// recorded; read by `wantsLineData()`.
+    /// Raised by `_selfTestBeginCheck()` on the tick it emits `READ_LINE_BOARDS`, and lowered by
+    /// `_selfTestRecord()` when the line verdict lands; read by `wantsLineData()`.
     bool _selfTestLineDataWanted = false;
+
+    /**
+     * @brief Per-check working memory of the SELF TEST sequencer.
+     *
+     * The sequencer's three phases are memory-bound and cannot be re-derived from `_check`
+     * alone: **latch** needs the entry `seq` and `nowMs` baselines, **await** needs to know a
+     * read was dispatched and is still outstanding, and the post-verdict **dwell** needs the
+     * verdict's own timestamp (which is not the entry timestamp — the dwell runs AFTER the
+     * verdict, never in place of it).
+     *
+     * Re-initialised at every point that homes `_check` to `Console::Check::BATT` — `begin()`,
+     * `_close()` and `_enterState(State::SELF_TEST)` — so a re-entered SELF TEST never inherits
+     * the previous run's freshness or dwell baselines.
+     */
+    struct SelfTestState
+    {
+        uint32_t entrySeq  = 0;      ///< `DiagSample::seq` latched when the active check began.
+        uint32_t entryMs   = 0;      ///< `nowMs` at check entry — base of the fail-closed
+                                     ///< `Config::UI_SELFTEST_CHECK_TIMEOUT_MS` deadline.
+        uint32_t verdictMs = 0;      ///< `nowMs` the verdict landed — base of the
+                                     ///< `Config::UI_SELFTEST_STEP_MS` readability dwell.
+        bool     latched   = false;  ///< The latch phase has run for the active check.
+        bool     readSent  = false;  ///< The active check dispatched a read, so freshness also
+                                     ///< requires its `notifyReadDone()`.
+        bool     judged    = false;  ///< A verdict is recorded and the dwell is running.
+        bool     passed    = false;  ///< The recorded verdict for the active check.
+        bool     timedOut  = false;  ///< The recorded failure was the freshness timeout.
+    };
+
+    /// SELF TEST sequencer working state; see `SelfTestState`.
+    SelfTestState _selfTest = {};
 };
 
 /**
