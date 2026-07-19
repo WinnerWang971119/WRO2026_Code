@@ -723,3 +723,89 @@ def test_tc11_editor_io_round_trips_axle_offset_source_pin():
     # undefined (absent key) is distinct from null (present but malformed).
     assert "return undefined;" in parse_axle_offset_body
     assert "return null;" in parse_axle_offset_body
+
+
+def test_tc11b_editor_axle_offset_tuning_control_source_pin(tmp_path):
+    """TC11b: source-text pin -- the Robot-tab axle_offset tuning control.
+
+    The #165 follow-up gives the operator a place to TUNE the offset (the
+    original plan shipped the round-trip but no edit control). Mirrors the
+    vision-cone control exactly; text pin only (no JS runner -- the behavioral
+    leg is the localhost editor eyeball).
+
+    * **Markup:** the emitted editor page carries the ``#ctps-editor-robot-axle``
+      Robot-tab section with two ``data-axle-offset`` number inputs
+      (``forward_cm``/``lateral_cm``), so a dropped/renamed field fails loud.
+    * **Visibility:** ``editor_boot.js`` holds the ``robotAxle`` DOM ref and
+      hides the section off the Robot tab (same mechanic as ``robotVision``).
+    * **Binding:** ``editor_tools.js``'s ``onAxleOffsetFieldChange`` reads the
+      ``data-axle-offset`` key, writes the top-level ``E.state.axleOffset``, and
+      collapses a both-zero edit to ``null`` (so Save omits the block -- matches
+      ``editor_io.js``'s absent-clears-offset semantics). ``_bindAxleOffsetFields``
+      is wired into ``initMosaicPanel`` and ``_reflectAxleOffsetFields`` into
+      ``refreshMosaicPanel``.
+    """
+    out_path = tmp_path / "axle_control.html"
+    render(toy_field_data, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # --- Markup: Robot-tab section + the two tuning inputs ------------------
+    assert 'id="ctps-editor-robot-axle"' in html
+    assert 'data-axle-offset="forward_cm"' in html
+    assert 'data-axle-offset="lateral_cm"' in html
+
+    # --- Visibility: boot ref + Robot-tab-only hide ------------------------
+    editor_boot_js = next(
+        p for p in _ASSET_JS if p.name == "editor_boot.js"
+    ).read_text(encoding="utf-8")
+    assert 'robotAxle: $("ctps-editor-robot-axle")' in editor_boot_js
+    assert 'd.robotAxle.hidden = name !== "robot"' in editor_boot_js
+
+    # --- Binding: change handler writes state + both-zero collapse ----------
+    editor_tools_js = next(
+        p for p in _ASSET_JS if p.name == "editor_tools.js"
+    ).read_text(encoding="utf-8")
+    change_body = _isolate_function_body(editor_tools_js, "onAxleOffsetFieldChange")
+    assert 'el.getAttribute("data-axle-offset")' in change_body
+    assert "E.state.axleOffset" in change_body
+    # both components 0 -> null so Save omits the block (absent == {0,0})
+    assert "offset.forward_cm === 0 && offset.lateral_cm === 0" in change_body
+
+    # --- Bind/reflect wired into the panel init/refresh entrypoints ---------
+    assert "function _bindAxleOffsetFields(" in editor_tools_js
+    assert "function _reflectAxleOffsetFields(" in editor_tools_js
+    init_body = _isolate_function_body(editor_tools_js, "initMosaicPanel")
+    assert "_bindAxleOffsetFields()" in init_body
+    refresh_body = _isolate_function_body(editor_tools_js, "refreshMosaicPanel")
+    assert "_reflectAxleOffsetFields()" in refresh_body
+
+
+def test_tc11c_editor_axle_center_marker_source_pin():
+    """TC11c: source-text pin -- the red 'robot axle center' marker.
+
+    The Robot tab draws the rotation axle as a red dot + label. Because the
+    editor draws the body/zones at the body-centre origin (0,0), the axle sits at
+    the NEGATED offset ``(-forward, -lateral)`` (player: ``body = axle + offset``
+    at identity pose). A dedicated ``--ctps-axle`` token backs the red so no hex
+    is hard-coded in the draw.
+    """
+    tokens_css = next(
+        p for p in _ASSET_CSS if p.name == "tokens.css"
+    ).read_text(encoding="utf-8")
+    assert "--ctps-axle:" in tokens_css
+
+    editor_core_js = next(
+        p for p in _ASSET_JS if p.name == "editor_core.js"
+    ).read_text(encoding="utf-8")
+    # Token resolved into the editor's colour table.
+    assert 'axle: _cssVar("--ctps-axle")' in editor_core_js
+
+    body = _isolate_function_body(editor_core_js, "drawAxleCenter")
+    # Axle = body centre - offset, projected at the editor's identity pose.
+    assert "OBJ.project(view, -fwd, -lat)" in body
+    assert "C.axle" in body
+    assert '"robot axle center"' in body
+
+    # Wired into the Robot-tab backdrop so it actually paints.
+    backdrop = _isolate_function_body(editor_core_js, "drawRobotBackdrop")
+    assert "drawAxleCenter(ctx, view)" in backdrop

@@ -101,6 +101,9 @@
         if (d.robotVision) {
             d.robotVision.hidden = name !== "robot";
         }
+        if (d.robotAxle) {
+            d.robotAxle.hidden = name !== "robot";
+        }
         if (d.mosaicPanel) {
             d.mosaicPanel.hidden = name !== "mosaic";
         }
@@ -327,6 +330,7 @@
             tabRobot: $("ctps-editor-tab-robot"),
             tabMosaic: $("ctps-editor-tab-mosaic"),
             robotVision: $("ctps-editor-robot-vision"),
+            robotAxle: $("ctps-editor-robot-axle"),
             mosaicPanel: $("ctps-editor-mosaic-panel"),
             zoom: $("ctps-editor-zoom"),
             zoomRange: $("ctps-editor-zoom-range"),
