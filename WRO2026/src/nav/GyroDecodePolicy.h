@@ -7,7 +7,7 @@
 /**
  * @file GyroDecodePolicy.h
  * @brief Single source of truth for the external gyro's two-byte wire decode,
- *        degree wrap, and read-plausibility gate (ADR-071).
+ *        degree wrap, and read-plausibility gate (ADR-074).
  *
  * Six pure free functions answer "what heading did the board just report, and
  * should we trust it":

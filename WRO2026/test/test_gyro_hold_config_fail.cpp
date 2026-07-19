@@ -1,7 +1,7 @@
 /**
  * @file test_gyro_hold_config_fail.cpp
  * @brief TC12a-TC12d / AC7 — Compile-fail probes proving the four `GYRO_HOLD_*` tripwires in
- *        `ConfigChecks.h` fire for an out-of-range gain/knob (ADR-072, issue #169).
+ *        `ConfigChecks.h` fire for an out-of-range gain/knob (ADR-075, issue #169).
  *
  * T8's CMake declares FOUR separate `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` targets,
  * all compiling THIS SAME minimal TU with one `-D..._DEFAULT` override each — mirroring

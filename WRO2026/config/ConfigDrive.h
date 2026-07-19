@@ -709,7 +709,7 @@ namespace Config
                   "zero timeout would fault the turn on the first IMU read miss.");
 
     // ---------------------------------------------------------------------------------------
-    // GYRO straight heading-hold PD (ADR-072, issue #169) — per-tick PD over Move(L,R) driven
+    // GYRO straight heading-hold PD (ADR-075, issue #169) — per-tick PD over Move(L,R) driven
     // by the external gyro (`YawSource.readYawDeg`), replacing the STM32 `MoveGyro*` write path.
     //
     // Ported from the mentor's proven `gyro_move` (`speed = Kp*err + Kd*delta`,
@@ -717,11 +717,11 @@ namespace Config
     // in `GyroHoldPolicy.h`; these constants are the tunables `Drive::_emitGyroHold` feeds into
     // it. Unlike the turn PD this is PD + a never-reverse clamp ONLY — no creep floor, no slew
     // limiter, no integrator (a hold rides an already-moving base and drives corr -> 0; it does
-    // not start from rest). Gains ship UNVERIFIED pending hardware bench — see ADR-072.
+    // not start from rest). Gains ship UNVERIFIED pending hardware bench — see ADR-075.
     // ---------------------------------------------------------------------------------------
 
     /**
-     * @brief Proportional gain for the R4-side GYRO straight heading-hold PD (ADR-072), in PWM
+     * @brief Proportional gain for the R4-side GYRO straight heading-hold PD (ADR-075), in PWM
      *        per degree of heading error.
      *
      * Ported from the mentor's proven `gyro_move` (`Kp = 1.5`), which maps a degree error
@@ -741,7 +741,7 @@ namespace Config
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 
     /**
-     * @brief TIME-NORMALIZED derivative gain for the GYRO straight heading-hold PD (ADR-072), in
+     * @brief TIME-NORMALIZED derivative gain for the GYRO straight heading-hold PD (ADR-075), in
      *        PWM per (deg/s) — NOT the mentor's raw per-iteration gain.
      *
      * The mentor's `gyro_move` computes a raw per-ITERATION difference (no division by loop
@@ -764,7 +764,7 @@ namespace Config
 
     /**
      * @brief Static ceiling (PWM magnitude) on the GYRO heading-hold's per-tick correction
-     *        (ADR-072).
+     *        (ADR-075).
      *
      * The correction actually applied is dynamically clamped to
      * `min(GYRO_HOLD_MAX_CORR_PWM, |base|)` — this constant is only the STATIC half of that
@@ -785,7 +785,7 @@ namespace Config
     constexpr int16_t GYRO_HOLD_MAX_CORR_PWM = GYRO_HOLD_MAX_CORR_PWM_DEFAULT;
 
     /**
-     * @brief Staleness threshold (ms) for the GYRO heading-hold's previous-yaw sample (ADR-072).
+     * @brief Staleness threshold (ms) for the GYRO heading-hold's previous-yaw sample (ADR-075).
      *
      * `Drive::_emitGyroHold` computes its fold-safe derivative-on-measurement term from the
      * previously stored yaw (`_gyroHoldPrevYaw` / `_gyroHoldPrevMs`). If that sample is older

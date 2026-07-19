@@ -186,12 +186,12 @@ namespace Config
     // =========================================================================================
 
     // `Config::IMU_YAW_SIGN` (the app->STM32 write-path yaw sign, applied only by the retired
-    // `YawSource::toHwHeading`) was RETIRED in issue #169 (ADR-072): GYRO-straight heading-hold
+    // `YawSource::toHwHeading`) was RETIRED in issue #169 (ADR-075): GYRO-straight heading-hold
     // moved to an R4-side PD, so nothing writes a heading target to the STM32 gyro PID anymore.
-    // The surviving read-path sign is `Config::GYRO_YAW_SIGN`, declared below (ADR-071).
+    // The surviving read-path sign is `Config::GYRO_YAW_SIGN`, declared below (ADR-074).
 
     // =========================================================================================
-    // External gyro (MatrixColor board) raw-read config (ADR-071).
+    // External gyro (MatrixColor board) raw-read config (ADR-074).
     //
     // The external gyro is a THIRD, physically independent I2C board masquerading as an MXColor
     // device (addr 0x22) that packs a signed 16-bit heading into its G/R registers. `YawSource`

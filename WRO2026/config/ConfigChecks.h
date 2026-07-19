@@ -163,7 +163,7 @@ namespace Config
                   "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
 
     // -----------------------------------------------------------------------------------------
-    // GYRO straight heading-hold PD checks (ConfigDrive.h, ADR-072, issue #169)
+    // GYRO straight heading-hold PD checks (ConfigDrive.h, ADR-075, issue #169)
     //
     // `Drive::_emitGyroHold` (via `GyroHoldPolicy.h`) is a per-tick PD + never-reverse clamp
     // driven by the external gyro. These four asserts pin the basic sign/range sanity of the
@@ -351,12 +351,12 @@ namespace Config
     // -----------------------------------------------------------------------------------------
     // Localization / IMU checks (ConfigNav.h)
     //
-    // Config::IMU_YAW_SIGN and its tripwire were RETIRED in issue #169 (ADR-072): the STM32
+    // Config::IMU_YAW_SIGN and its tripwire were RETIRED in issue #169 (ADR-075): the STM32
     // gyro-PID write path (YawSource::toHwHeading) is gone, so nothing applies an app->STM32 yaw
     // sign anymore. The surviving read-path sign is Config::GYRO_YAW_SIGN, checked below.
 
     // -----------------------------------------------------------------------------------------
-    // External gyro checks (ConfigNav.h, ADR-071)
+    // External gyro checks (ConfigNav.h, ADR-074)
     //
     // COUPLED SITES: Config::GYRO_YAW_SIGN and Config::GYRO_SCALE are applied together, exactly
     // once, inside GyroDecodePolicy.h::decodeGyroYawDeg (called from YawSource) to convert the

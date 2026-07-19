@@ -73,7 +73,7 @@ enum class DriveMode : uint8_t
     RAW,     ///< Open-loop PWM (`Move` / `MoveDegs` / `MoveTime`). Bias-compensated via `_applyBias`.
     SYNC,    ///< `MoveSync*` — STM32 encoder-rate sync PID closes the loop. No bias applied.
     GYRO     ///< R4-side heading-hold PD over `Move(L, R)` reading the external gyro
-             ///< (`_emitGyroHold`, ADR-072). No bias applied — the heading PD is the authority.
+             ///< (`_emitGyroHold`, ADR-075). No bias applied — the heading PD is the authority.
 };
 
 // Math helpers used by Drive and its builders live in `WROMath.h` (free functions).
@@ -556,7 +556,7 @@ public:
      * @brief Current IMU yaw in degrees, in the corrected app (CCW-positive) frame.
      * @return Corrected app-frame yaw via `YawSource::readYawDegOr` (which applies
     *         `Config::GYRO_YAW_SIGN` via the decode policy); best-effort `0.0` on a
-    *         transient read failure (ADR-071).
+    *         transient read failure (ADR-074).
      *         NOT the raw `MiniR4.Motion.getEuler` value — do not re-apply the sign.
      */
     double getYaw() const;
@@ -762,7 +762,7 @@ private:
     int16_t  _profileHeading  = 0;    ///< Heading target for GYRO mode.
 
     // -------------------------------------------------------------------------------------
-    // GYRO heading-hold PD state (ADR-072) — written by `_emitGyroHold` only. Mutually
+    // GYRO heading-hold PD state (ADR-075) — written by `_emitGyroHold` only. Mutually
     // exclusive across the three continuous FSMs (profile / stopAtLine seek / wallStop push):
     // only one GYRO segment is in flight at a time, so a single prev-sample suffices. Keyed to
     // the MEASURED yaw only (derivative-on-measurement), never the target — so chained GYRO
@@ -1201,7 +1201,7 @@ private:
      * Dispatches per mode: `RAW` applies `_applyBias` then `deadbandSnap` on each wheel and
      * calls `Move(L, R)`; `SYNC` calls `MoveSync(deadbandSnap(mag), deadbandSnap(mag))`;
      * `GYRO` delegates to `_emitGyroHold(mag, heading, floorMag)` — the R4-side per-tick
-     * heading-hold PD over `Move(L, R)` (ADR-072). RAW is the only mode that applies the
+     * heading-hold PD over `Move(L, R)` (ADR-075). RAW is the only mode that applies the
      * motor-bias scalar — SYNC closes the loop on the STM32, and the GYRO hold's heading PD is
      * the steering authority; a feedforward scalar would fight either closed loop (see
      * DECISIONS.md).
@@ -1216,7 +1216,7 @@ private:
      *                 profile decel tail toward a sub-static-floor endSpeed passes the lower
      *                 kinetic floor (`Config::PWM_MOVING_MIN`) via `_decelTailFloorMag`.
      *
-     * @note NO LONGER fully stateless (ADR-072): the RAW / SYNC branches still read no instance
+     * @note NO LONGER fully stateless (ADR-075): the RAW / SYNC branches still read no instance
      *       state — every input is a parameter — but the GYRO branch delegates to the STATEFUL
      *       `_emitGyroHold`, whose `_gyroHoldPrev*` derivative state is keyed to the measured
      *       yaw only (never the target or the caller), so the three callers still cannot
@@ -1228,7 +1228,7 @@ private:
                          int16_t   floorMag = Config::PWM_MIN_MAGNITUDE);
 
     /**
-     * @brief One per-tick R4-side heading-hold PD step for a GYRO straight (ADR-072).
+     * @brief One per-tick R4-side heading-hold PD step for a GYRO straight (ADR-075).
      *
      * The GYRO branch of `_emitContinuous` delegates here, covering all three continuous FSMs
      * (profile straights + wall-depart, GYRO seek, GYRO push) at one choke point. Per tick:
@@ -1649,7 +1649,7 @@ public:
      * @param m `RAW` (open-loop), `SYNC` (encoder-rate sync PID), or `GYRO` (R4 heading-hold).
      * @return `*this` for chaining.
      * @note `_applyBias` is applied only for `RAW`; SYNC is closed-loop on the STM32 and GYRO
-     *       is closed-loop on the R4 (`_emitGyroHold`, ADR-072).
+     *       is closed-loop on the R4 (`_emitGyroHold`, ADR-075).
      */
     DriveDistBuilder& setMode(DriveMode m)
     {

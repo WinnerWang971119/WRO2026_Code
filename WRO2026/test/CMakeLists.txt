@@ -1575,7 +1575,7 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
-# Test executable — GyroDecodePolicy math (ADR-071, T6, TC1-TC12).
+# Test executable — GyroDecodePolicy math (ADR-074, T6, TC1-TC12).
 #
 # `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` /
 # `gyroShortestDelta` / `gyroReadPlausible` are header-only inline policies
@@ -1593,7 +1593,7 @@ target_include_directories(test_gyro_decode_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME gyro_decode_policy COMMAND test_gyro_decode_policy)
 
 # =========================================================================================
-# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-071, TC22 / AC9, compile-fail).
+# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-074, TC22 / AC9, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::GYRO_YAW_SIGN` is not
 # exactly +/-1. Built with `-DGYRO_YAW_SIGN_DEFAULT=0.5f` (the `#ifndef`-guarded override
@@ -1629,7 +1629,7 @@ set_tests_properties(gyro_config_fail_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "GYRO_YAW_SIGN must be exactly")
 
 # =========================================================================================
-# GYRO_HOLD_* tripwire negatives (ADR-072, TC12, compile-fail) — four independent knobs, one
+# GYRO_HOLD_* tripwire negatives (ADR-075, TC12, compile-fail) — four independent knobs, one
 # probe TU (test_gyro_hold_config_fail.cpp) compiled with one -D..._DEFAULT override each.
 # Mirrors test_gyro_config_fail EXACTLY (EXCLUDE_FROM_ALL/DEFAULT_BUILD, COMMON_INCLUDES, NO
 # mock force-includes). PASS_REGULAR_EXPRESSION uses a metacharacter-free substring of each
@@ -2554,7 +2554,7 @@ add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks pe
 add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
 
 # =========================================================================================
-# GYRO straight heading-hold PD — pure decision math (GyroHoldPolicy.h, ADR-072, T7, TC1-6).
+# GYRO straight heading-hold PD — pure decision math (GyroHoldPolicy.h, ADR-075, T7, TC1-6).
 # Self-contained header (only TurnPDPolicy.h / TurnSignPolicy.h, <math.h>/<stdint.h>), so NO
 # mocks — exactly like test_turn_pd_policy. Every tunable is injected as a parameter.
 # =========================================================================================
@@ -2565,7 +2565,7 @@ target_include_directories(test_gyro_hold_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME gyro_hold_policy COMMAND test_gyro_hold_policy)
 
 # =========================================================================================
-# GYRO straight heading-hold PD — stateful integration (ADR-072, T7, TC7-TC11 + hitch).
+# GYRO straight heading-hold PD — stateful integration (ADR-075, T7, TC7-TC11 + hitch).
 # Mirrors test_turn_pd_integration: links the REAL Drive.cpp + EncoderSource.cpp +
 # YawSource.cpp + path_mocks.cpp so the dispatched MiniR4.DriveDC.Move(L,R) is observable
 # end-to-end. Added to the GYRO_SCALE/YAW_SIGN pinning foreach below (YawSource-linked).
@@ -2688,7 +2688,7 @@ target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
 
 # =========================================================================================
-# External-gyro bridge pins (T3b, issue #163 / ADR-071).
+# External-gyro bridge pins (T3b, issue #163 / ADR-074).
 #
 # Every host target that links `src/nav/YawSource.cpp` also pulls the `MatrixColor` gyro mock,
 # whose `getColor` bridge synthesizes bytes from `mmL.mockYawDeg` so `readYawDeg` round-trips to

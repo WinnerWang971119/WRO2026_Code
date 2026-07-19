@@ -44,7 +44,7 @@ bool LocalizationClass::begin()
 
 bool LocalizationClass::_readImuYaw(float& yawOut)
 {
-    // Single-owner yaw read (ADR-071): YawSource performs the gated external-gyro I2C read
+    // Single-owner yaw read (ADR-074): YawSource performs the gated external-gyro I2C read
     // AND applies Config::GYRO_YAW_SIGN via the decode policy, returning the corrected
     // app-frame (CCW-positive) yaw.
     // On a hard failure it leaves its out-param untouched and returns false; mirror that here by

@@ -1212,7 +1212,7 @@ public:
 inline MockMMLower mmL;
 
 // ===========================================================================
-// External gyro board (MatrixColor) — host mock + `mmL.mockYawDeg` bridge (T3, ADR-071).
+// External gyro board (MatrixColor) — host mock + `mmL.mockYawDeg` bridge (T3, ADR-074).
 //
 // T4 re-points `YawSource::readYawDeg` off the STM32 IMU onto an external MXColor-protocol
 // gyro read through the vendor `MatrixColor` class (a real board at I2C addr 0x22). The host

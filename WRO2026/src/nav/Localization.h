@@ -113,7 +113,7 @@ public:
      *
      * Reads the corrected (app CCW-positive) yaw through `YawSource::readYawDeg` — the single
      * owner of the external-gyro yaw read, which applies `Config::GYRO_YAW_SIGN` via the decode
-     * policy (ADR-071). On an OK read computes
+     * policy (ADR-074). On an OK read computes
      * `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG` and sets
      * `_zeroed = true`. Must be called once on the start-button press AFTER the operator has
      * physically placed the chassis on `Routes::START_NODE` facing the start heading.
@@ -165,7 +165,7 @@ public:
      * @brief Read the current world-frame heading in degrees (live IMU read).
      *
      * Issues a single corrected yaw read through `YawSource::readYawDeg` (applies
-     * `Config::GYRO_YAW_SIGN` via the decode policy, ADR-071). On an OK read computes
+     * `Config::GYRO_YAW_SIGN` via the decode policy, ADR-074). On an OK read computes
      * `normalize(imu_yaw - _yawOffsetDeg)` to `[0, 360)` and refreshes the last-good cache.
      * On a NON-OK read (transient STM32 comms timeout) the underlying out-param is left
      * untouched by the library, so this method returns the LAST GOOD heading instead of a
@@ -209,7 +209,7 @@ public:
      *
      * Result = `normalize(worldHeadingDeg + _yawOffsetDeg)` rounded to `int16_t`. This is in
      * the corrected app (CCW-positive) frame — the SAME frame `YawSource` reads return. The GYRO
-     * heading channel is app-frame CCW-positive end-to-end (ADR-072): `Drive::_emitGyroHold`
+     * heading channel is app-frame CCW-positive end-to-end (ADR-075): `Drive::_emitGyroHold`
      * compares this value directly against `YawSource.readYawDeg` with no raw-frame conversion.
      * The `Drive` layer further normalises to `(-360, +360)` via `_normalizeYaw`.
      *
@@ -456,7 +456,7 @@ private:
     /**
      * @brief Read the corrected (app CCW-positive) IMU yaw via the single-owner `YawSource`.
      *
-     * Thin adapter over `YawSource::readYawDeg` (ADR-071), which performs the gated
+     * Thin adapter over `YawSource::readYawDeg` (ADR-074), which performs the gated
      * external-gyro I2C read and applies `Config::GYRO_YAW_SIGN` via the decode policy to
      * convert the raw gyro heading into the app frame. On a non-OK read `yawOut` is
      * left untouched, so callers can distinguish a real read from a silent comms timeout.

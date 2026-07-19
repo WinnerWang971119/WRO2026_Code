@@ -1,6 +1,6 @@
 // =========================================================================================
 // Host unit test for the GYRO straight-line heading-hold PD control-law math
-// (GyroHoldPolicy.h, ADR-072, TC1-TC6).
+// (GyroHoldPolicy.h, ADR-075, TC1-TC6).
 //
 // `gyroHoldCorrection` / `gyroHoldWheels` are header-only, self-contained functions (zero
 // Arduino / Config.h surface — only `TurnPDPolicy.h` / `TurnSignPolicy.h`, which are
@@ -240,7 +240,7 @@ static void testGyroHoldWheelsMixAndNeverReverse()
 // construction that instead differences two INDEPENDENTLY wrapped errors
 // (`errOld = turnWrap180(target - prevYaw)`) misreads the same tiny rotation as a huge ~358 deg
 // swing -- not merely a magnitude error, but the WRONG SIGN entirely, which is exactly the class
-// of bug the fold-safe design (ADR-072) exists to structurally rule out.
+// of bug the fold-safe design (ADR-075) exists to structurally rule out.
 // -------------------------------------------------------------------------------------------
 static void testGyroHoldFoldSafeDerivativeAvoidsStraddleJerk()
 {

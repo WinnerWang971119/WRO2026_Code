@@ -17,7 +17,7 @@
 #include "TurnPDPolicy.h"      // Per-tick turn PD control law: wrap / pdStep / slew / creep /
                                // settle (host-tested; ADR-068). Consumed by _updateTurnProfile.
 #include "GyroHoldPolicy.h"    // GYRO straight heading-hold PD: clamped correction + wheel mix
-                               // (host-tested; ADR-072). Consumed by _emitGyroHold.
+                               // (host-tested; ADR-075). Consumed by _emitGyroHold.
 #include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
                                     // math (host-tested + golden-pinned; issue #130).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
@@ -65,7 +65,7 @@ bool DriveClass::begin()
 
     // Best-effort PID push — the library already retries once internally on failure. No
     // gyro-move PID push to the STM32: that write path is retired — GYRO straights run the
-    // R4-side heading-hold PD (`_emitGyroHold`, ADR-072) tuned by Config::GYRO_HOLD_KP/KD.
+    // R4-side heading-hold PD (`_emitGyroHold`, ADR-075) tuned by Config::GYRO_HOLD_KP/KD.
     MiniR4.DriveDC.setMoveSyncPID(Config::MOVESYNC_KP,
                                   Config::MOVESYNC_KI,
                                   Config::MOVESYNC_KD);
@@ -670,7 +670,7 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading, i
     // Shared continuous-emit path for `_updateProfile`, `_updateStopAtLine`, and
     // `_updateWallStop`. The RAW / SYNC branches read NO instance state — every input is a
     // parameter — so the callers cannot cross-contaminate through them. The GYRO branch
-    // delegates to the STATEFUL `_emitGyroHold` (per-tick R4 heading-hold PD, ADR-072); its
+    // delegates to the STATEFUL `_emitGyroHold` (per-tick R4 heading-hold PD, ADR-075); its
     // `_gyroHoldPrev*` state is keyed to the MEASURED yaw only, never the target or the caller,
     // so the three GYRO channels still cannot cross-contaminate. RAW applies the motor bias +
     // deadband snap (open loop); SYNC does NOT — the STM32 closes the loop and a feedforward
@@ -692,7 +692,7 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading, i
         MiniR4.DriveDC.MoveSync(deadbandSnap(mag, floorMag), deadbandSnap(mag, floorMag));
         break;
     case DriveMode::GYRO:
-        // No _applyBias here — the R4 heading-hold PD is the steering authority (ADR-072,
+        // No _applyBias here — the R4 heading-hold PD is the steering authority (ADR-075,
         // faithful to the mentor's bias-free gyro_move); a base feedforward would be a second
         // interacting surface. `heading` is app-frame (CCW-positive) END-TO-END and is compared
         // directly against `YawSource.readYawDeg` inside the hold — the app→STM32 frame
@@ -1789,7 +1789,7 @@ void DriveClass::_dispatchNext()
             rc = _execDriveDistSync(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::GYRO:
-            // Dispatcher lowering (ADR-072): a flat/short GYRO move runs as a cooperative FLAT
+            // Dispatcher lowering (ADR-075): a flat/short GYRO move runs as a cooperative FLAT
             // profile (startSpeed = cruise ⇒ no ramp-up; endSpeed = 0 ⇒ decel + brake at the
             // commanded distance) so the R4 heading hold owns the wheels every tick. `accel`
             // MUST be explicit — cmd.accel defaults to 0.0f, which _execProfileMove rejects.

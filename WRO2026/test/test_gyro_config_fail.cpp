@@ -3,7 +3,7 @@
  * @brief TC22 / AC9 — Compile-fail target proving the GYRO_YAW_SIGN tripwire in
  *        ``ConfigChecks.h`` fires for a non-(+/-1) sign.
  *
- * ADR-071 negative branch. T6's CMake declares ONE ``EXCLUDE_FROM_ALL`` +
+ * ADR-074 negative branch. T6's CMake declares ONE ``EXCLUDE_FROM_ALL`` +
  * ``EXCLUDE_FROM_DEFAULT_BUILD`` target (``test_gyro_config_fail``) that compiles
  * this TU with the override:
  *

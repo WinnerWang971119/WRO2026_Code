@@ -1,7 +1,7 @@
 /**
  * @file test_gyro_hold_integration.cpp
  * @brief Stateful host-link integration test for the R4-side GYRO heading-hold PD executor
- *        (ADR-072, T7, TC7-TC11 + a mid-segment-hitch companion), asserting the DISPATCHED
+ *        (ADR-075, T7, TC7-TC11 + a mid-segment-hitch companion), asserting the DISPATCHED
  *        `MiniR4.DriveDC.Move(L,R)` differential end-to-end.
  *
  * @details
@@ -72,7 +72,7 @@
  * ===========================================================================================
  * READING Config::GYRO_HOLD_* SYMBOLICALLY, NOT AS HARDCODED LITERALS
  * ===========================================================================================
- * `GYRO_HOLD_KP`/`KD`/`MAX_CORR_PWM` ship as UNVERIFIED bench-tuning placeholders (ADR-072).
+ * `GYRO_HOLD_KP`/`KD`/`MAX_CORR_PWM` ship as UNVERIFIED bench-tuning placeholders (ADR-075).
  * Every exact-value assertion in this file computes its EXPECTED PWM from the live
  * `Config::GYRO_HOLD_KP` (via the `roundPwm` helper below) rather than a hardcoded numeric
  * literal, so a later bench retune does not require hand-editing this file's expected values.
@@ -506,7 +506,7 @@ static void test_TC11_short_flat_gyro_move_runs_cooperative_profile_and_brakes_a
 // ===========================================================================================
 int main()
 {
-    std::printf("INFO: GYRO heading-hold PD -- real Drive.cpp FSM integration (ADR-072, T7, "
+    std::printf("INFO: GYRO heading-hold PD -- real Drive.cpp FSM integration (ADR-075, T7, "
                 "TC7-TC11 + mid-segment-hitch)\n");
 
     test_TC7_dispatched_differential_tracks_error_and_never_uses_vendor_gyro_path();

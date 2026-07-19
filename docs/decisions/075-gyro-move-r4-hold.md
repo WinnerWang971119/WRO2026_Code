@@ -1,4 +1,4 @@
-# ADR-072: GYRO-straight heading-hold moves to an R4-side per-tick PD; the STM32 `MoveGyro*` write path retires
+# ADR-075: GYRO-straight heading-hold moves to an R4-side per-tick PD; the STM32 `MoveGyro*` write path retires
 
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 6)
@@ -9,7 +9,7 @@
 GYRO stop-at-line / wall-stop seeks) runs one PD step per cooperative tick —
 `Drive::_emitGyroHold`, decision math extracted to the header-only, host-tested
 `GyroHoldPolicy.h` — over `Move(L, R)`, reading yaw from `YawSource.readYawDeg` (the
-external gyro, ADR-071). The derivative is computed on the measurement (a fold-safe
+external gyro, ADR-074). The derivative is computed on the measurement (a fold-safe
 wrapped yaw-delta between consecutive ticks, not on the target error), so a heading step
 at a chained-segment boundary produces no derivative kick. The correction is dynamically
 clamped so neither wheel ever reverses (`|corr| ≤ min(GYRO_HOLD_MAX_CORR_PWM, |base|)`),
@@ -21,7 +21,7 @@ STM32's own gyro PID anymore.
 
 ## Why
 
-#172 moved yaw *reads* to the external gyro board (ADR-071), but the STM32 `MoveGyro*`
+#172 moved yaw *reads* to the external gyro board (ADR-074), but the STM32 `MoveGyro*`
 calls still served heading targets against the STM32's own onboard IMU zero — a
 split-brain (#169): the first GYRO move after a read swap steered to a wrong absolute
 heading immediately, not a slow drift. One coherent heading source has to close the loop
@@ -74,8 +74,8 @@ rest of `Drive` already trusts.
   "(Future) outer-loop yaw-track regulator" note.
 - [ADR-045](./045-imu-yaw-sign-normalization.md) — its write half
   (`YawSource::toHwHeading`, `Config::IMU_YAW_SIGN`) is superseded by this ADR; the read
-  half (now the external-gyro `GYRO_YAW_SIGN`, ADR-071) is unaffected.
-- [ADR-071](./071-external-gyro-yaw-provider.md) — named #169 (this ADR's origin) as its
+  half (now the external-gyro `GYRO_YAW_SIGN`, ADR-074) is unaffected.
+- [ADR-074](./074-external-gyro-yaw-provider.md) — named #169 (this ADR's origin) as its
   own *Trigger to revisit*; that split-brain is resolved by this ADR.
 - `WRO2026/src/drive/GyroHoldPolicy.h`, `WRO2026/src/drive/Drive.cpp::_emitGyroHold`,
   `WRO2026/config/ConfigDrive.h`, `WRO2026/config/ConfigChecks.h`.

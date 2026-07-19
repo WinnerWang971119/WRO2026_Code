@@ -7,7 +7,7 @@
 /**
  * @file GyroHoldPolicy.h
  * @brief Single source of truth for the R4-side GYRO straight-line heading-hold
- *        PD control law (ADR-072).
+ *        PD control law (ADR-075).
  *
  * `Drive.cpp` IS host-compiled — integration targets link the real translation
  * unit against the `hal_mocks/` recording surfaces (issue #106 / ADR-030), so
@@ -67,7 +67,7 @@
  * purpose here. There is also no integrator: a constant motor imbalance would
  * leave a steady-state heading error of `disturbance_PWM / kp`, and the named
  * remedy is to apply the existing base feedforward (or an I term) at the bench
- * — not to complicate this pure kernel (ADR-072).
+ * — not to complicate this pure kernel (ADR-075).
  *
  * ## Wheel-mix polarity — reuse the turn's chassis handedness, never a new sign
  *

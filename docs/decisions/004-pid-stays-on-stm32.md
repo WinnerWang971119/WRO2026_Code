@@ -9,7 +9,7 @@
 > in `Config::TURN_KP`/`TURN_KD`, not `TURN_PID_*`. This ADR's Turn line is kept verbatim
 > below as the historical record.
 
-> **Gyro-straight sub-decision superseded by [ADR-072](./072-gyro-move-r4-hold.md).**
+> **Gyro-straight sub-decision superseded by [ADR-075](./075-gyro-move-r4-hold.md).**
 > Gyro mode (`MoveGyro`) also no longer closes its loop on the STM32 —
 > `Drive::_emitGyroHold` runs a per-tick PD controller on the R4 itself, gains in
 > `Config::GYRO_HOLD_KP`/`GYRO_HOLD_KD`, not `MOVEGYRO_*`. Only Sync mode (`MoveSync`)
@@ -43,4 +43,4 @@ A defect in STM32 firmware that makes one of the inner loops unfit for use. Or a
 - [ARCHITECTURE.md](../../ARCHITECTURE.md) — "Where PID lives" table
 - [ADR-011](./011-motor-bias-strategy-b.md) — why the outer PWM path still gets a feedforward bias
 - [ADR-068](./068-turn-pd-controller.md) — supersedes this ADR's Turn/`TurnGyro` clause; the turn loop moved to a per-tick PD controller in `Drive.cpp`
-- [ADR-072](./072-gyro-move-r4-hold.md) — supersedes this ADR's Gyro-straight/`MoveGyro` clause; the gyro-straight loop moved to a per-tick PD controller in `Drive.cpp`, fulfilling this ADR's "(Future) outer-loop yaw-track regulator" note
+- [ADR-075](./075-gyro-move-r4-hold.md) — supersedes this ADR's Gyro-straight/`MoveGyro` clause; the gyro-straight loop moved to a per-tick PD controller in `Drive.cpp`, fulfilling this ADR's "(Future) outer-loop yaw-track regulator" note
