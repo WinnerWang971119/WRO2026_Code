@@ -644,12 +644,18 @@ _LINT_MIN_SCANNED_FILES = 20
 # The exact post-fix legitimate set, encoded verbatim from the plan's
 # Contracts -> Naming table: (repo-relative path, enclosing qualified
 # function name) pairs. Line-number-independent by construction, so it
-# survives edits elsewhere in the file. A ``None`` function name allowlists
-# the WHOLE file -- used only for ``pipeline_config.py``, which defines the
-# singleton itself (its own ``PIPELINE_CONFIG = PipelineConfig()`` at module
-# scope is a ``Store``, never flagged -- see the visitor docstring below) and
-# its own documented absent-key fallback inside
-# ``PipelineConfig.from_field_data``.
+# survives edits elsewhere in the file.
+#
+# A ``None`` function name would allowlist a WHOLE file. The plan's table used
+# that form for ``pipeline_config.py``; the shipped set below deliberately does
+# NOT -- it pins the one function instead (see the comment on that entry), so
+# NO entry here is currently ``None`` and the ``(path, None)`` branch in
+# :func:`_lint_allowlisted` is retained as unused mechanism. Do not cite this
+# paragraph to re-widen an entry to whole-file: a file-wide suppression hides
+# any FUTURE drifted read in that file, which is the exact failure this lint
+# exists to catch. (``pipeline_config.py``'s own module-scope
+# ``PIPELINE_CONFIG = PipelineConfig()`` needs no allowlisting at all -- it is
+# a ``Store``, never flagged; see the visitor docstring below.)
 #
 # Qualified names below are shaped like Python's own ``__qualname__``: dotted
 # through enclosing scopes, with a literal ``<locals>`` segment inserted
