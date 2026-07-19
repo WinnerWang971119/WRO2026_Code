@@ -547,7 +547,7 @@ namespace Config
      * @note TODO: tune on real chassis.
      */
 #ifndef TURN_CRUISE_PWM_DEFAULT
-#define TURN_CRUISE_PWM_DEFAULT 50
+#define TURN_CRUISE_PWM_DEFAULT 65
 #endif
     constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
@@ -563,7 +563,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 2.0f
+#define TURN_KP_DEFAULT 1.5f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -586,7 +586,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 0.06f
+#define TURN_KD_DEFAULT 0.1f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -732,7 +732,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.75f;
+    constexpr float TURN_TOLERANCE_DEG = 0.8f;
 
     /**
      * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
@@ -803,7 +803,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KP_DEFAULT
-#define GYRO_HOLD_KP_DEFAULT 1.5f
+#define GYRO_HOLD_KP_DEFAULT 1.4f
 #endif
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 
@@ -825,7 +825,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KD_DEFAULT
-#define GYRO_HOLD_KD_DEFAULT 0.048f
+#define GYRO_HOLD_KD_DEFAULT 0.051f
 #endif
     constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
 

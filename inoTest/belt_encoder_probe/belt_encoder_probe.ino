@@ -20,8 +20,12 @@
  *   - completes under NEITHER             -> `rotateFor` is unusable with this wiring; move
  *                                            position control onto the R4 (bypass rotateFor).
  *
- * BTN_DOWN keeps the original open-loop nudge (drive the firing motor, read all four
- * encoders) for re-checking the channel/sign.
+ * BTN_DOWN keeps the open-loop nudge (drive the firing motor, read all four encoders) for
+ * re-checking the channel/sign. It drives via `setPower` (raw PWM), NOT `setSpeed`: the latter
+ * is STM32 closed-loop and therefore runs through the very encoder feedback under test, so on
+ * a dead encoder it can output nothing and mimic a dead motor. `setup()` also applies
+ * `setPPR_RPM` exactly as `ManipBelt::begin()` does, so the closed-loop test below runs in the
+ * same motor configuration the firmware ships.
  *
  * @warning The belt physically moves on every test. Keep hands clear.
  *
@@ -33,7 +37,7 @@
 #include "Config.h"
 
 // --- open-loop nudge tunables (BTN_DOWN) ------------------------------------
-static constexpr int16_t  NUDGE_SPEED  = 30;    ///< open-loop speed for the read test (PWM).
+static constexpr int16_t  NUDGE_POWER  = 30;    ///< open-loop PWM power for the read test.
 static constexpr uint32_t NUDGE_MS     = 700;   ///< how long the nudge drives before braking.
 static constexpr int32_t  MOVE_EPS_DEG = 5;     ///< |delta| below this counts as "no movement".
 
@@ -74,14 +78,38 @@ static void resetDeg(uint8_t id)
     }
 }
 
-static void driveMotor(uint8_t id, int16_t speed)
+/// @brief Drive the motor UNREGULATED (`setPower`, the EV3 "power" block).
+///
+/// Deliberately not `setSpeed`: that one is closed-loop ("the Lower MCU will control the
+/// motor PWM to try keep the speed you set"), so it drives THROUGH the encoder feedback this
+/// probe exists to characterize — with a dead or miswired encoder it can output nothing at
+/// all, which reads identically to a dead motor. `setPower` is raw PWM and always turns a
+/// healthy motor, so a still belt here means the MOTOR side is at fault, full stop.
+static void powerMotor(uint8_t id, int16_t power)
 {
     switch (id)
     {
-    case 1:  MiniR4.M1.setSpeed(speed); break;
-    case 2:  MiniR4.M2.setSpeed(speed); break;
-    case 3:  MiniR4.M3.setSpeed(speed); break;
-    case 4:  MiniR4.M4.setSpeed(speed); break;
+    case 1:  MiniR4.M1.setPower(power); break;
+    case 2:  MiniR4.M2.setPower(power); break;
+    case 3:  MiniR4.M3.setPower(power); break;
+    case 4:  MiniR4.M4.setPower(power); break;
+    default: break;
+    }
+}
+
+/// @brief Configure encoder PPR + max RPM, exactly as `ManipBelt::begin()` does.
+///
+/// `rotateFor` and `setSpeed` are both STM32 closed-loop commands scaled by this pair. Without
+/// it the probe tests the motor in a different configuration than the firmware ships, and its
+/// verdict does not transfer.
+static void setPPR_RPM(uint8_t id, uint16_t ppr, uint16_t rpm)
+{
+    switch (id)
+    {
+    case 1:  MiniR4.M1.setPPR_RPM(ppr, rpm); break;
+    case 2:  MiniR4.M2.setPPR_RPM(ppr, rpm); break;
+    case 3:  MiniR4.M3.setPPR_RPM(ppr, rpm); break;
+    case 4:  MiniR4.M4.setPPR_RPM(ppr, rpm); break;
     default: break;
     }
 }
@@ -187,7 +215,7 @@ static void rotateTest(bool reverseMotor)
         delay(20);
     }
     const uint32_t elapsed = millis() - start;
-    driveMotor(fire, 0);
+    powerMotor(fire, 0);
     brakeMotor(fire, true);
     setMotorReverse(fire, false);    // restore default motor direction
     delay(150);
@@ -201,24 +229,24 @@ static void rotateTest(bool reverseMotor)
     Serial.println(ended ? F("   <-- rotateFor WORKS this way") : F(""));
 }
 
-/// @brief Open-loop nudge: drive the firing motor, read which encoder channel moved.
-static void runNudge(int16_t speed)
+/// @brief Open-loop nudge: drive the firing motor UNREGULATED, read which encoder moved.
+static void runNudge(int16_t power)
 {
     const uint8_t fire = Config::BELT_M_ID;
 
-    Serial.print(F(">> open-loop nudge M"));
+    Serial.print(F(">> open-loop nudge (setPower) M"));
     Serial.print((int)fire);
     Serial.print(F(" at "));
-    Serial.print((int)speed);
+    Serial.print((int)power);
     Serial.print(F(" for "));
     Serial.print((long)NUDGE_MS);
     Serial.println(F(" ms"));
 
     resetAll();
-    driveMotor(fire, speed);
+    powerMotor(fire, power);
     const uint32_t start = millis();
     while ((uint32_t)(millis() - start) < NUDGE_MS) { delay(20); }
-    driveMotor(fire, 0);
+    powerMotor(fire, 0);
     brakeMotor(fire, true);
     delay(150);
 
@@ -242,7 +270,7 @@ static void runNudge(int16_t speed)
     else
     {
         Serial.print(F("   -> encoder co-located, sign vs drive: "));
-        Serial.println(((best > 0) == (speed > 0)) ? F("SAME") : F("OPPOSITE"));
+        Serial.println(((best > 0) == (power > 0)) ? F("SAME") : F("OPPOSITE"));
     }
     Serial.println();
 }
@@ -253,14 +281,22 @@ void setup()
     Serial.begin(115200);
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
+    // Match ManipBelt::begin()'s motor configuration — rotateFor and setSpeed are both STM32
+    // closed-loop commands scaled by PPR/max-RPM, so without this the probe characterizes a
+    // differently-configured motor than the firmware ships.
+    setPPR_RPM(Config::BELT_M_ID, Config::BELT_PPR, Config::BELT_RPM);
     resetAll();
 
     Serial.println();
     Serial.println(F("=== belt encoder / rotateFor probe ==="));
     Serial.print(F("firing motor (Config::BELT_M_ID) = M"));
     Serial.println((int)Config::BELT_M_ID);
+    Serial.print(F("PPR="));
+    Serial.print((int)Config::BELT_PPR);
+    Serial.print(F("  maxRPM="));
+    Serial.println((int)Config::BELT_RPM);
     Serial.println(F("BTN_UP   = rotateFor completion test (motor default, then setReverse(true))"));
-    Serial.println(F("BTN_DOWN = open-loop nudge (which encoder channel moves)"));
+    Serial.println(F("BTN_DOWN = open-loop nudge via setPower (which encoder channel moves)"));
     Serial.println();
 }
 
@@ -283,7 +319,7 @@ void loop()
         Serial.println();
         return;
     }
-    if (downEdge) { runNudge(NUDGE_SPEED); return; }
+    if (downEdge) { runNudge(NUDGE_POWER); return; }
 
     if ((uint32_t)(millis() - _lastStreamMs) >= STREAM_MS)
     {
