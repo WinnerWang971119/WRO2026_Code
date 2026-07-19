@@ -552,7 +552,9 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 #: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
 #: content must fail this test loudly rather than silently pass.
 _PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
-_RENDERER_JS_SHA256: str = "c3995d0f964a4d5b79a7cfd89975c1286c4bd0fd1f1b127a0bc485be7bac0338"
+# Re-frozen for issue #165 (axle->body render offset): _drawActors + hitTest now
+# anchor the robot marker to the body pose via CTPS_OBJ.axleToBodyPose.
+_RENDERER_JS_SHA256: str = "8b6f72abdbe2b510837ef796b88a2d8d3ac2e41576907a743a0c212a4157c912"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:

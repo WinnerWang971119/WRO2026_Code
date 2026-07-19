@@ -503,7 +503,12 @@
         if (!cone) {
             return;
         }
-        var pose = CTPS.engine.poseAt(state.t);
+        var axlePose = CTPS.engine.poseAt(state.t);
+        // Cone apex is robot-local (camera-relative) — anchor to the BODY
+        // centre, not the axle (ADR mosaic/vision offset plan, T4/AC2).
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(axlePose, CTPS.store.robotCfg)
+            : axlePose;
         drawVisionCone(ctx, view, pose, cone, OBJ.project);
     }
 
@@ -664,7 +669,12 @@
             return;
         }
 
-        var pose = CTPS.engine.poseAt(state.t);
+        var axlePose = CTPS.engine.poseAt(state.t);
+        // Visibility prediction is robot-local (camera-relative) — anchor to
+        // the BODY centre, not the axle (ADR mosaic/vision offset plan, T4/AC2).
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(axlePose, CTPS.store.robotCfg)
+            : axlePose;
         var bools = visibleCells(pose, cone, cells);
         var total = bools.length;
         var k = _countTrue(bools);

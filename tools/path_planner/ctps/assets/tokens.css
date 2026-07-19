@@ -34,6 +34,10 @@
     --ctps-accent: #ffd24a;
     --ctps-hold: #5bc8e0;
     --ctps-drift: #ff6b4a;
+    /* Robot axle-centre marker (editor Robot tab, #165 follow-up) — a true red,
+     * distinct from --ctps-drift's red-orange, so the rotation axle reads as its
+     * own thing against the accent-yellow body box. */
+    --ctps-axle: #ff453a;
     --ctps-warn-border: #4a2e26;
     /* Read-success green (vision HUD "12/12" state, #136 mosaic feature) —
      * distinct from --ctps-accent/--ctps-hold so "all 12 cells read" reads
