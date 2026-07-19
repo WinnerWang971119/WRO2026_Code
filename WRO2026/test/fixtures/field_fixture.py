@@ -38,8 +38,10 @@ emitted ``routes_fixture.cpp`` is a hard, realistic stress map (not a 7-node toy
     pass-through gate DECLINE -- a BLIND flank (``Inter2->ProjC->Cend``, condition 3)
     and a non-collinear LINE flank (``Inter3->ProjE->Efar``, condition 5) -- so both
     gate-decline branches are reachable by the real FSM (#112);
-  * two single-wheel pivot turns -- one ``line`` regime (LINE legs) and one
-    ``sensor`` regime (BLIND auto-seek into a projection node);
+  * three single-wheel pivot turns -- one FORWARD ``line`` regime (LINE legs),
+    one FORWARD ``sensor`` regime (BLIND auto-seek into a projection node), and
+    one REVERSE (REAR-traversal) pivot on the isolated ``RevA..RevD`` cluster
+    (#54, T5), so the sim<->firmware parity sweep drives a genuine reverse pivot;
   * per-edge ``EDGES`` overrides -- ``speed`` (a ``SpeedTier``) and ``mode``
     (a ``BlindMode``), an asymmetric ``direction`` (rear) override, and a
     ``stop_at_line`` seek override;
@@ -209,6 +211,30 @@ _NODES = {
     "DirFlipA":  (20.0, 115.0),
     "DirFlipB":  (40.0, 115.0),
     "DirFlipC":  (60.0, 115.0),
+    # Reverse (REAR-traversal) single-wheel pivot cluster (#54, T5): an ISOLATED
+    # 4-node component -- the REAR mirror of the LINE-incoming pivot -- so the
+    # sim<->firmware parity all-pairs sweep drives a genuine reverse pivot through
+    # BOTH the C++ dump and the Python sim (they must match, AC10 trace side). It
+    # is a pure disconnected leaf (no edge into the existing graph), so it cannot
+    # shorten any existing NEXT_HOP pair (stable-name contract). Placed in the
+    # empty x=95..165, y=95..110 pocket, clear of every other node.
+    #
+    #   RevA(95,95) --BLIND,heading 0--> RevB(115,95) [line]
+    #        --LINE,"rear",heading 0--> RevC(145,95) [line, PIVOT node]
+    #        --BLIND,"rear",heading 36.87--> RevD(165,110) [blind exit]
+    #
+    # Pivot (RevB, RevC, RevD): the SENSOR-terminated incoming leg RevB->RevC is a
+    # LINE edge pinned `direction:"rear"` (so it is reverse-reachable on this
+    # 2-board fixture and budgets against the smaller REAR offset), the outgoing
+    # RevC->RevD BLIND leg is pinned `direction:"rear"` too (force-SAME). The turn
+    # is a shallow +36.87 deg (< the ~81 deg reverse-legality ceiling), giving
+    # delta = (18/2)*tan(36.87/2) = 3.0 cm -- comfortably inside the 7.68 cm REAR
+    # overshoot budget minus the 0.5 cm trim floor (headroom 4.68 cm), so the
+    # authored-REAR pivot validates clean.
+    "RevA":      (95.0, 95.0),    # BLIND spawn feeding the reverse pivot
+    "RevB":      (115.0, 95.0),   # LINE (start of the REAR-pinned sensor approach)
+    "RevC":      (145.0, 95.0),   # LINE (the reverse PIVOT node)
+    "RevD":      (165.0, 110.0),  # BLIND (the reverse pivot's dead-reckoned exit)
 }
 
 _NODE_TYPES = {
@@ -225,6 +251,10 @@ _NODE_TYPES = {
     "ChainTiny": "blind", "ChainPivPre": "blind", "ResetPre": "blind",
     "ResetBeyond": "blind", "SeekPre": "blind",
     "DirFlipA": "blind", "DirFlipB": "blind", "DirFlipC": "blind",
+    # Reverse-pivot cluster (#54, T5): RevA/RevD are dead-reckon (blind) ends;
+    # RevB/RevC are the junction line nodes joined by the REAR-pinned LINE approach
+    # (a LINE edge may only touch line nodes).
+    "RevA": "blind", "RevB": "line", "RevC": "line", "RevD": "blind",
 }
 
 # LINE edges (line-follow). Never incident to a blind/reset node. The main line
@@ -243,6 +273,10 @@ _LINE_SEGMENTS = [
     # ADR-059 LINE->BLIND spanning collinear run (TC7): LpIn->LpJoin is the LINE
     # leg into the pass-through junction LpJoin (see _NODES comment above).
     ("LpIn", "LpJoin"),
+    # Reverse-pivot cluster (#54, T5): the sensor-terminated pivot APPROACH leg.
+    # The `direction:"rear"` override lives in _EDGES on the RevB->RevC sense
+    # (additive over this undirected segment, same type -> no conflict).
+    ("RevB", "RevC"),
 ]
 
 # BLIND edges (dead-reckon). Free to touch any node type.
@@ -275,12 +309,23 @@ _BLIND_EDGES = [
                                       #   walk node so the RESET break is reached (see _NODES)
     ("SeekPre", "Start"),             # collinear predecessor into the forced-seek Start->Inter1
     ("DirFlipA", "DirFlipB"), ("DirFlipB", "DirFlipC"),  # direction-flip probe (see _EDGES)
+    # Reverse-pivot cluster (#54, T5): the blind spawn feeding the pivot approach,
+    # and the pivot's dead-reckoned REAR departure leg (the `direction:"rear"`
+    # override on RevC->RevD lives in _EDGES).
+    ("RevA", "RevB"),
+    ("RevC", "RevD"),
 ]
 
-# Single-wheel pivots (u, v, w). One LINE-regime turn and one SENSOR-regime turn.
+# Single-wheel pivots (u, v, w). Two FRONT (forward) turns + one REAR (reverse)
+# turn. The two forward pivots' sensor-terminated approach legs are FRONT-pinned
+# in _EDGES (#54, T5): post-#54 the validator budgets an unpinned reverse-reachable
+# sensor approach against the smaller REAR offset (7.68 cm), which a 90 deg turn's
+# delta = 9 cm exceeds, so an explicit `direction:"front"` restores the larger
+# FRONT budget -- behavior-preserving, since both were pre-#54 forward-only pivots.
 _PIVOT_TURNS = [
-    ("Inter3", "Inter4", "Corner"),  # LINE->LINE +90deg (line regime, both legs)
-    ("Corner", "ProjB", "Zed"),      # BLIND->projection seek then BLIND -90deg (sensor x distance)
+    ("Inter3", "Inter4", "Corner"),  # LINE->LINE +90deg (line regime; approach FRONT-pinned)
+    ("Corner", "ProjB", "Zed"),      # BLIND->projection seek then BLIND -90deg (sensor; approach FRONT-pinned)
+    ("RevB", "RevC", "RevD"),        # LINE(rear)->BLIND(rear) +36.87deg reverse pivot (#54, T5)
 ]
 
 # Wall-zero reset nodes. Wall1 presses a y-wall (north); Wall2 presses an x-wall
@@ -308,14 +353,31 @@ def _edge(u: str, v: str, etype, **overrides) -> dict:
 
 # Per-edge overrides (ADR-022): authored here in Python because they carry enum
 # values JSON cannot represent. Additive over LINE_SEGMENTS / BLIND_EDGES (same
-# type, so no conflict). None of these edges is a pivot leg (rear is rejected on
-# pivot legs; pivots are FRONT-only in v1).
+# type, so no conflict). Since #54 (T5) some of these ARE pivot legs -- a pivot
+# may run in reverse now, so pivot-leg `direction` pins are meaningful: the two
+# forward pivots FRONT-pin their sensor approach leg (restoring the FRONT budget),
+# and the reverse pivot REAR-pins both its legs.
 _EDGES = [
     _edge("Inter2", "Inter3", EDGE_LINE, speed=SpeedTier.FAST,
           mode=LineFollowMode.LEFT),                                          # SpeedTier + LINE lateral-bias (LEFT) override
     _edge("final", "position1", EDGE_BLIND, mode=BlindMode.GYRO_TSHAPE),      # BlindMode override
     _edge("Inter1", "Spur", EDGE_LINE, direction="rear"),                     # asymmetric direction override
     _edge("Start", "Inter1", EDGE_BLIND, stop_at_line="on"),                  # forced seek override
+    # #54 (T5): FRONT-pin the sensor-terminated APPROACH leg of each forward
+    # pivot. delta = 9 cm (90 deg) exceeds the post-#54 REAR overshoot budget
+    # (7.68 - 0.5 cm), so an explicit FRONT pin restores the 12.02 cm FRONT budget.
+    # Behavior-preserving: both pivots resolved FRONT under AUTO already (their
+    # approaches are collinear/tie-goes-FRONT), so the pin only makes the forward
+    # direction explicit.
+    _edge("Inter3", "Inter4", EDGE_LINE, direction="front"),                  # FRONT-pin ('Inter3','Inter4','Corner') approach
+    _edge("Corner", "ProjB", EDGE_BLIND, direction="front"),                  # FRONT-pin ('Corner','ProjB','Zed') approach
+    # #54 (T5): the reverse pivot ('RevB','RevC','RevD'). Both legs are pinned
+    # `direction:"rear"` so the pivot runs REAR end to end (wheel-flipped): the
+    # LINE approach RevB->RevC is the reverse-reachable sensor leg budgeted against
+    # the REAR offset, and the BLIND departure RevC->RevD is forced REAR too
+    # (force-SAME). See the RevA..RevD block in _NODES for the geometry/delta.
+    _edge("RevB", "RevC", EDGE_LINE, direction="rear"),                       # reverse pivot sensor approach (REAR)
+    _edge("RevC", "RevD", EDGE_BLIND, direction="rear"),                      # reverse pivot dead-reckon departure (REAR)
     # ADR-059 chain-ineligibility probe (TC6, issue #106/T10-T11): forces
     # DirFlipB->DirFlipC REAR while the preceding hop resolves FRONT (AUTO on a
     # 1-board default chassis), so the direction-flip guard in the blind-chain

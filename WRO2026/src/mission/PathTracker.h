@@ -276,17 +276,18 @@ public:
 
     enum class Fault : uint8_t
     {
-        NONE                 = 0,
-        NOT_ZEROED           = 1,
-        UNREACHABLE          = 2,
-        DRIVE_FAULT          = 3,
-        BAD_NODE             = 4,
-        DRAIN_TIMEOUT        = 5,
-        REVERSE_UNAVAILABLE  = 6,
-        OFF_NODE             = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
-        WALL_NOT_SQUARE      = 8, ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
-        PIVOT_TRIM_UNDERFLOW = 9, ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
-        LINE_LOST            = 10  ///< The LineFollower reported a continuous lost line for at least `Config::LINE_LOST_FAULT_MS` while `LINE_FOLLOW`-ing outside a deliberate dead-reckon window (issue #146). Bounded fault ESCALATION, not the deferred ADR-009 sweep/reacquire/resume recovery.
+        NONE                     = 0,
+        NOT_ZEROED               = 1,
+        UNREACHABLE              = 2,
+        DRIVE_FAULT              = 3,
+        BAD_NODE                 = 4,
+        DRAIN_TIMEOUT            = 5,
+        REVERSE_UNAVAILABLE      = 6,
+        OFF_NODE                 = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
+        WALL_NOT_SQUARE          = 8, ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
+        PIVOT_TRIM_UNDERFLOW     = 9, ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
+        LINE_LOST                = 10, ///< The LineFollower reported a continuous lost line for at least `Config::LINE_LOST_FAULT_MS` while `LINE_FOLLOW`-ing outside a deliberate dead-reckon window (issue #146). Bounded fault ESCALATION, not the deferred ADR-009 sweep/reacquire/resume recovery.
+        PIVOT_DIRECTION_MISMATCH = 11  ///< A pivot's departure hop (v→w) carried a BINDING direction override that contradicts the pivot's approach direction (u→v); force-SAME cannot reconcile the two, so the dispatch faults instead of running a mis-trimmed maneuver (issue #54, ADR-073).
     };
 
     /**
@@ -1162,11 +1163,17 @@ private:
     /// firmware resolves the turn once, copies the wheel + δ out, and consumes
     /// the copy at the maneuver and the drive. `active == false` is the
     /// "no pivot" sentinel (every field at its default).
+    ///
+    /// @note `dir` is the traversal direction resolved for the pivot's
+    ///       APPROACH hop (u→v). Force-SAME uses it to require the departure
+    ///       hop (v→w) to match, and to pick the flipped wheel + the
+    ///       direction-resolved overshoot budget (issue #54, ADR-073).
     struct PivotRef
     {
         bool             active  = false;
         Routes::TurnMode wheel   = Routes::TurnMode::DEFAULT;
         float            trim_cm = 0.0f;
+        Direction        dir     = Direction::AUTO;
     };
 
     /// @brief The per-turn pivot latch contract (ADR-036, supersedes ADR-035).

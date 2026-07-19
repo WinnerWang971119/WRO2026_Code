@@ -17,8 +17,8 @@
  *     test to assert on.
  *
  * The `Fault` enum and `faultMnemonic` mirror the REAL production facade EXACTLY
- * (11 values `NONE`..`LINE_LOST`; mnemonics `OK/NZ/UNR/DRV/BAD/DRN/
- * REV/OFN/WSQ/PTU/LLN` with a `"??"` post-switch fallback) — NOT the stale 7-value
+ * (12 values `NONE`..`PIVOT_DIRECTION_MISMATCH`; mnemonics `OK/NZ/UNR/DRV/BAD/DRN/
+ * REV/OFN/WSQ/PTU/LLN/PDM` with a `"??"` post-switch fallback) — NOT the stale 7-value
  * stub + wrong `"DTO"` mnemonic in `task_mocks/` / `ctps_mocks/`. Mission emits
  * the mnemonic in its `NAV FAULT <m>` events, so any drift here would silently
  * assert a fabricated event string.
@@ -103,7 +103,7 @@ class PathTrackerClass
 {
 public:
     /**
-     * @brief Fault enum — mirrors production `PathTracker.h` EXACTLY (11 values).
+     * @brief Fault enum — mirrors production `PathTracker.h` EXACTLY (12 values).
      * @note  Do NOT shorten to the stale 7-value `task_mocks/` stub; Mission emits
      *        `faultMnemonic(kind)` and the test asserts the exact string.
      */
@@ -119,7 +119,8 @@ public:
         OFF_NODE             = 7,
         WALL_NOT_SQUARE      = 8,
         PIVOT_TRIM_UNDERFLOW = 9,
-        LINE_LOST            = 10
+        LINE_LOST            = 10,
+        PIVOT_DIRECTION_MISMATCH = 11
     };
 
     /**
@@ -238,6 +239,7 @@ public:
             case Fault::WALL_NOT_SQUARE:      return "WSQ";
             case Fault::PIVOT_TRIM_UNDERFLOW: return "PTU";
             case Fault::LINE_LOST:            return "LLN";
+            case Fault::PIVOT_DIRECTION_MISMATCH: return "PDM";
         }
         return "??";
     }

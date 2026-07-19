@@ -95,7 +95,7 @@ namespace Config
      * @brief Belt motor direction sign (`+1` or `-1`). Applied ONCE at the `ManipBelt`
      *        driver boundary — the `_setSpeed` / `_rotateFor` speed argument and the
      *        `_getDegrees` read — so the sign convention above holds no matter how the
-     *        belt motor is wired (ADR-045 style single-point sign, like `IMU_YAW_SIGN`).
+     *        belt motor is wired (ADR-045 style single-point sign, like `GYRO_YAW_SIGN`).
      * @note  This is the LOGICAL-direction knob (which physical end is FAR_END). It is a
      *        different axis from `BELT_MOTOR_REVERSE`, which fixes motor/encoder AGREEMENT so
      *        the closed-loop `rotateFor` can complete. On this build both come out such that

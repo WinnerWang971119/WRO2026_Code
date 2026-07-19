@@ -214,16 +214,38 @@ def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> floa
     post-detect ``LINE_OVERSHOOT`` advance, so the over-travel ``delta`` it
     cancels must fit within that advance -- the line-sensor-to-axle offset.
 
-    The per-turn model is **FRONT-only** in v1 (reverse pivots are deferred to
-    #54 and rejected by the validator), so the budget is the FRONT offset
-    alone, not the min of front/rear the per-edge model used (which had to
-    hedge against a runtime direction choice). Single-sourced from Config.h
-    so a chassis remeasure cannot desync this check.
+    Since #54 (ADR-073) a pivot's sensor-terminated approach budgets its
+    over-travel ``delta`` against the FRONT offset only when it is FRONT-pinned
+    or reverse-impossible; a reverse-reachable approach budgets against the REAR
+    offset (:func:`parse_line_sensor_rear_axle_offset_cm`). The per-pivot
+    selection runs through the shared
+    :func:`tools.path_planner.sim.runtime.pivot_overshoot_budget_cm` twin; this
+    parser is kept as the Config-single-sourced FRONT constant (parity TC26).
 
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
     :return: the FRONT sensor-to-axle offset in centimetres.
     """
     return parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", config_path)
+
+
+def parse_line_sensor_rear_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> float:
+    """Return ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` (the REAR offset) in cm.
+
+    Mirrors :func:`parse_line_sensor_axle_offset_cm` for the REAR line-sensor
+    board. A pivot's sensor-terminated approach that is reverse-reachable
+    (#54) budgets its over-travel ``delta`` against this offset instead of
+    the FRONT one -- see ``ReversePivotPolicy::pivotOvershootBudgetCm``
+    (ADR-073).
+
+    The value is an UNMEASURED placeholder pending a bench measurement of the
+    wired rear board (`ConfigDrive.h` TODO); single-sourced from Config.h so a
+    chassis remeasure cannot silently desync the offline check from the
+    firmware and sim (parity test TC26).
+
+    :param config_path: path to ``Config.h`` (defaults to the firmware header).
+    :return: the REAR sensor-to-axle offset in centimetres.
+    """
+    return parse_config_float("LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path)
 
 
 def parse_pivot_trim_min_drive_cm_from_config(
@@ -399,11 +421,13 @@ def _resolve_authored_direction(field_data, a: str, b: str):
 
     The per-edge ``direction`` override is asymmetric in graph_builder
     (:func:`graph_builder._emit_directed_pair` applies it to the forward
-    ``u -> v`` edge only). The validator's FRONT-only guard must therefore look
-    at the AUTHORED direction on each pivot-adjacent directed edge: a ``"rear"``
-    authored on the exact ``u -> v`` or ``v -> w`` leg of a pivot is rejected
-    (v1 is FRONT-only; reverse pivots are #54). A ``"rear"`` authored only on
-    some other leg (e.g. the reverse ``b -> a``) does not constrain ``a -> b``.
+    ``u -> v`` edge only). The pivot validator therefore looks at the AUTHORED
+    direction on each pivot-adjacent directed edge to resolve its static
+    direction pin (``_static_direction_pin``): a ``"rear"`` / ``"front"``
+    authored on the exact ``u -> v`` or ``v -> w`` leg pins that leg REAR / FRONT
+    for the reverse-pivot budget and direction rejects (#54, ADR-073). A
+    ``"rear"`` authored only on some other leg (e.g. the reverse ``b -> a``) does
+    not constrain ``a -> b``.
 
     :param field_data: the field-data module/namespace.
     :param a: source node of the directed edge.
@@ -472,13 +496,28 @@ def _validate_pivot_turns(field_data) -> None:
     * **Trim exceeds the sensor/LINE-incoming overshoot budget.** Applies to
       BOTH a true ``"line"`` edge AND a ``"sensor"`` (STOP_AT_LINE seek)
       incoming side: each reduces the post-detect overshoot by ``delta``,
-      bounded by the FRONT sensor-to-axle offset (ADR-044).
+      bounded by the sensor-to-axle offset (ADR-044). The offset is
+      DIRECTION-resolved (#54, ADR-073): a reverse-reachable approach (2-board
+      chassis, not FRONT-pinned) budgets against the smaller REAR offset, a
+      FRONT-pinned / reverse-impossible one against the FRONT offset -- both via
+      the shared :func:`tools.path_planner.sim.runtime.pivot_overshoot_budget_cm`
+      twin.
     * **Chained pivots over-trim a shared edge.** Two triples sharing the same
       directed edge ``(v, w)`` (one departing it, one approaching it) must
       satisfy ``delta_uv + delta_vw < length(v -> w)``.
-    * **Authored REAR on a pivot-adjacent edge.** v1 is FRONT-only; a
-      ``direction: "rear"`` on the exact ``u -> v`` or ``v -> w`` leg is
-      rejected (reverse pivots are #54).
+    * **Binding direction contradiction (#54, ADR-073).** The two legs are
+      statically pinned (per-edge ``direction`` override or the pipeline default)
+      to OPPOSITE directions (one ``"front"``, one ``"rear"``). Force-SAME forces
+      the departure to the approach direction, so a binding contradiction would
+      hard-fault ``PIVOT_DIRECTION_MISMATCH`` at runtime -- rejected here.
+    * **REAR-pinned sensor approach on a 1-board chassis (#54, ADR-073).** A
+      sensor-terminated incoming leg pinned ``direction: "rear"`` when
+      ``LINE_BOARD_COUNT < 2`` faults ``REVERSE_UNAVAILABLE`` at runtime (no rear
+      board to seek in reverse); it does NOT degrade to FRONT, so it is rejected.
+    * **Reverse-reachable reset-node pivot not FRONT-pinned (#54, ADR-073).** A
+      pivot AT a ``"reset"`` (wall-zero) node whose approach is reverse-reachable
+      is rejected unless FRONT-pinned: the wall interlude clearance is sized for
+      the FRONT sweep radius, so a REAR sweep near the wall is untested.
 
     The supported incoming x outgoing matrix (``line`` / ``sensor`` =
     sensor-terminated; ``distance`` = dead-reckoned) is::
@@ -524,6 +563,7 @@ def _validate_pivot_turns(field_data) -> None:
     )
     from tools.path_planner.pipeline_config import (
         PIPELINE_CONFIG,
+        DirectionMode,
         StopAtLineMode,
     )
     from tools.path_planner.planner import (
@@ -540,18 +580,22 @@ def _validate_pivot_turns(field_data) -> None:
         LINE_BOARD_COUNT,
         Direction,
         StopAtLine,
+        pivot_overshoot_budget_cm,
         resolve_stop_at_line,
     )
 
     track_cm = parse_track_cm_from_config()
 
-    # Single-source the over-travel budget + min-angle floor from the firmware
-    # header, parsed lazily HERE (not at import) so a pivot-free field never pays
-    # the read (the nit: kill the per-build dead read). The LINE budget is the
-    # FRONT sensor-to-axle offset (FRONT-only); the min-angle floor is the tunable
-    # Config::PIVOT_MIN_TURN_DEG knob -- an authored pivot below it would slip
-    # under the firmware's turn-dispatch gate and silently no-op.
-    line_overshoot_budget_cm = parse_line_sensor_axle_offset_cm()
+    # Single-source the min-angle floor from the firmware header, parsed lazily
+    # HERE (not at import) so a pivot-free field never pays the read. The
+    # over-travel overshoot budget is NOT a single FRONT constant any more (#54):
+    # a reverse-reachable sensor-terminated approach budgets against the REAR
+    # offset, a FRONT-pinned / reverse-impossible one against the FRONT offset --
+    # both selected per-pivot below via the shared T1 twin
+    # ``sim.runtime.pivot_overshoot_budget_cm`` (ADR-073), never a hardcoded
+    # literal. The min-angle floor is the tunable Config::PIVOT_MIN_TURN_DEG knob
+    # -- an authored pivot below it would slip under the firmware's turn-dispatch
+    # gate and silently no-op.
     pivot_min_turn_deg = parse_pivot_min_turn_deg_from_config()
     # The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
     # advance) to this floor (PathTracker._pivotTrimDistance and the LINE_FOLLOW
@@ -620,9 +664,12 @@ def _validate_pivot_turns(field_data) -> None:
         pipeline-default :class:`BlindMode` (``PIPELINE_CONFIG.blind``) plus its
         per-edge ``stop_at_line`` override and the local auto-rule.
 
-        Pivots are FRONT-only in v1 (reverse pivots are #54), so the seek is
-        resolved with ``Direction.FRONT`` -- a front board always faces travel,
-        so ``LINE_BOARD_COUNT`` never suppresses it.
+        The seek is CLASSIFIED with ``Direction.FRONT`` -- a front board always
+        faces travel, so this answers "is this a seek edge at all?" independent of
+        traversal direction (the seek triggers are direction-invariant). Whether a
+        REAR traversal can physically realise the seek is a separate, board-count
+        concern handled by the caller's reverse-reachability test (#54, ADR-073):
+        a seek edge on ``LINE_BOARD_COUNT < 2`` is reverse-impossible.
         """
         if edge_type == EDGE_LINE:
             # The destination node type decides termination: a junction line
@@ -646,6 +693,51 @@ def _validate_pivot_turns(field_data) -> None:
             )
             return "sensor" if seek else "distance"
         return None
+
+    def _pipeline_direction_default() -> "DirectionMode":
+        """Return the field-sourced pipeline direction default as a DirectionMode.
+
+        Mirrors the value the sim feeds ``resolve_direction`` (``PipelineConfig.
+        from_field_data(field_data).direction``) but degrades a malformed
+        ``PIPELINE_DIRECTION_MODE`` name to ``DirectionMode.DEFAULT`` so this pass
+        never crashes -- :func:`_validate_pipeline_config` (which runs AFTER the
+        pivot pass, ``validate`` step 13) reports a bad name with a precise
+        FieldDataError. A field that omits the key inherits the module-level
+        :data:`PIPELINE_CONFIG` singleton default (``DirectionMode.DEFAULT``).
+        """
+        value = getattr(field_data, "PIPELINE_DIRECTION_MODE", None)
+        if value is None:
+            return PIPELINE_CONFIG.direction
+        if isinstance(value, DirectionMode):
+            return value
+        try:
+            return DirectionMode[value]
+        except (KeyError, TypeError):
+            return DirectionMode.DEFAULT
+
+    # The field-wide direction default, resolved once. Folded into every leg's
+    # "statically FRONT-pinned" test below (a per-edge pin still overrides it).
+    pipeline_direction = _pipeline_direction_default()
+
+    def _static_direction_pin(a: str, b: str) -> "DirectionMode":
+        """Return the statically-resolvable travel direction for edge ``a -> b``.
+
+        Folds the per-edge ``direction`` override (binding, highest precedence,
+        asymmetric on the ``a -> b`` sense) over the field-sourced pipeline
+        direction default -- the same precedence
+        :func:`tools.path_planner.sim.runtime.resolve_direction` applies (per-edge
+        beats pipeline beats builder/auto). Returns
+        :attr:`DirectionMode.FORCE_FORWARD` / :attr:`DirectionMode.FORCE_REVERSE`
+        when the direction is statically pinned, or :attr:`DirectionMode.DEFAULT`
+        when it defers to the runtime builder/auto algorithm (not statically
+        knowable offline).
+        """
+        authored = _resolve_authored_direction(field_data, a, b)
+        if authored == "front":
+            return DirectionMode.FORCE_FORWARD
+        if authored == "rear":
+            return DirectionMode.FORCE_REVERSE
+        return pipeline_direction
 
     # First pass: per-triple geometry + collect each triple's delta keyed by
     # its outgoing directed edge, so a second pass can sum chained pivots that
@@ -722,18 +814,10 @@ def _validate_pivot_turns(field_data) -> None:
         in_dest_type = node_types.get(v)
         out_dest_type = node_types.get(w)
 
-        # FRONT-only: reject authored REAR on either pivot-adjacent leg ------
-        # (review fix 4 / FRONT-only; reverse pivots are #54). Check the exact
-        # u -> v and v -> w legs -- the override is asymmetric in graph_builder.
-        for leg_a, leg_b, label in ((u, v, "incoming"), (v, w, "outgoing")):
-            if _resolve_authored_direction(field_data, leg_a, leg_b) == "rear":
-                raise FieldDataError(
-                    f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an authored "
-                    f"direction:'rear' on its {label} edge ('{leg_a}','{leg_b}'), "
-                    f"but single-wheel pivots are FRONT-only in v1 (reverse "
-                    f"pivots are tracked by #54). Drop the 'rear' override on "
-                    f"that edge or remove the pivot turn."
-                )
+        # Authored ``direction:'rear'`` on a pivot-adjacent leg is ACCEPTED now
+        # (#54 / ADR-073): a pivot may run in reverse. The direction pins are
+        # analysed below (after the regime is known) for the binding-contradiction,
+        # REAR-on-1-board, reset-node, and direction-resolved-budget rejects.
 
         # 1. Degenerate / sub-gate turn angle -------------------------------
         in_heading = directed_edge_heading(graph, u, v)
@@ -779,6 +863,80 @@ def _validate_pivot_turns(field_data) -> None:
                 f"reclassify the offending edge or remove the pivot turn."
             )
 
+        # -- Reverse-pivot direction analysis (#54, ADR-073) ----------------
+        # A pivot commits to the direction it APPROACHES in (force-SAME); its
+        # departure is forced to that same direction. Resolve each leg's static
+        # direction pin (per-edge override folded over the pipeline default), then
+        # gate the sensor-terminated INCOMING leg on reverse-reachability. The
+        # incoming leg is the one that bears the post-detect overshoot budget (the
+        # outgoing sensor leg self-corrects at ``w``), so board-count / budget key
+        # off it.
+        in_dir_pin = _static_direction_pin(u, v)
+        out_dir_pin = _static_direction_pin(v, w)
+
+        in_sensor_terminated = in_regime in ("line", "sensor")
+        in_statically_front_pinned = in_dir_pin == DirectionMode.FORCE_FORWARD
+        # A sensor-terminated approach cannot run REAR on a 1-board chassis: the
+        # rear board is required to seek / re-anchor a line in reverse (ADR-027).
+        in_board_impossible_rear = in_sensor_terminated and LINE_BOARD_COUNT < 2
+        in_reverse_reachable = (
+            not in_statically_front_pinned and not in_board_impossible_rear
+        )
+
+        # Binding contradiction: both legs statically pinned to OPPOSITE
+        # directions. Force-SAME forces the departure to the pivot's approach
+        # direction, so a binding departure pin the other way hard-faults
+        # PIVOT_DIRECTION_MISMATCH at runtime; the validator catches the
+        # statically-visible case here. (Ordinary AUTO never contradicts --
+        # force-SAME simply pins the departure's AUTO rung to the approach.)
+        _binding_pins = (DirectionMode.FORCE_FORWARD, DirectionMode.FORCE_REVERSE)
+        if (
+            in_dir_pin in _binding_pins
+            and out_dir_pin in _binding_pins
+            and in_dir_pin != out_dir_pin
+        ):
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') pins its two legs to "
+                f"OPPOSITE directions -- incoming ('{u}','{v}') is "
+                f"'{'front' if in_dir_pin == DirectionMode.FORCE_FORWARD else 'rear'}' "
+                f"and outgoing ('{v}','{w}') is "
+                f"'{'front' if out_dir_pin == DirectionMode.FORCE_FORWARD else 'rear'}'. "
+                f"A pivot commits to its approach direction (force-SAME), so a "
+                f"departure forced the opposite way would hard-fault "
+                f"PIVOT_DIRECTION_MISMATCH at runtime. Pin BOTH legs the same "
+                f"direction (both 'front' or both 'rear'), drop the conflicting "
+                f"per-edge/pipeline direction override, or remove the pivot turn."
+            )
+
+        # A REAR-pinned sensor-terminated approach on a <2-board chassis is a hard
+        # reject (not a budget swap): the hop faults REVERSE_UNAVAILABLE at runtime
+        # -- it does NOT silently fall back to FRONT -- because the rear board is
+        # absent (ADR-027).
+        if in_dir_pin == DirectionMode.FORCE_REVERSE and in_board_impossible_rear:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') pins its sensor-terminated "
+                f"incoming leg ('{u}','{v}') to direction:'rear', but the chassis "
+                f"has LINE_BOARD_COUNT={LINE_BOARD_COUNT} (< 2) so a REAR line seek "
+                f"is physically impossible -- the hop would fault "
+                f"REVERSE_UNAVAILABLE at runtime, not degrade to FRONT. Wire the "
+                f"rear board (LINE_BOARD_COUNT >= 2), pin the leg direction:'front', "
+                f"approach via a dead-reckon BLIND leg, or remove the pivot turn."
+            )
+
+        # A reverse-reachable reset-node (wall-zero) pivot must be FRONT-pinned:
+        # the wall interlude drives FORWARD off the wall to WALL_PIVOT_CLEARANCE_CM
+        # (sized for the FRONT sweep radius), so a REAR departure would sweep the
+        # untested tail arc near the wall (ADR-073). ``v`` is the pivot node.
+        if node_types.get(v) == _RESET_NODE_TYPE and in_reverse_reachable:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') pivots at the reset "
+                f"(wall-zero) node '{v}', but its approach ('{u}','{v}') is "
+                f"reverse-reachable (not FRONT-pinned). The wall-zero interlude "
+                f"clearance is sized for the FRONT sweep radius; a REAR sweep near "
+                f"the wall is untested. Pin the pivot legs direction:'front', move "
+                f"the reset off the pivot node, or remove the pivot turn."
+            )
+
         # Single-source the delta formula (no inline re-derive).
         delta = compute_pivot_compensation(theta, track_cm)
 
@@ -811,30 +969,42 @@ def _validate_pivot_turns(field_data) -> None:
         # 4. delta leaves < the trim floor of the sensor/LINE overshoot budget
         # BOTH a 'line' incoming edge (LINE into a junction node) AND a 'sensor'
         # (STOP_AT_LINE seek) incoming edge realise their correction as a
-        # reduction of the post-detect overshoot advance, bounded by the same
-        # FRONT sensor-to-axle offset (pivots are FRONT-only). The classifier
-        # already folds per-edge overrides, the legacy STOP_AT_LINE pipeline
-        # default, AND the local auto-rule BLIND->projection-node seek into
-        # 'sensor', so both regimes share this one budget (ADR-044). A LINE edge
-        # into a PROJECTION node is NOT 'line' here -- it is 'distance', so its
-        # trim draws from the follow distance in check 3, not this overshoot
-        # budget (issue #64). The firmware clamps the reduced advance to
-        # PIVOT_TRIM_MIN_DRIVE_CM, so reject when budget - delta < the floor.
-        if (
-            in_regime in ("line", "sensor")
-            and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm
-        ):
-            raise FieldDataError(
-                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
-                f"delta={delta:.3f} cm, leaving "
-                f"{line_overshoot_budget_cm - delta:.3f} cm of the sensor/LINE "
-                f"overshoot budget {line_overshoot_budget_cm:.2f} cm (the FRONT "
-                f"sensor-to-axle offset; v1 pivots are FRONT-only) -- below the "
-                f"firmware's trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. "
-                f"The runtime would clamp the overshoot advance to that floor -- "
-                f"approach via a dead-reckon BLIND leg, use a center turn, soften "
-                f"the turn, or see issue #75 for ('{u}','{v}','{w}')."
+        # reduction of the post-detect overshoot advance, bounded by the
+        # sensor-to-axle offset. The classifier already folds per-edge overrides,
+        # the legacy STOP_AT_LINE pipeline default, AND the local auto-rule
+        # BLIND->projection-node seek into 'sensor', so both regimes share this one
+        # budget (ADR-044). A LINE edge into a PROJECTION node is NOT 'line' here
+        # -- it is 'distance', so its trim draws from the follow distance in check
+        # 3, not this overshoot budget (issue #64).
+        #
+        # The budget offset is DIRECTION-resolved (#54, ADR-073): a
+        # reverse-reachable approach (2-board chassis, not FRONT-pinned) budgets
+        # against the smaller REAR offset -- the conservative worst case, since the
+        # runtime may resolve the approach REAR -- while a FRONT-pinned or
+        # reverse-impossible approach budgets against the FRONT offset. The offset
+        # comes from the shared T1 twin ``pivot_overshoot_budget_cm`` (the single
+        # source firmware/sim/CTPS also consume), never a hardcoded literal. The
+        # firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so reject
+        # when budget - delta < the floor.
+        if in_sensor_terminated:
+            overshoot_budget_cm = pivot_overshoot_budget_cm(
+                Direction.REAR if in_reverse_reachable else Direction.FRONT
             )
+            budget_label = "REAR" if in_reverse_reachable else "FRONT"
+            if overshoot_budget_cm - delta < pivot_trim_min_drive_cm:
+                raise FieldDataError(
+                    f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
+                    f"delta={delta:.3f} cm, leaving "
+                    f"{overshoot_budget_cm - delta:.3f} cm of the sensor/LINE "
+                    f"overshoot budget {overshoot_budget_cm:.2f} cm (the "
+                    f"{budget_label} sensor-to-axle offset) -- below the firmware's "
+                    f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. The "
+                    f"runtime would clamp the overshoot advance to that floor -- "
+                    f"pin the pivot legs direction:'front' (the larger FRONT "
+                    f"budget), approach via a dead-reckon BLIND leg, use a center "
+                    f"turn, soften the turn, or see issue #75 for "
+                    f"('{u}','{v}','{w}')."
+                )
 
         # Record this triple's delta against the directed edges it trims, for
         # the chained-pivot sum-check below. Only a DISTANCE-terminated leg

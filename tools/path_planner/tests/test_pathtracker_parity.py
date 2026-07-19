@@ -760,6 +760,55 @@ def test_coverage_every_record_kind_present(parity_run: _ParityRun) -> None:
     assert not missing_sim, f"sim sweep never exercised record kind(s): {missing_sim}"
 
 
+def test_reverse_pivot_is_exercised_with_flipped_wheel() -> None:
+    """The swept reverse-pivot cluster drives a REAR pivot with a flipped wheel (#54, T5).
+
+    Anti-vacuous companion to the whole-sweep guards: a PURE check (no dump
+    binary) that ``field_fixture``'s isolated ``RevA..RevD`` cluster actually
+    puts a genuine reverse pivot into the parity sweep -- so a future edit that
+    drops or defangs it fails HERE rather than passing vacuously (the reverse
+    pivot shares record KINDS with the forward pivots, so
+    :func:`test_coverage_every_record_kind_present` alone cannot catch it).
+
+    Drives the ``RevB -> RevC -> RevD`` route through the SAME sim path
+    :func:`_run_sim_case` feeds the diff and asserts the pivot fired with:
+
+    * the **REAR-flipped** wheel -- the stored forward wheel for the shallow
+      ``+36.87 deg`` turn is ``PIVOT_LEFT``; a REAR traversal L<->R flips it to
+      ``PIVOT_RIGHT`` via ``resolve_pivot_wheel`` (the flip the parity normalizer
+      must apply so the sim's turn label matches the firmware dump's); and
+    * a **REAR** leg (``reverse == True``) -- force-SAME runs both pivot legs in
+      the approach (REAR) direction.
+
+    Runs in the pytest-only CI job (no C++ toolchain) since it needs only the
+    Python sim. The ``RevB``/``RevC``/``RevD`` names are pinned by this test.
+    """
+    field, graph, next_hop = _build_fixture()
+
+    # The cluster route that takes the declared pivot (RevB, RevC, RevD).
+    assert walk_next_hop(next_hop, "RevB", "RevD") == ["RevB", "RevC", "RevD"], (
+        "the reverse-pivot cluster route RevB->RevC->RevD is not the resolved "
+        "NEXT_HOP path -- field_fixture's reverse pivot is not being exercised"
+    )
+
+    case = ParityCase(
+        case_id="RevB__RevD__reverse_pivot", start="RevB", goal="RevD"
+    )
+    records = _run_sim_case(field, graph, next_hop, case)
+    kinds = [r.kind for r in records]
+
+    turns = [r for r in records if r.kind == "turn"]
+    assert turns, f"reverse-pivot route emitted no pivot turn record; got {kinds}"
+    assert any(t.fields["wheel"] == "PIVOT_RIGHT" for t in turns), (
+        "reverse pivot did not flip the wheel to PIVOT_RIGHT (stored forward "
+        f"wheel is PIVOT_LEFT): got {[t.fields['wheel'] for t in turns]}"
+    )
+    assert any(r.fields.get("reverse") is True for r in records), (
+        "reverse-pivot route drove no REAR leg (reverse=True absent) -- "
+        f"force-SAME should run both legs REAR; got kinds {kinds}"
+    )
+
+
 def test_no_stale_allowlist_entries(parity_run: _ParityRun) -> None:
     """An allowlist entry that matched zero mismatches is stale and fails (TC7)."""
     assert not parity_run.stale_entries, (

@@ -103,9 +103,6 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.02f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.04f;
-        static constexpr float    MOVEGYRO_KP = 6.01f;
-        static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 2.15f;
         static constexpr float    TURNGYRO_KP = 22.75f;
         static constexpr float    TURNGYRO_KI = 0.08f;
         static constexpr float    TURNGYRO_KD = 0.25f;
@@ -123,12 +120,6 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
-        /**
-         * Move GYRO PID is configured with Battery at ~11.5V
-         */
-        static constexpr float    MOVEGYRO_KP = 9.0f;
-        static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 1.0f;
         static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
         static constexpr float    TURNGYRO_KI = 0.02f;
         static constexpr float    TURNGYRO_KD = 1.54f;
@@ -153,9 +144,6 @@ namespace Config
     constexpr float    MOVESYNC_KP  = ActiveMotor::MOVESYNC_KP;
     constexpr float    MOVESYNC_KI  = ActiveMotor::MOVESYNC_KI;
     constexpr float    MOVESYNC_KD  = ActiveMotor::MOVESYNC_KD;
-    constexpr float    MOVEGYRO_KP  = ActiveMotor::MOVEGYRO_KP;
-    constexpr float    MOVEGYRO_KI  = ActiveMotor::MOVEGYRO_KI;
-    constexpr float    MOVEGYRO_KD  = ActiveMotor::MOVEGYRO_KD;
     constexpr float    TURNGYRO_KP  = ActiveMotor::TURNGYRO_KP;
     constexpr float    TURNGYRO_KI  = ActiveMotor::TURNGYRO_KI;
     constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;
@@ -183,7 +171,7 @@ namespace Config
      * @brief Coarse speed selector for chassis movement primitives.
      *
      * Used by every fluent verb that takes a power: Drive.driveDist / driveTime /
-     * forwardGyro / turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
+     * turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
      * `NORMAL`; pass `SLOW` for intersection approaches and tight corners, `FAST` for long
      * straights.
      */
@@ -244,6 +232,13 @@ namespace Config
      * re-arms LineFollower with the axle offset of the board that led the hop (front when
      * FRONT, `LINE_SENSOR_AXLE_OFFSET_REAR_CM` when REAR) to roll forward by exactly that
      * amount before stopping.
+     *
+     * Also doubles as the single-wheel PIVOT overshoot budget (ADR-036/044): the
+     * offline validator bounds a pivot's sensor-terminated approach `delta` against
+     * this same constant. Pre-#54 that budget was implicitly FRONT-only (pivots only
+     * ever ran FRONT); post-#54 (ADR-073) the budget is direction-resolved between
+     * this constant and `LINE_SENSOR_AXLE_OFFSET_REAR_CM`, mirroring the
+     * LINE_OVERSHOOT selection above -- see `ReversePivotPolicy::pivotOvershootBudgetCm`.
      *
      * @note TODO: measure on real chassis.
      */
@@ -779,6 +774,102 @@ namespace Config
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");
+
+    // ---------------------------------------------------------------------------------------
+    // GYRO straight heading-hold PD (ADR-075, issue #169) — per-tick PD over Move(L,R) driven
+    // by the external gyro (`YawSource.readYawDeg`), replacing the STM32 `MoveGyro*` write path.
+    //
+    // Ported from the mentor's proven `gyro_move` (`speed = Kp*err + Kd*delta`,
+    // `Move(base +- speed)`), mirroring the shipped turn PD (ADR-068): pure decision math lives
+    // in `GyroHoldPolicy.h`; these constants are the tunables `Drive::_emitGyroHold` feeds into
+    // it. Unlike the turn PD this is PD + a never-reverse clamp ONLY — no creep floor, no slew
+    // limiter, no integrator (a hold rides an already-moving base and drives corr -> 0; it does
+    // not start from rest). Gains ship UNVERIFIED pending hardware bench — see ADR-075.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Proportional gain for the R4-side GYRO straight heading-hold PD (ADR-075), in PWM
+     *        per degree of heading error.
+     *
+     * Ported from the mentor's proven `gyro_move` (`Kp = 1.5`), which maps a degree error
+     * straight to a PWM correction, so it ports DIRECTLY — no loop-rate conversion, unlike
+     * `GYRO_HOLD_KD` below. `GyroHoldPolicy.h::gyroHoldCorrection` computes `Kp * errNew` before
+     * the D term and the never-reverse clamp.
+     *
+     * @warning **UNVERIFIED — pending hardware bench (AC9).** Carried over as a starting
+     *          placeholder from the mentor's `gyro_move` reference — same UNVERIFIED status as
+     *          #172's `GYRO_SCALE` before its `gyro_calib` bench run. Bench-tune by editing this
+     *          constant and reflashing; no dedicated tuning sketch exists for the GYRO hold.
+     * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
+     */
+#ifndef GYRO_HOLD_KP_DEFAULT
+#define GYRO_HOLD_KP_DEFAULT 1.5f
+#endif
+    constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
+
+    /**
+     * @brief TIME-NORMALIZED derivative gain for the GYRO straight heading-hold PD (ADR-075), in
+     *        PWM per (deg/s) — NOT the mentor's raw per-iteration gain.
+     *
+     * The mentor's `gyro_move` computes a raw per-ITERATION difference (no division by loop
+     * period), so his continuous damping is `Kd_raw * loop_period` — correct only at his fixed
+     * ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters (see `TURN_KD` above and
+     * the ~8-11.5 ms vs ~22.66 ms timing-doc inconsistency noted on `TURN_MIN_RESOLVABLE_DEG`),
+     * so porting the raw gain verbatim would silently re-scale every time the tick jitters.
+     * `GyroHoldPolicy.h::gyroHoldCorrection` (via `TurnPDPolicy.h::turnPdStep`) instead divides by
+     * the MEASURED per-step `dtSec`, so this gain carries real units of PWM per (deg/s):
+     * `GYRO_HOLD_KD = Kd_raw * mentor_loop_period ~= 8 * 0.006 s ~= 0.048`.
+     *
+     * @warning **UNVERIFIED — pending hardware bench (AC9).** Same placeholder status as
+     *          `GYRO_HOLD_KP` above; bench-tune via Config edit + reflash.
+     * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
+     */
+#ifndef GYRO_HOLD_KD_DEFAULT
+#define GYRO_HOLD_KD_DEFAULT 0.048f
+#endif
+    constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
+
+    /**
+     * @brief Static ceiling (PWM magnitude) on the GYRO heading-hold's per-tick correction
+     *        (ADR-075).
+     *
+     * The correction actually applied is dynamically clamped to
+     * `min(GYRO_HOLD_MAX_CORR_PWM, |base|)` — this constant is only the STATIC half of that
+     * clamp. The dynamic `|base|` half matters because `base` shrinks through the profile's
+     * decel tail below any static knob; a static-only clamp would let the correction exceed the
+     * base and flip the inner wheel's direction exactly when the chassis is slowest to recover.
+     * See `GyroHoldPolicy.h::gyroHoldWheels` for the never-reverse wheel mix this feeds.
+     *
+     * Deviates from the mentor's `gyro_move`, which runs unclamped. Set generous (60) so the
+     * clamp rarely binds pending bench data on how large a correction the chassis actually needs.
+     *
+     * @note TODO: bench-tune (AC9) once hardware is in hand.
+     * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
+     */
+#ifndef GYRO_HOLD_MAX_CORR_PWM_DEFAULT
+#define GYRO_HOLD_MAX_CORR_PWM_DEFAULT 60
+#endif
+    constexpr int16_t GYRO_HOLD_MAX_CORR_PWM = GYRO_HOLD_MAX_CORR_PWM_DEFAULT;
+
+    /**
+     * @brief Staleness threshold (ms) for the GYRO heading-hold's previous-yaw sample (ADR-075).
+     *
+     * `Drive::_emitGyroHold` computes its fold-safe derivative-on-measurement term from the
+     * previously stored yaw (`_gyroHoldPrevYaw` / `_gyroHoldPrevMs`). If that sample is older
+     * than this threshold — the first tick of a hold (`_gyroHoldHasPrev == false`), or a gap left
+     * by one or more `readYawDeg` failures — the derivative term is forced to 0 for that tick
+     * (P-only command) instead of computing a rate over a stale, possibly multi-tick gap.
+     *
+     * Sized comfortably above the measured ~8-11.5 ms cooperative tick so a single ordinary tick
+     * never falsely trips staleness, while still catching a genuine multi-tick gyro dropout.
+     *
+     * @note TODO: bench-tune (AC9) once hardware is in hand.
+     * @note Consumer: `Drive::_emitGyroHold`.
+     */
+#ifndef GYRO_HOLD_STALE_MS_DEFAULT
+#define GYRO_HOLD_STALE_MS_DEFAULT 50
+#endif
+    constexpr uint16_t GYRO_HOLD_STALE_MS = GYRO_HOLD_STALE_MS_DEFAULT;
 
     // =========================================================================================
     // Motor-bias calibration (Strategy B from Phase 1.5 chassis-API research).

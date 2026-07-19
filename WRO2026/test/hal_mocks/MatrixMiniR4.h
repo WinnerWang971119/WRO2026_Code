@@ -1333,14 +1333,15 @@ private:
     // `GYRO_YAW_SIGN_DEFAULT=<IMU_YAW_SIGN value>` on the 32 YawSource targets, making the
     // round-trip exact there.
     //
-    // COUPLING: the fallback literals below are kept BYTE-IDENTICAL to `config/ConfigNav.h`'s own
-    // `#ifndef` fallbacks (IMU_YAW_SIGN -1.0f, GYRO_YAW_SIGN -1.0f, GYRO_SCALE 0.997f) so an
+    // kBridgeImuSign is a TEST-LOCAL constant, byte-identical to the RETIRED production
+    // Config::IMU_YAW_SIGN (-1.0f) but INDEPENDENT of it: issue #169 retires the app->STM32 write
+    // path (`toHwHeading`) and removes `IMU_YAW_SIGN` / `IMU_YAW_SIGN_DEFAULT` from Config, so the
+    // bridge no longer reads that hook. It fixes the whole-degree round-trip sign the legacy FSM
+    // suites (and test_yaw_source) rely on. GYRO_YAW_SIGN / GYRO_SCALE below STILL track their
+    // Config `#ifndef` hooks (they remain live production constants), kept BYTE-IDENTICAL to
+    // `config/ConfigNav.h`'s own `#ifndef` fallbacks (GYRO_YAW_SIGN -1.0f, GYRO_SCALE 0.997f) so an
     // UNpinned target still agrees with production. Change ConfigNav.h's defaults => change these.
-#if defined(IMU_YAW_SIGN_DEFAULT)
-    static constexpr float kBridgeImuSign  = IMU_YAW_SIGN_DEFAULT;
-#else
     static constexpr float kBridgeImuSign  = -1.0f;
-#endif
 #if defined(GYRO_YAW_SIGN_DEFAULT)
     static constexpr float kBridgeGyroSign = GYRO_YAW_SIGN_DEFAULT;
 #else
