@@ -1102,7 +1102,7 @@ def make_binding_contradiction_pivot_field() -> SimpleNamespace:
 #   REAR and contradict the FRONT approach. This is the builder-rung twin of the
 #   per-edge fixture: force-SAME's runtime backstop (`PIVOT_DIRECTION_MISMATCH`)
 #   is the ONLY guard, since the validator never sees the builder override
-#   (ADR-072 "Faults / rejects", canonizing builder route/arrival as binding).
+#   (ADR-073 "Faults / rejects", canonizing builder route/arrival as binding).
 
 _RC_U: Tuple[float, float] = (0.0, 0.0)
 _RC_V: Tuple[float, float] = (40.0, 0.0)

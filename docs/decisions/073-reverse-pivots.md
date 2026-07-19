@@ -1,4 +1,4 @@
-# ADR-072: Reverse (REAR-traversal) single-wheel pivots — force-SAME direction latch + runtime wheel-flip policy
+# ADR-073: Reverse (REAR-traversal) single-wheel pivots — force-SAME direction latch + runtime wheel-flip policy
 
 **Status:** Implemented
 **Date decided:** 2026-07 (issue #54, Phase 3)

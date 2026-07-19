@@ -205,7 +205,7 @@ def _direction_from_tag(tag) -> "Direction":
 #: approach trim SHORT of it when the destination is itself a chained pivot
 #: the route turns at. Any OTHER landing tag is distance-terminated and lands
 #: on-node natively via the sim's delta-trimmed leg, so it needs no
-#: correction. Since #54 / ADR-072 a REAR pivot can depart over a sensor-
+#: correction. Since #54 / ADR-073 a REAR pivot can depart over a sensor-
 #: terminated leg, so the REAR reverse tags (``ACT_STOP_AT_LINE_REVERSE`` and
 #: the following ``ACT_LINE_OVERSHOOT``) now genuinely fire on a pivot
 #: departure; the arming site flips the residual ray into the travel frame for
@@ -280,7 +280,7 @@ class Track:
         centre (rotation centre), the signed swing angle (CCW positive, the
         ``ACT_TURN_REL`` delta), the PLANTED (post-flip) pivot wheel side, and
         the sim-derived pivot direction. ``wheel`` and ``direction`` both come
-        from the sim's taken-pivot surface (#54 / ADR-072): on a REAR pivot the
+        from the sim's taken-pivot surface (#54 / ADR-073): on a REAR pivot the
         wheel is the L<->R flip of the stored forward wheel, and ``cx``/``cy``
         already sit on the flipped (correct world / travel) side, so the player
         needs no direction logic to pin the wheel. Empty (and omitted from
@@ -2303,7 +2303,7 @@ def build(trace: Trace, field_data) -> Track:
                                 track_cm = parse_track_cm_from_config()
                             theta_deg = float(primitive[1])
                             start_kf = keyframes[-1]
-                            # REAR pivots (#54 / ADR-072): consume the sim's
+                            # REAR pivots (#54 / ADR-073): consume the sim's
                             # DERIVED taken-pivot surface -- the direction
                             # force-SAME committed the pivot to and the PLANTED
                             # (post-flip) wheel. The direction is NOT recorded in
@@ -2331,7 +2331,7 @@ def build(trace: Trace, field_data) -> Track:
                             # records the reverse-facing body pose), so the L<->R
                             # flip + the +180 keep the wheel on the SAME world /
                             # travel side as the forward pivot (Data / geometry
-                            # model, ADR-072).
+                            # model, ADR-073).
                             wheel_sign = (
                                 1 if planted_wheel == TurnMode.PIVOT_LEFT else -1
                             )
@@ -2353,7 +2353,7 @@ def build(trace: Trace, field_data) -> Track:
                             # ``direction`` is the sim-derived pivot direction;
                             # both live INSIDE the non-empty-gated ``pivots`` list,
                             # so ``schema_version`` stays 1 and a pivot-free
-                            # trace's Track JSON is byte-identical (ADR-072 / AC9).
+                            # trace's Track JSON is byte-identical (ADR-073 / AC9).
                             pivots.append(
                                 {
                                     "t0": start_kf["t"],
@@ -2394,7 +2394,7 @@ def build(trace: Trace, field_data) -> Track:
                             # arc-end body heading points backward along the edge
                             # -- flip it 180 deg to recover the travel ray, or the
                             # correction would pull the landing the WRONG way
-                            # (ADR-072 / spec item 4).
+                            # (ADR-073 / spec item 4).
                             depart_rad = radians(
                                 arc[-1]["h"] + (180.0 if is_rear else 0.0)
                             )

@@ -317,7 +317,7 @@ endfunction()
 
 # -----------------------------------------------------------------------------------------
 # Force-include the reverse-pivot shadow routes table (`fixtures/routes_reverse_pivots.h`,
-# T9, issue #54 / ADR-072) BEFORE any source-file parsing — the same shadow trick as
+# T9, issue #54 / ADR-073) BEFORE any source-file parsing — the same shadow trick as
 # `add_speed_chain_routes_force_include`, pointed at the hand-authored 20-node table carrying
 # the seven reverse-pivot components (authored-REAR, AUTO-REAR coherent-run, binding-
 # contradiction, reset-node reject + FRONT-pinned accept, chained-reverse pair). NOT
@@ -2669,7 +2669,7 @@ add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
 
 # =========================================================================================
 # Test executables — reverse (REAR-traversal) single-wheel pivot host FSM tests
-# (issue #54, ADR-072, T10). Same real-link recipe as `test_path_tracker_lost_line` above —
+# (issue #54, ADR-073, T10). Same real-link recipe as `test_path_tracker_lost_line` above —
 # real `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` +
 # `path_mocks.cpp` globals — but shadow the T9 `fixtures/routes_reverse_pivots.cpp` (20-node,
 # 7-pivot toy table) instead of `routes_fixture.cpp`, via `add_reverse_pivot_routes_force_include`
@@ -2690,7 +2690,7 @@ add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
 #     or the Python pipeline, which hardcodes its OWN `LINE_BOARD_COUNT` in `sim/runtime.py`,
 #     untouched by this header). Covers the AC8/TC11 non-pivot forced-REAR STOP_AT_LINE ->
 #     dead-reckon-reverse degrade (unchanged) AND the pivot-scoped REAR-seek
-#     REVERSE_UNAVAILABLE fault. ADR-072's Fix 1 HOISTED that guard out of
+#     REVERSE_UNAVAILABLE fault. ADR-073's Fix 1 HOISTED that guard out of
 #     `case DispatchPrimitive::STOP_AT_LINE_SEEK` up into `_onPlanNextHop` (pre-turn, keyed off
 #     the RESOLVED direction and the "seek requested" rungs, asked of the resolver with the
 #     board gate forced open), so it now fires BEFORE `resolveStopAtLine`'s own board gate can

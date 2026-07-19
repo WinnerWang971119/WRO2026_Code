@@ -2,7 +2,7 @@
  * @file test_reverse_pivot_dispatch.cpp
  * @brief Host-link test for the reverse (REAR-traversal) single-wheel pivot dispatch,
  *        driving the REAL `PathTracker` + `Drive` + `Localization` FSMs through the shared
- *        cooperative-tick harness (issue #54, ADR-072, T10).
+ *        cooperative-tick harness (issue #54, ADR-073, T10).
  *
  * @details
  * Runs on the DEFAULT 2-board chassis (`Config::LINE_BOARD_COUNT == 2`, no override — see
@@ -427,7 +427,7 @@ static void test_TC12_seek_delta_over_rear_budget_faults_pivot_trim_underflow()
 }
 
 // ===========================================================================================
-// TC16 -- commanded-delta sign tripwire (PathTracker.cpp:2249-2274, ADR-072). A CCW body turn
+// TC16 -- commanded-delta sign tripwire (PathTracker.cpp:2249-2274, ADR-073). A CCW body turn
 // (delta > 0) plants PIVOT_LEFT forward; resolvePivotWheel keeps that for FRONT/AUTO and flips
 // it to PIVOT_RIGHT for REAR. Reproduces the EXACT comparison the tripwire performs against
 // the REAL resolvePivotWheel symbol -- a helper that calls the real resolver is not a mirror

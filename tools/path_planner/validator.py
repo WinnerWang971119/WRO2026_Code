@@ -214,7 +214,7 @@ def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> floa
     post-detect ``LINE_OVERSHOOT`` advance, so the over-travel ``delta`` it
     cancels must fit within that advance -- the line-sensor-to-axle offset.
 
-    Since #54 (ADR-072) a pivot's sensor-terminated approach budgets its
+    Since #54 (ADR-073) a pivot's sensor-terminated approach budgets its
     over-travel ``delta`` against the FRONT offset only when it is FRONT-pinned
     or reverse-impossible; a reverse-reachable approach budgets against the REAR
     offset (:func:`parse_line_sensor_rear_axle_offset_cm`). The per-pivot
@@ -235,7 +235,7 @@ def parse_line_sensor_rear_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) ->
     board. A pivot's sensor-terminated approach that is reverse-reachable
     (#54) budgets its over-travel ``delta`` against this offset instead of
     the FRONT one -- see ``ReversePivotPolicy::pivotOvershootBudgetCm``
-    (ADR-072).
+    (ADR-073).
 
     The value is an UNMEASURED placeholder pending a bench measurement of the
     wired rear board (`ConfigDrive.h` TODO); single-sourced from Config.h so a
@@ -425,7 +425,7 @@ def _resolve_authored_direction(field_data, a: str, b: str):
     direction on each pivot-adjacent directed edge to resolve its static
     direction pin (``_static_direction_pin``): a ``"rear"`` / ``"front"``
     authored on the exact ``u -> v`` or ``v -> w`` leg pins that leg REAR / FRONT
-    for the reverse-pivot budget and direction rejects (#54, ADR-072). A
+    for the reverse-pivot budget and direction rejects (#54, ADR-073). A
     ``"rear"`` authored only on some other leg (e.g. the reverse ``b -> a``) does
     not constrain ``a -> b``.
 
@@ -497,7 +497,7 @@ def _validate_pivot_turns(field_data) -> None:
       BOTH a true ``"line"`` edge AND a ``"sensor"`` (STOP_AT_LINE seek)
       incoming side: each reduces the post-detect overshoot by ``delta``,
       bounded by the sensor-to-axle offset (ADR-044). The offset is
-      DIRECTION-resolved (#54, ADR-072): a reverse-reachable approach (2-board
+      DIRECTION-resolved (#54, ADR-073): a reverse-reachable approach (2-board
       chassis, not FRONT-pinned) budgets against the smaller REAR offset, a
       FRONT-pinned / reverse-impossible one against the FRONT offset -- both via
       the shared :func:`tools.path_planner.sim.runtime.pivot_overshoot_budget_cm`
@@ -505,16 +505,16 @@ def _validate_pivot_turns(field_data) -> None:
     * **Chained pivots over-trim a shared edge.** Two triples sharing the same
       directed edge ``(v, w)`` (one departing it, one approaching it) must
       satisfy ``delta_uv + delta_vw < length(v -> w)``.
-    * **Binding direction contradiction (#54, ADR-072).** The two legs are
+    * **Binding direction contradiction (#54, ADR-073).** The two legs are
       statically pinned (per-edge ``direction`` override or the pipeline default)
       to OPPOSITE directions (one ``"front"``, one ``"rear"``). Force-SAME forces
       the departure to the approach direction, so a binding contradiction would
       hard-fault ``PIVOT_DIRECTION_MISMATCH`` at runtime -- rejected here.
-    * **REAR-pinned sensor approach on a 1-board chassis (#54, ADR-072).** A
+    * **REAR-pinned sensor approach on a 1-board chassis (#54, ADR-073).** A
       sensor-terminated incoming leg pinned ``direction: "rear"`` when
       ``LINE_BOARD_COUNT < 2`` faults ``REVERSE_UNAVAILABLE`` at runtime (no rear
       board to seek in reverse); it does NOT degrade to FRONT, so it is rejected.
-    * **Reverse-reachable reset-node pivot not FRONT-pinned (#54, ADR-072).** A
+    * **Reverse-reachable reset-node pivot not FRONT-pinned (#54, ADR-073).** A
       pivot AT a ``"reset"`` (wall-zero) node whose approach is reverse-reachable
       is rejected unless FRONT-pinned: the wall interlude clearance is sized for
       the FRONT sweep radius, so a REAR sweep near the wall is untested.
@@ -592,7 +592,7 @@ def _validate_pivot_turns(field_data) -> None:
     # a reverse-reachable sensor-terminated approach budgets against the REAR
     # offset, a FRONT-pinned / reverse-impossible one against the FRONT offset --
     # both selected per-pivot below via the shared T1 twin
-    # ``sim.runtime.pivot_overshoot_budget_cm`` (ADR-072), never a hardcoded
+    # ``sim.runtime.pivot_overshoot_budget_cm`` (ADR-073), never a hardcoded
     # literal. The min-angle floor is the tunable Config::PIVOT_MIN_TURN_DEG knob
     # -- an authored pivot below it would slip under the firmware's turn-dispatch
     # gate and silently no-op.
@@ -668,7 +668,7 @@ def _validate_pivot_turns(field_data) -> None:
         faces travel, so this answers "is this a seek edge at all?" independent of
         traversal direction (the seek triggers are direction-invariant). Whether a
         REAR traversal can physically realise the seek is a separate, board-count
-        concern handled by the caller's reverse-reachability test (#54, ADR-072):
+        concern handled by the caller's reverse-reachability test (#54, ADR-073):
         a seek edge on ``LINE_BOARD_COUNT < 2`` is reverse-impossible.
         """
         if edge_type == EDGE_LINE:
@@ -815,7 +815,7 @@ def _validate_pivot_turns(field_data) -> None:
         out_dest_type = node_types.get(w)
 
         # Authored ``direction:'rear'`` on a pivot-adjacent leg is ACCEPTED now
-        # (#54 / ADR-072): a pivot may run in reverse. The direction pins are
+        # (#54 / ADR-073): a pivot may run in reverse. The direction pins are
         # analysed below (after the regime is known) for the binding-contradiction,
         # REAR-on-1-board, reset-node, and direction-resolved-budget rejects.
 
@@ -863,7 +863,7 @@ def _validate_pivot_turns(field_data) -> None:
                 f"reclassify the offending edge or remove the pivot turn."
             )
 
-        # -- Reverse-pivot direction analysis (#54, ADR-072) ----------------
+        # -- Reverse-pivot direction analysis (#54, ADR-073) ----------------
         # A pivot commits to the direction it APPROACHES in (force-SAME); its
         # departure is forced to that same direction. Resolve each leg's static
         # direction pin (per-edge override folded over the pipeline default), then
@@ -926,7 +926,7 @@ def _validate_pivot_turns(field_data) -> None:
         # A reverse-reachable reset-node (wall-zero) pivot must be FRONT-pinned:
         # the wall interlude drives FORWARD off the wall to WALL_PIVOT_CLEARANCE_CM
         # (sized for the FRONT sweep radius), so a REAR departure would sweep the
-        # untested tail arc near the wall (ADR-072). ``v`` is the pivot node.
+        # untested tail arc near the wall (ADR-073). ``v`` is the pivot node.
         if node_types.get(v) == _RESET_NODE_TYPE and in_reverse_reachable:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') pivots at the reset "
@@ -977,7 +977,7 @@ def _validate_pivot_turns(field_data) -> None:
         # -- it is 'distance', so its trim draws from the follow distance in check
         # 3, not this overshoot budget (issue #64).
         #
-        # The budget offset is DIRECTION-resolved (#54, ADR-072): a
+        # The budget offset is DIRECTION-resolved (#54, ADR-073): a
         # reverse-reachable approach (2-board chassis, not FRONT-pinned) budgets
         # against the smaller REAR offset -- the conservative worst case, since the
         # runtime may resolve the approach REAR -- while a FRONT-pinned or

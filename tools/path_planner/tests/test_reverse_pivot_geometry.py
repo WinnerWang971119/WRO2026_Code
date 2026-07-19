@@ -18,7 +18,7 @@ PRINCIPLES, independent of any single surface's implementation:
   inbound TRAVEL heading. This is direction-INVARIANT: a forward pivot and its
   reverse counterpart plant the wheel at the SAME world point (the L<->R wheel
   flip and the ``+180`` body-heading offset cancel -- the Data / geometry model
-  in ADR-072), so the two coincide in the world frame.
+  in ADR-073), so the two coincide in the world frame.
 
 Everything is derived from the fixture's node coordinates + the parsed chassis
 track (``compute_pivot_compensation`` with ``parse_track_cm_from_config``) and

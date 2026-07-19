@@ -2,7 +2,7 @@
  * @file test_reverse_pivot_seek_1board.cpp
  * @brief Host-link test for the reverse-pivot REAR-seek serviceability guard on a 1-board
  *        chassis, driving the REAL `PathTracker` + `Drive` + `Localization` FSMs through the
- *        shared cooperative-tick harness (issue #54, ADR-072, T10).
+ *        shared cooperative-tick harness (issue #54, ADR-073, T10).
  *
  * @details
  * Built with `-DLINE_BOARD_COUNT_DEFAULT=1` (a compile-time override hook in `ConfigLine.h`,
@@ -32,7 +32,7 @@
  *    (`StopAtLinePolicy.h`: `boardOK = (direction == FRONT) || (lineBoardCount >= 2)`) forces
  *    `seek = false` for EVERY REAR request on a `<2`-board chassis — REGARDLESS of the call-site
  *    `StopAtLine::ON` override — so `resolveEdgeDispatch` classified the hop `BLIND_DEAD_RECKON`,
- *    NEVER `STOP_AT_LINE_SEEK`, and the nested guard could never run. ADR-072's Fix 1 HOISTS the
+ *    NEVER `STOP_AT_LINE_SEEK`, and the nested guard could never run. ADR-073's Fix 1 HOISTS the
  *    check into `_onPlanNextHop` (pre-turn, keyed off the RESOLVED direction and the "seek
  *    requested" rungs, asked of the SAME resolver with the board gate forced open), so it fires
  *    BEFORE `resolveStopAtLine`'s silent degrade. These tests now drive the REAL FSM over the
@@ -156,7 +156,7 @@ static void test_AC8_TC11_non_pivot_forced_rear_degrades_to_dead_reckon_reverse(
 
 // ===========================================================================================
 // AC8/TC11 (pivot half) — a REAR stop-at-line seek INTO the first chained pivot (CrU, CrV, CrW)
-// on a 1-board chassis hard-faults REVERSE_UNAVAILABLE (pivot-scoped, ADR-072 Fix 1).
+// on a 1-board chassis hard-faults REVERSE_UNAVAILABLE (pivot-scoped, ADR-073 Fix 1).
 //
 // Also proves — at the resolver level — WHY the guard had to be HOISTED out of the
 // STOP_AT_LINE_SEEK dispatch case: `resolveStopAtLine` STILL degrades a 1-board REAR seek to
@@ -167,7 +167,7 @@ static void test_AC8_TC11_non_pivot_forced_rear_degrades_to_dead_reckon_reverse(
 
 static void test_AC8_TC11_pivot_rear_seek_1board_faults_reverse_unavailable()
 {
-    TEST_SCOPE("AC8/TC11: REAR seek into approaching pivot (CrU,CrV,CrW) on 1 board faults REVERSE_UNAVAILABLE (ADR-072)");
+    TEST_SCOPE("AC8/TC11: REAR seek into approaching pivot (CrU,CrV,CrW) on 1 board faults REVERSE_UNAVAILABLE (ADR-073)");
 
     ASSERT_EQ(Config::LINE_BOARD_COUNT, (uint8_t) 1);
 
@@ -229,7 +229,7 @@ static void test_AC8_TC11_pivot_rear_seek_1board_faults_reverse_unavailable()
 
     // goTo(CrW) makes the (CrU, CrV, CrW) pivot's approach ACTIVE on the CrU -> CrV hop, and
     // .setStopAtLine(ON) requests a stop-at-line seek on that BLIND approach leg. On a 1-board
-    // chassis the pivot-scoped serviceability guard (ADR-072) hard-faults REVERSE_UNAVAILABLE
+    // chassis the pivot-scoped serviceability guard (ADR-073) hard-faults REVERSE_UNAVAILABLE
     // BEFORE the pre-edge turn is even dispatched -- rather than letting resolveStopAtLine
     // silently degrade the seek to a dead-reckon reverse and fire the pivot off-target.
     PathTracker.goTo(crW).setStopAtLine(StopAtLine::ON).async();
@@ -255,7 +255,7 @@ static void test_AC8_TC11_pivot_rear_seek_1board_faults_reverse_unavailable()
 
 static void test_AC8_TC11_pivot2_rear_seek_1board_faults_reverse_unavailable()
 {
-    TEST_SCOPE("AC8/TC11: REAR seek into approaching pivot (CrV,CrW,CrX) on 1 board faults REVERSE_UNAVAILABLE (ADR-072)");
+    TEST_SCOPE("AC8/TC11: REAR seek into approaching pivot (CrV,CrW,CrX) on 1 board faults REVERSE_UNAVAILABLE (ADR-073)");
 
     ASSERT_EQ(Config::LINE_BOARD_COUNT, (uint8_t) 1);
 

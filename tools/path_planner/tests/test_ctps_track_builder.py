@@ -1760,7 +1760,7 @@ def test_tc13_chained_sensor_departure_pivots_land_on_final_node():
 
 # ===========================================================================
 # RP1-RP4 — REVERSE (REAR-traversal) single-wheel pivot arc render (#54 /
-# ADR-072, T6). The sim exposes each taken pivot's DERIVED direction + PLANTED
+# ADR-073, T6). The sim exposes each taken pivot's DERIVED direction + PLANTED
 # (post-flip) wheel via ``taken_pivot`` (T4); ``track_builder`` consumes that
 # instead of re-deriving, so the arc plants on the flipped (correct world /
 # travel) side, ``pivots[]`` carries ``direction`` + the planted wheel, and a

@@ -2715,7 +2715,7 @@ def test_pivot_tc20_front_approach_pivot_holds_departure_front_under_force_same(
     turn. After the FRONT approach ``P -> Q`` the chassis heading is 0 deg and the
     departure edge ``Q -> R`` heads 120 deg, so the departure's OWN
     ``BIDIRECTIONAL_AUTO`` resolution (|delta| = 120 deg > the 90 deg threshold,
-    2-board chassis) would independently pick REAR. Force-SAME (#54 / ADR-072)
+    2-board chassis) would independently pick REAR. Force-SAME (#54 / ADR-073)
     commits the pivot to the direction it APPROACHED in and forces the departure
     to that same direction: the FRONT approach holds the departure FRONT, so the
     geometry-derived wheel + over-travel ``delta`` stay valid.
@@ -2852,7 +2852,7 @@ def test_tc21_goto_step_through_identical_on_pivot_chain():
 
 
 # ===========================================================================
-# Reverse (REAR-traversal) single-wheel pivot behavior (#54 / ADR-072, T8)
+# Reverse (REAR-traversal) single-wheel pivot behavior (#54 / ADR-073, T8)
 #
 # TC2 / TC3 / TC5 of the reverse-pivots plan. These exercise the sim FSM side of
 # force-SAME + the wheel-flip + the direction-resolved overshoot budget on the T9
@@ -3107,7 +3107,7 @@ def test_pivot_w1_binding_builder_arrival_contradiction_raises():
     (goal ``W``), so ``go_to("W", arrival_direction=Direction.FRONT)`` binds the
     departure FRONT via ``resolve_direction`` step 3 -- directly contradicting the
     REAR approach. This is the RUNTIME-only builder rung the firmware
-    ``PathTracker._onPlanNextHop`` cascade guards (ADR-072) and the offline
+    ``PathTracker._onPlanNextHop`` cascade guards (ADR-073) and the offline
     validator cannot see; before C1 the sim silently overwrote the pin and ran the
     pivot mis-trimmed. Force-SAME must now refuse it, exactly as the firmware
     hard-faults ``PIVOT_DIRECTION_MISMATCH`` (host test TC4's intent, builder rung).

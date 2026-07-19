@@ -248,7 +248,7 @@ namespace Config
      * Also doubles as the single-wheel PIVOT overshoot budget (ADR-036/044): the
      * offline validator bounds a pivot's sensor-terminated approach `delta` against
      * this same constant. Pre-#54 that budget was implicitly FRONT-only (pivots only
-     * ever ran FRONT); post-#54 (ADR-072) the budget is direction-resolved between
+     * ever ran FRONT); post-#54 (ADR-073) the budget is direction-resolved between
      * this constant and `LINE_SENSOR_AXLE_OFFSET_REAR_CM`, mirroring the
      * LINE_OVERSHOOT selection above -- see `ReversePivotPolicy::pivotOvershootBudgetCm`.
      *

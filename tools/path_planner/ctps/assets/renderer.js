@@ -933,7 +933,7 @@
      * on the planted wheel, at the marker's own live turning radius. The pin
      * centre is `seg.cx`/`seg.cy` (the pre-computed planted-wheel world centre)
      * — read verbatim, never re-derived from `seg.wheel`/heading here — so a
-     * REAR pivot (#54 / ADR-072) needs NO player-side direction logic: the
+     * REAR pivot (#54 / ADR-073) needs NO player-side direction logic: the
      * Python builder already flips `cx`/`cy` onto the post-flip (correct world /
      * travel) side, and `seg.direction` / `seg.wheel` ride along as informational
      * overlay metadata. That radius needs no extra schema field — the dense arc

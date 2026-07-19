@@ -630,7 +630,7 @@ class _HopResolution:
 
         Mirror of the C++ ``resolvedTurnMode = _departingPivot.active ?
         resolvePivotWheel(_departingPivot.wheel, _departingPivot.dir) :
-        PIPELINE_CONFIG.turn`` (#54, ADR-072). For a REAR departure the stored
+        PIPELINE_CONFIG.turn`` (#54, ADR-073). For a REAR departure the stored
         FORWARD-sense wheel is L<->R flipped via the shared
         :func:`~tools.path_planner.sim.runtime.resolve_pivot_wheel` twin -- the
         same single-source flip firmware/sim/CTPS consume -- so the departing
@@ -736,7 +736,7 @@ def _resolve_hops(
 # Drive-primitive tags carrying a FRONT/REAR sense (turns, wall ops, and return
 # moves have none). A pre-edge PIVOT turn's stored wheel is reverse-corrected for
 # a REAR departure (force-SAME runs the departure in the pivot's approach
-# direction, #54/ADR-072), so the turn label must key off the SAME direction the
+# direction, #54/ADR-073), so the turn label must key off the SAME direction the
 # hop's drive primitive dispatches -- read straight off that primitive's tag.
 _REVERSE_DRIVE_TAGS: frozenset = frozenset(
     {

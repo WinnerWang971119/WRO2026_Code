@@ -708,7 +708,7 @@ def test_t14_player_and_renderer_js_byte_unchanged() -> None:
     since the issue-#130 motion-profile feature — dense keyframes need zero
     player changes. ``renderer.js`` was frozen the same way, then issue #156
     deliberately extended it with the parity-safe lateral hug-side render and
-    the pin was re-frozen against that #156 content; issue #54 (ADR-072) then
+    the pin was re-frozen against that #156 content; issue #54 (ADR-073) then
     updated the ``wheel-arc`` mode docstring to record that ``seg.cx``/``seg.cy``
     already carries the REAR-flipped planted-wheel side (the pin needs no
     player-side direction logic — the render engine itself is unchanged) and the
