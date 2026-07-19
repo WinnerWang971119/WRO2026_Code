@@ -2651,6 +2651,36 @@ add_executable(test_encoder_source
 target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
 
+# =========================================================================================
+# Test executable — Drive.isSeekingLine() + dispatch-tick order (2026-07-18
+# gate-line-array-tick plan, T5; TC1-TC6; AC7).
+#
+# Host-drives the REAL Drive.cpp stopAtLine() seek DIRECTLY (no PathTracker / Localization /
+# routes — this predicate and the dispatch-tick ordering it depends on live entirely inside
+# Drive's own FSM), asserting Drive.isSeekingLine() before/during/after a forward and a reverse
+# seek, plus the load-bearing _updateStopAtLine()-before-_dispatchNext() ordering inside
+# Drive::update() that the T3 perception-tick gate depends on.
+#
+# REGIME: mirrors test_drive_decel_floor — the Drive-only real-link recipe (issue-#106 recipe
+# MINUS PathTracker.cpp/Localization.cpp/fixture routes). SKETCH_DIR FIRST (the inversion) so the
+# real Drive.h/YawSource.h win; hal_mocks supplies <MatrixMiniR4.h>/<Arduino.h>; path_mocks
+# supplies the force-included WROLineArray/Intersection/LineFollower peripherals; path_mocks.cpp
+# provides the facade globals (NOT Drive, so no collision with the real Drive.cpp). MOCKS_DIR and
+# FIXTURE_ROUTES_DIR are deliberately omitted.
+# =========================================================================================
+add_executable(test_drive_seek_predicate
+    ${TEST_DIR}/test_drive_seek_predicate.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_seek_predicate PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_seek_predicate)    # EventTrace + path_mocks peripherals
+add_test(NAME drive_seek_predicate COMMAND test_drive_seek_predicate)
+
+# =========================================================================================
 # Test executable #32 — `approach_ramp_dump` + freshness gate (2026-07-17
 # anticipatory-line-approach-ramp plan, T3).
 #

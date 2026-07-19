@@ -506,6 +506,11 @@ bool DriveClass::isLineFound() const
     return _isLineFound;
 }
 
+bool DriveClass::isSeekingLine() const
+{
+    return _stopState != StopAtLineState::IDLE;
+}
+
 float DriveClass::getStopOvershoot() const
 {
     return _stopOvershoot;
