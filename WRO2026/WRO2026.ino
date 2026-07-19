@@ -216,16 +216,10 @@ void cooperativeTick()
     // itself now runs inside the `if (lineNeeded)` block below.
     const bool lineNeeded = lineArrayNeededThisTick();
 
-    // Reopen-drain + gate observable state (see the doxygen block above).
+    // Reopen-drain state (see the doxygen block above).
     static bool     s_prevLineNeeded   = true;   // prev-tick gate state; init true so a disabled gate never drains
     static bool     s_reopenDraining   = false;  // reopen-drain state machine active (drains until marker releases)
     static uint8_t  s_reopenSettle     = 0;      // settle-floor ticks left before a released drain may end
-    static uint32_t s_tickCount        = 0;      // total cooperativeTick() calls
-    static uint32_t s_lineUpdateCount  = 0;      // ticks LineArray.update() ran
-    static uint32_t s_lastGateHbMs     = 0;      // last gate-heartbeat timestamp
-    constexpr uint32_t GATE_HEARTBEAT_INTERVAL_MS = 1000;
-
-    ++s_tickCount;
 
     if (lineNeeded)
     {
@@ -235,7 +229,6 @@ void cooperativeTick()
         // See WROLineArray.h::update(). Runs FIRST among the gated three so the
         // cache is fresh before any consumer reads it this tick.
         LineArray.update();
-        ++s_lineUpdateCount;
     }
 
     // Unconditional: Drive drives the profile/seek/wallStop FSMs and the queue.
@@ -304,20 +297,6 @@ void cooperativeTick()
     Localization.update();
 
     Mission.update();
-
-    // Gate observable (issue #164, AC1): cumulative LineArray.update() runs vs
-    // total ticks, printed on a millis-gated cadence (no delay()). During a pure
-    // GYRO/RAW/SYNC move the numerator holds while the denominator climbs — the
-    // evidence the gate actually closes.
-    const uint32_t nowMs = millis();
-    if ((nowMs - s_lastGateHbMs) >= GATE_HEARTBEAT_INTERVAL_MS)
-    {
-        s_lastGateHbMs = nowMs;
-        Serial.print(F("[gate] la="));
-        Serial.print(s_lineUpdateCount);
-        Serial.print('/');
-        Serial.println(s_tickCount);
-    }
 
     // The calibration menu owns the OLED while open (FINDING #4): EventTrace's
     // dirty-flag repaint would clearDisplay() and paint the event ring over the

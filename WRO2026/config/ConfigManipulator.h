@@ -181,9 +181,9 @@ namespace Config
      */
     constexpr uint32_t BELT_POS_STALL_MS = 700;
     /** @brief Magnitude of the stall-home drive toward HOME (PWM). TODO. */
-    constexpr int16_t  BELT_STALL_SPEED      = 18;     // stall-home magnitude (toward HOME); TODO
+    constexpr int16_t  BELT_STALL_SPEED      = 16;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
-    constexpr uint32_t BELT_RESET_MS         = 2500;   // stall-home timed run; TODO
+    constexpr uint32_t BELT_RESET_MS         = 5000;   // stall-home timed run; TODO
     /**
      * @brief Wall-clock ceiling for the servo settle-home poll in `ManipulatorClass::begin()`
      *        (grabber/sorter/dumper). NOT the belt home ceiling: `ManipBelt::begin()` bounds its
