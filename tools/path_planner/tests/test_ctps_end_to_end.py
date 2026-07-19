@@ -552,7 +552,7 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 #: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
 #: content must fail this test loudly rather than silently pass.
 _PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
-_RENDERER_JS_SHA256: str = "e6106aa37bc5568981a840a50e634308d1f67d94570fe80ee821fafbfb6f2dde"
+_RENDERER_JS_SHA256: str = "f41c95fd97bfe4104166323eedd0c00dfe6748e7a659f40a1ccd76949e2044e4"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:
