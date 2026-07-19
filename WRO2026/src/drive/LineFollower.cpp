@@ -58,7 +58,9 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _hasBrakeOnGateOverride,
                                _brakeOnGateOverride,
                                _hasLineFollowOffsetOverride,
-                               _lineFollowOffsetOverride);
+                               _lineFollowOffsetOverride,
+                               _hasApproachTarget,
+                               _approachPredictedCm);
     _executed = true;
 }
 
@@ -179,6 +181,22 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowMode(Routes::
     return setLineFollowOffset(lineFollowModeToSetpoint(mode));
 }
 
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setApproachTarget(float predictedCm)
+{
+    // Stage the predicted sensor-crossing distance plus a "has-target" marker. The owner
+    // resolves and arms the ApproachSchedule in _applyEnableBuilder (only on an enable
+    // transition, feature-gated). Unlike the override-pair setters, ABSENCE of this setter on
+    // an enable apply DISARMS any prior schedule — that disarm-on-omission is the LINE_OVERSHOOT
+    // re-arm contract, handled in _applyEnableBuilder, not here.
+    //
+    // Clamp negatives to 0 for symmetry with setDistanceTarget: a negative prediction is almost
+    // certainly a caller bug, and 0 degrades the schedule to inactive (flat path, AC7) instead
+    // of propagating garbage into the resolver.
+    _approachPredictedCm = (predictedCm > 0.0f) ? predictedCm : 0.0f;
+    _hasApproachTarget   = true;
+    return *this;
+}
+
 // =========================================================================================
 // LineFollowerClass — lifecycle.
 // =========================================================================================
@@ -200,6 +218,9 @@ bool LineFollowerClass::begin()
     _reverse           = false;
     _useTShape         = false;
     _useTShapeRampDown = false;
+    _approachActive    = false;
+    _approachPhase     = ApproachPhase::CRUISE;
+    _approachLastMag   = 0;
 
     return true;
 }
@@ -281,11 +302,14 @@ void LineFollowerClass::update()
     }
 
     // Emit floor for this tick's Drive.setSpeed calls. Defaults to the static deadband
-    // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone below
-    // — mid-follow PID and lost-line CRAWL must keep the static floor (a stationary chassis
-    // needs the higher static-friction breakaway PWM), while the ramp-down tail is already
-    // moving and can crawl at the lower kinetic floor without stalling. See the
-    // PWM_MOVING_MIN @warning in ConfigGlobal.h for the rationale.
+    // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone, or in
+    // the ramp-down plateau below when the seeded `_tShapeRampDownStart` is itself already
+    // sub-static (the approach-ramp case) — mid-follow PID, lost-line CRAWL, and a legacy
+    // (PROJECTION_FOLLOW) plateau seeded at full preset cruise must all keep the static
+    // floor (a stationary chassis, or one whose inside wheel is near-stalled through a turn,
+    // needs the higher static-friction breakaway PWM), while a chassis already crawling at
+    // or below the kinetic floor can stay there without stalling. See the PWM_MOVING_MIN
+    // @warning in ConfigGlobal.h for the rationale.
     int16_t stopFloorMag = Config::PWM_MIN_MAGNITUDE;
 
     // -------------------------------------------------------------------------------------
@@ -353,7 +377,113 @@ void LineFollowerClass::update()
             // static floor. See the PWM_MOVING_MIN @warning in ConfigGlobal.h.
             stopFloorMag = Config::PWM_MOVING_MIN;
         }
-        // else: still in the cruise plateau zone — leave `cruise` unchanged.
+        else if (!_useTShape)
+        {
+            // Still in the cruise plateau zone (far from the gate) AND the ramp-UP branch is
+            // not concurrently owning `cruise` this tick: HOLD `cruise` at the captured
+            // ramp-down start rather than leaving it at the top-of-tick preset default. Gated
+            // on `!_useTShape` so a session that also has ramp-up in flight (e.g.
+            // `setDistanceTarget(...)` with both ramps on, the historical
+            // ramp-up-then-ramp-down combo) is untouched — the ramp-up branch above already
+            // owns `cruise` for that portion, exactly as before this fix.
+            //
+            // For a LEGACY ramp-down (no approach ramp armed this session)
+            // `_tShapeRampDownStart == presetToPwm(_preset)` (sign-corrected) already — the T6
+            // AC3 seed contract — so holding it here is numerically byte-identical to "leave
+            // cruise unchanged" and changes nothing observable pre-feature / with the feature
+            // disabled (AC8/AC13). It is ALSO byte-identical immediately after ramp-up
+            // completes (`_useTShape` flips false): the ramp-up's own target
+            // (`_tShapeTargetPwm == presetToPwm(_preset)`, sign-corrected) already equals
+            // `_tShapeRampDownStart` in that no-approach-ramp case.
+            //
+            // When an approach ramp DID seed a lower magnitude (T11 TC3 finding), the prior
+            // "leave unchanged" fell through to `cruise = presetToPwm(_preset)` computed at
+            // the top of this tick — full preset cruise — jolting the chassis from the
+            // approach floor back UP to cruise for the plateau portion of the overshoot
+            // window before ramping back down over the last `rampDownCm`. That violated the
+            // AC3 / F2 monotonic detect-handoff guarantee this seed exists to provide.
+            // Holding `_tShapeRampDownStart` here keeps the commanded magnitude flat at the
+            // seeded (already-reduced) value through the plateau, so the detect→overshoot
+            // handoff is genuinely non-increasing.
+            //
+            // `stopFloorMag` is lowered to the kinetic floor here ONLY when the seed itself
+            // is already sub-static (`abs(_tShapeRampDownStart) < PWM_MIN_MAGNITUDE` — the
+            // approach-ramp case, where the seed is `PWM_MOVING_MIN`), so `deadbandSnap`
+            // cannot re-snap that sub-static-floor seed back up to the static floor
+            // mid-plateau. A legacy/PROJECTION_FOLLOW plateau seeds `_tShapeRampDownStart`
+            // at full preset cruise (>= SPEED_SLOW, well above the static floor) and must
+            // keep `stopFloorMag` at the static floor — lowering it there would let the
+            // inside wheel of a turn crawl at the kinetic floor instead of the static
+            // breakaway floor, reintroducing the inside-wheel stall the static floor exists
+            // to prevent (F4/AC13 PROJECTION_FOLLOW byte-identical guarantee).
+            cruise = _tShapeRampDownStart;
+            if (abs(_tShapeRampDownStart) < Config::PWM_MIN_MAGNITUDE)
+            {
+                stopFloorMag = Config::PWM_MOVING_MIN;
+            }
+        }
+        // else (`_useTShape` still true): the ramp-up branch above owns `cruise` this tick —
+        // leave it untouched (matches the pre-fix behavior for this combo).
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Anticipatory approach ramp (2026-07-17 line-approach-ramp plan, T6). Runs ALONGSIDE the
+    // `_useTShapeRampDown` branch above but takes PRECEDENCE once past its CRUISE phase: it then
+    // OVERWRITES `cruise` and lowers `stopFloorMag` to the kinetic floor, so a freeze or P+D mix
+    // later in this tick sees the ramped-DOWN cruise, not full preset cruise (ADR-020 ordering).
+    // During the CRUISE phase it only RECORDS phase/magnitude and leaves `cruise` untouched, so
+    // the `_useTShape` soft-start ramp-up above survives an off→on entry from rest. Armed by
+    // PathTracker via `setApproachTarget(predictedCm)` on a terminating
+    // LINE_FOLLOW_INTERSECTION hop; the two ramps are never both meaningfully active on one hop
+    // (the LINE hop carries no distance gate, and the distance-gated LINE_OVERSHOOT re-arm
+    // disarms this schedule in `_applyEnableBuilder`).
+    //
+    // The policy ramps cruise from full preset down to `Config::PWM_MOVING_MIN` over the
+    // predicted sensor-crossing distance so the leading board is already slow when it physically
+    // detects the marker. Detection stays the authoritative stop (PathTracker terminates the hop
+    // on `Intersection.isAtIntersection()` and re-anchors `Localization`); this only shapes the
+    // commanded magnitude and records the phase for `approachPhase()` so PathTracker can raise a
+    // bounded-overrun fault if the line is never seen.
+    // -------------------------------------------------------------------------------------
+    if (_approachActive)
+    {
+        // Same both-wheel absolute-average baseline the ramp-down branch and distance gate use,
+        // so the approach measure never diverges from them on a curvy follow. See finding #20.
+        const int32_t dL         = Drive.getEncL() - _approachStartEncL;
+        const int32_t dR         = Drive.getEncR() - _approachStartEncR;
+        const float   traveledCm = encDegToCm((abs(dL) + abs(dR)) / 2);
+
+        const ApproachSpeed step = approachSpeedAt(_approachSchedule, traveledCm);
+        // Record phase + (unsigned) commanded magnitude UNCONDITIONALLY — every phase, every
+        // tick. The phase feeds PathTracker's bounded-overrun fault poll (`approachPhase()`);
+        // the magnitude lets the LINE_OVERSHOOT re-arm seed its ramp-down from the floor the
+        // chassis actually arrived at, not full preset (AC3).
+        _approachPhase   = step.phase;
+        _approachLastMag = step.pwmMag;
+
+        // Shape `cruise` ONLY once the schedule is past its CRUISE phase (RAMP / FLOOR_HOLD /
+        // OVERRUN). During CRUISE, `step.pwmMag == cruiseMag` (full preset), and overwriting
+        // `cruise` here would CLOBBER the `_useTShape` soft-start ramp-up above — commanding
+        // full preset from a dead stop on an off→on entry (the launch lurch/slip that
+        // TSHAPE_START_SPEED exists to prevent; launch wheel-slip would also corrupt the
+        // encoder-derived `traveledCm` this very schedule keys on). On a normal terminating hop
+        // `rampStartCm` sits well past the ~11 cm ramp-up, so the two branches never fight —
+        // the approach takes over in RAMP.
+        if (step.phase != ApproachPhase::CRUISE)
+        {
+            // Replace the preset cruise with the ramped magnitude, sign-corrected for reverse
+            // (mirrors the top-of-tick `cruise = -cruise` reverse handling).
+            cruise = _reverse ? (int16_t) -step.pwmMag : step.pwmMag;
+
+            // Past CRUISE the chassis is already moving and can crawl at the kinetic floor,
+            // which is BELOW the static deadband floor. Lower `stopFloorMag` so the downstream
+            // `deadbandSnap` in the freeze / P+D blocks does not re-snap the ramped-down
+            // magnitude back up to `Config::PWM_MIN_MAGNITUDE`. Mirrors the
+            // `_useTShapeRampDown` decel tail exactly — do NOT pre-snap the magnitude here; the
+            // policy returns pre-snap values and the same downstream snap must apply. See the
+            // PWM_MOVING_MIN @warning in ConfigGlobal.h.
+            stopFloorMag = Config::PWM_MOVING_MIN;
+        }
     }
 
     // Tracks whether the line-online middle block (junction-freeze + P+D mix) should run
@@ -603,7 +733,9 @@ void LineFollowerClass::update()
                                     /*hasBrakeOnGateOverride=*/false,
                                     /*brakeOnGate=*/true,
                                     /*hasLineFollowOffsetOverride=*/false,
-                                    /*lineFollowOffset=*/0.0f);
+                                    /*lineFollowOffset=*/0.0f,
+                                    /*hasApproachTarget=*/false,
+                                    /*approachPredictedCm=*/0.0f);
             }
             else
             {
@@ -660,7 +792,9 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                hasBrakeOnGateOverride,
                                             bool                brakeOnGate,
                                             bool                hasLineFollowOffsetOverride,
-                                            float               lineFollowOffset)
+                                            float               lineFollowOffset,
+                                            bool                hasApproachTarget,
+                                            float               approachPredictedCm)
 {
     // Apply preset and reverse first so that, if anyone ever extends this to react
     // synchronously to the enable transition, they see the freshly chosen cruise + direction.
@@ -772,8 +906,15 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         _useTShapeRampDown = tShapeRampDown && hasDistanceTarget;
         if (_useTShapeRampDown)
         {
-            _tShapeRampDownStart = _reverse ? (int16_t) -presetToPwm(_preset)
-                                            : presetToPwm(_preset);
+            // AC3 detect-handoff seed (F2): when the just-finished session ran an approach ramp
+            // (`_approachActive` still true here — the disarm below happens AFTER this read), the
+            // chassis is already crawling at the approach floor. Seed the ramp-down FROM the last
+            // commanded approach magnitude, not the full preset, so commanded PWM is
+            // NON-INCREASING across the detect tick (no jolt back to cruise on detection). When no
+            // approach ramp ran, `_approachActive` is false and `seedMag` is `presetToPwm(_preset)`
+            // — byte-identical to the pre-feature seed.
+            const int16_t seedMag = _approachActive ? _approachLastMag : presetToPwm(_preset);
+            _tShapeRampDownStart  = _reverse ? (int16_t) -seedMag : (int16_t) seedMag;
         }
 
         if (hasDistanceTarget)
@@ -794,6 +935,59 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
             // no sense without a gate to ramp toward.
             _distanceTargetActive = false;
             _useTShapeRampDown    = false;
+        }
+
+        // Anticipatory approach-ramp arm/disarm (T6). This runs LAST in the enable branch so the
+        // ramp-down seed above still sees the PREVIOUS session's approach state (AC3). A
+        // setEnabled(true) apply WITH setApproachTarget resolves and arms the schedule
+        // (feature-gated); WITHOUT it, any prior schedule is disarmed — so the LINE_OVERSHOOT
+        // re-arm (which does not chain setApproachTarget) clears it, and no stale FLOOR_HOLD /
+        // OVERRUN phase leaks into the overshoot leg or the next hop.
+        if (hasApproachTarget && Config::LINE_APPROACH_RAMP_ENABLED)
+        {
+            // cruiseMag = presetToPwm(_preset) — already a non-negative magnitude, so no abs()
+            // (the Arduino abs() macro double-evaluates its argument). The schedule works in
+            // the unsigned magnitude domain; the sign is applied per-tick in update() from
+            // `_reverse`.
+            const int16_t          cruiseMag = presetToPwm(_preset);
+            const ApproachSchedule sched     = resolveApproachSchedule(
+                approachPredictedCm,
+                Config::LINE_APPROACH_MARGIN_CM,
+                Config::LINE_APPROACH_MAX_MARGIN_CM,
+                cruiseMag,
+                Config::PWM_MOVING_MIN,
+                Config::TSHAPE_ACCEL_PWM_PER_CM,
+                Config::TSHAPE_RAMP_MIN_CM,
+                Config::TSHAPE_RAMP_MAX_CM,
+                Config::TSHAPE_NO_RAMP_EPSILON_PWM,
+                Config::TSHAPE_MIN_MOVE_CM);
+
+            if (sched.active)
+            {
+                // Arm: capture both wheels' encoder counters as the traveled-distance baseline
+                // (same convention as the distance gate) and seed the phase/last-magnitude state.
+                _approachActive    = true;
+                _approachSchedule  = sched;
+                _approachStartEncL = Drive.getEncL();
+                _approachStartEncR = Drive.getEncR();
+                _approachPhase     = ApproachPhase::CRUISE;
+                _approachLastMag   = sched.cruiseMag;
+            }
+            else
+            {
+                // Schedule degraded to flat (short hop / degenerate) — leave the approach ramp
+                // disarmed and run today's flat cruise-until-detected path (AC7).
+                _approachActive = false;
+                _approachPhase  = ApproachPhase::CRUISE;
+            }
+        }
+        else
+        {
+            // No approach target on this enable apply (or the feature is globally disabled):
+            // disarm any prior schedule and clear the phase so approachPhase() reads the CRUISE
+            // sentinel, never a stale OVERRUN/FLOOR_HOLD.
+            _approachActive = false;
+            _approachPhase  = ApproachPhase::CRUISE;
         }
     }
     else
@@ -824,6 +1018,9 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                                // the overshoot/brake-on-gate reset-on-disable
                                                // (NOT the persistent preset/reverse). See #156.
         _hasLineFollowOffsetOverride = false; // Clear the owner override marker on disable.
+        _approachActive       = false;    // Disabling cancels any armed approach ramp.
+        _approachPhase        = ApproachPhase::CRUISE;  // Clear so approachPhase() reads the
+                                                        // sentinel — no stale OVERRUN leaks.
 
         if (brake)
         {
@@ -851,6 +1048,11 @@ bool LineFollowerClass::isLineLost() const
 bool LineFollowerClass::isPidFrozen() const
 {
     return _pidFrozen;
+}
+
+ApproachPhase LineFollowerClass::approachPhase() const
+{
+    return _approachPhase;
 }
 
 float LineFollowerClass::getRawError() const

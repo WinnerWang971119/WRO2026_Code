@@ -144,7 +144,7 @@ int main()
         .setBlocking(true)
         .async();
 
-    // LineFollowerEnableBuilder (LineFollower.setEnabled) — 11 setters.
+    // LineFollowerEnableBuilder (LineFollower.setEnabled) — 12 setters.
     LineFollower.setEnabled(true)
         .setBrake(true)
         .setPreset(Config::SpeedPreset::NORMAL)
@@ -156,7 +156,8 @@ int main()
         .setReverse(true)
         .setDistanceTarget(90.0f)
         .setOvershootMode(true)
-        .setBrakeOnGate(true);
+        .setBrakeOnGate(true)
+        .setApproachTarget(30.0f);
 
     // recordDeclarePosition (issue #130, task T8) — link-and-run smoke coverage
     // for the new declare_position recorder entry point, consistent with this

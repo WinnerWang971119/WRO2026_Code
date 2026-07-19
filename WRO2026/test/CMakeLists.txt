@@ -626,6 +626,48 @@ add_fixture_routes_force_include(test_path_tracker_stop_at_line)   # FIRST (ROUT
 add_path_force_includes(test_path_tracker_stop_at_line)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
 
+# --- Test executables #3d(a)/#3d(b) — anticipatory line-approach ramp PathTracker dispatch
+# (2026-07-17 line-approach-ramp plan, T11): TC6 (LineFollower OVERRUN -> DRIVE_FAULT), TC9
+# (forward vs reverse axle-offset prediction), TC8 (toggle-off byte-identical, seek half). Same
+# real-link recipe as `test_path_tracker_passthrough_on`/`_off` above, built TWICE with
+# `LINE_APPROACH_RAMP_ENABLED_DEFAULT` flipped so TC8's assertions run in the toggle-off build
+# while TC6/TC9 exercise the (default-on) enabled build.
+add_executable(test_path_tracker_approach_ramp
+    ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_approach_ramp
+    PRIVATE LINE_APPROACH_RAMP_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_approach_ramp PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_approach_ramp)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_approach_ramp)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_approach_ramp COMMAND test_path_tracker_approach_ramp)
+
+add_executable(test_path_tracker_approach_ramp_disabled
+    ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_approach_ramp_disabled
+    PRIVATE LINE_APPROACH_RAMP_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_approach_ramp_disabled PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_approach_ramp_disabled)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_approach_ramp_disabled)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_approach_ramp_disabled COMMAND test_path_tracker_approach_ramp_disabled)
+
 # --- Test executable #3e — PathTracker projection-NODE dispatch, real-linked (issue #64 / #106). ---
 # Drives the two projection cells of the REAL `_dispatchEdgeAfterTurn` through the real FSM:
 #   - LINE  → projection : distance-gated PROJECTION_FOLLOW, dead-reckon advance (`Inter1→ProjL`).
@@ -1276,6 +1318,27 @@ target_include_directories(test_sensor_overshoot_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME sensor_overshoot_policy COMMAND test_sensor_overshoot_policy)
 
 # =========================================================================================
+# Test executable #9c — ApproachRampPolicy pure-math (2026-07-17
+# anticipatory-line-approach-ramp plan, T3; TC1, TC7, TC17).
+#
+# `resolveApproachSchedule` / `approachSpeedAt` are the header-only inline policy
+# (`ApproachRampPolicy.h`, T2) that resolves the anticipatory line-approach ramp schedule and
+# looks up the commanded magnitude for a traveled distance. It composes
+# `TShapeProfilePolicy.h`'s `resolveTShapeRampCm` for the ramp length, so this target only
+# needs `${SKETCH_DIR}` to resolve BOTH sibling headers via their relative quoted includes.
+#
+# Pure float / int16_t math with no Arduino surface, no Config.h dependency (the real
+# Config::* knobs are mirrored as local literals in the test, same convention as
+# `test_pivot_trim_policy` / `test_sensor_overshoot_policy`): no mocks, no SUT sources — just
+# the sketch include dir for the header.
+# =========================================================================================
+add_executable(test_approach_ramp_policy
+    ${TEST_DIR}/test_approach_ramp_policy.cpp
+)
+target_include_directories(test_approach_ramp_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME approach_ramp_policy COMMAND test_approach_ramp_policy)
+
+# =========================================================================================
 # Test executable #11 — ReturnToNodePolicy pure-math (issue #36, PR1b, T8/T10).
 #
 # `resolveReturnAction` is a header-only inline policy (`ReturnToNodePolicy.h`) — the
@@ -1575,7 +1638,7 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
-# Test executable — GyroDecodePolicy math (ADR-071, T6, TC1-TC12).
+# Test executable — GyroDecodePolicy math (ADR-074, T6, TC1-TC12).
 #
 # `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` /
 # `gyroShortestDelta` / `gyroReadPlausible` are header-only inline policies
@@ -1593,7 +1656,7 @@ target_include_directories(test_gyro_decode_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME gyro_decode_policy COMMAND test_gyro_decode_policy)
 
 # =========================================================================================
-# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-071, TC22 / AC9, compile-fail).
+# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-074, TC22 / AC9, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::GYRO_YAW_SIGN` is not
 # exactly +/-1. Built with `-DGYRO_YAW_SIGN_DEFAULT=0.5f` (the `#ifndef`-guarded override
@@ -2643,7 +2706,7 @@ target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
 
 # =========================================================================================
-# External-gyro bridge pins (T3b, issue #163 / ADR-071).
+# External-gyro bridge pins (T3b, issue #163 / ADR-074).
 #
 # Every host target that links `src/nav/YawSource.cpp` also pulls the `MatrixColor` gyro mock,
 # whose `getColor` bridge synthesizes bytes from `mmL.mockYawDeg` so `readYawDeg` round-trips to
@@ -2699,3 +2762,78 @@ foreach(_yawsrc_target IN ITEMS
         GYRO_SCALE_DEFAULT=1.0f
         GYRO_YAW_SIGN_DEFAULT=-1.0f)
 endforeach()
+# Test executable — Drive.isSeekingLine() + dispatch-tick order (2026-07-18
+# gate-line-array-tick plan, T5; TC1-TC6; AC7).
+#
+# Host-drives the REAL Drive.cpp stopAtLine() seek DIRECTLY (no PathTracker / Localization /
+# routes — this predicate and the dispatch-tick ordering it depends on live entirely inside
+# Drive's own FSM), asserting Drive.isSeekingLine() before/during/after a forward and a reverse
+# seek, plus the load-bearing _updateStopAtLine()-before-_dispatchNext() ordering inside
+# Drive::update() that the T3 perception-tick gate depends on.
+#
+# REGIME: mirrors test_drive_decel_floor — the Drive-only real-link recipe (issue-#106 recipe
+# MINUS PathTracker.cpp/Localization.cpp/fixture routes). SKETCH_DIR FIRST (the inversion) so the
+# real Drive.h/YawSource.h win; hal_mocks supplies <MatrixMiniR4.h>/<Arduino.h>; path_mocks
+# supplies the force-included WROLineArray/Intersection/LineFollower peripherals; path_mocks.cpp
+# provides the facade globals (NOT Drive, so no collision with the real Drive.cpp). MOCKS_DIR and
+# FIXTURE_ROUTES_DIR are deliberately omitted.
+# =========================================================================================
+add_executable(test_drive_seek_predicate
+    ${TEST_DIR}/test_drive_seek_predicate.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_seek_predicate PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_seek_predicate)    # EventTrace + path_mocks peripherals
+add_test(NAME drive_seek_predicate COMMAND test_drive_seek_predicate)
+# Links src/nav/YawSource.cpp, so pin the MatrixColor gyro-mock round-trip like the
+# YawSource-linked foreach above (External-gyro bridge pins, ADR-074). Kept next to the
+# target since it is defined below that foreach.
+target_compile_definitions(test_drive_seek_predicate PRIVATE
+    GYRO_SCALE_DEFAULT=1.0f
+    GYRO_YAW_SIGN_DEFAULT=-1.0f)
+
+# =========================================================================================
+# Test executable #32 — `approach_ramp_dump` + freshness gate (2026-07-17
+# anticipatory-line-approach-ramp plan, T3).
+#
+# Host golden-vector dump for the header-only, Arduino-free `ApproachRampPolicy.h` (T2), which
+# itself composes `TShapeProfilePolicy.h`'s `resolveTShapeRampCm`. Includes ONLY the policy
+# header plus the REAL `Config::TSHAPE_*` / `Config::PWM_MOVING_MIN` / `Config::LINE_APPROACH_*`
+# / `Config::SPEED_*` constants via `config/ConfigGlobal.h` + `config/ConfigDrive.h` directly —
+# both are pure `<stdint.h>`-only `constexpr` headers with ZERO Arduino/MatrixMiniR4 surface, so
+# they are host-includable as-is with no mock indirection (unlike the `Config.h` umbrella, which
+# pulls in `<Arduino.h>`). No SUT `.cpp`, no `MOCK_SOURCES`, no force-includes needed — the dump
+# TU is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just
+# prints JSON to stdout. The actual ctest is `approach_ramp_freshness` below, which drives
+# `approach_ramp_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file
+# and BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/approach_ramp_goldens.json` (the `routes.h` /
+# `tshape_profile` / `chain_speed` regenerate-then-diff freshness-gate pattern, ctest-native so
+# it also runs locally, not just in a dedicated CI job). A firmware retune that changes
+# `Config::TSHAPE_*` / `Config::LINE_APPROACH_*` — or any change to the policy's arithmetic —
+# changes this binary's stdout and fails the ctest until the fixture is regenerated and
+# recommitted. Consumed by the Python cross-language test (T5 / TC13).
+# =========================================================================================
+set(APPROACH_RAMP_DUMP_DIR ${TEST_DIR}/approach_ramp_dump)
+
+add_executable(approach_ramp_dump
+    ${APPROACH_RAMP_DUMP_DIR}/approach_ramp_dump.cpp
+)
+target_include_directories(approach_ramp_dump PRIVATE ${SKETCH_DIR})
+
+set(APPROACH_RAMP_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/approach_ramp_goldens.json)
+
+add_test(NAME approach_ramp_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:approach_ramp_dump>
+            -DGOLDEN_FILE=${APPROACH_RAMP_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/approach_ramp_goldens.fresh.json
+            -P ${APPROACH_RAMP_DUMP_DIR}/approach_ramp_freshness.cmake
+)

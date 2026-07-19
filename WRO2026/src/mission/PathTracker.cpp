@@ -466,6 +466,7 @@ bool PathTrackerClass::begin()
     _activeEdgeType          = Routes::EdgeType::NONE;
     _passThrough             = false;
     _projPassThrough         = false;
+    _lineFollowPassThrough   = false;
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
     _returnUsesLineSeek      = false;
@@ -545,6 +546,7 @@ void PathTrackerClass::abort()
     _activeEdgeType         = Routes::EdgeType::NONE;
     _passThrough            = false;
     _projPassThrough        = false;
+    _lineFollowPassThrough  = false;
     _resolvedDirection      = Direction::AUTO;
     _resolvedBodyHeading    = 0.0f;
     _returnUsesLineSeek     = false;
@@ -1019,49 +1021,20 @@ void PathTrackerClass::_stepFsm()
             if (Intersection.isAtIntersection())
             {
                 // -----------------------------------------------------------------
-                // Pass-through decision: peek the next hop AFTER _nextHop. If the
-                // peeked edge is collinear with the inbound edge (heading delta
-                // wrap-normalized to within NAV_TURN_TOLERANCE_DEG) AND _nextHop is
-                // not the final destination, take the pass-through branch — keep
-                // LineFollower running across the overshoot without braking.
-                // See ADR-023 and issue #19.
-                //
-                // Wrap-normalize MUST match the sim's `normalize_turn` so the
-                // 359.5°/0.0° boundary classifies the same on both sides. Uses the
-                // shared `NavTypes.h::wrapDeltaDeg` helper (was an inlined loop here,
-                // in `_onPlanNextHop`, and in `DirectionPolicy.h`).
+                // Pass-through decision (F3 — evaluate-once). The collinear
+                // `line(A)–line(B)–line(C)` peek was HOISTED to dispatch
+                // (`_dispatchEdgeAfterTurn`'s `LINE_FOLLOW_INTERSECTION` arm) and
+                // latched into `_lineFollowPassThrough`, because the anticipatory
+                // approach ramp is armed at dispatch and must know THERE whether this
+                // hop terminates at `_nextHop` (arm the ramp) or passes collinearly
+                // through it (keep full cruise). The peek is pure over headings/geometry
+                // and the FSM never re-plans between dispatch and this detect tick, so
+                // consuming the latch here is behaviour-identical to the old recompute.
+                // Consume it into `_passThrough`, which `LINE_OVERSHOOT` and the next
+                // dispatch read (brakeOnGate / tShapeRampDown / start-speed). See
+                // ADR-023 and issue #19.
                 // -----------------------------------------------------------------
-                _passThrough = false;
-                // `Config::PATH_PASS_THROUGH_ENABLED` leads so the peek's NEXT_HOP
-                // lookup is skipped entirely when pass-through is compiled out. The
-                // shared `_peekNextNextHop()` applies the not-final / NODE_NONE /
-                // self-loop guards and returns `NODE_NONE` when there is no valid
-                // next-next hop.
-                const uint8_t nextNext =
-                    Config::PATH_PASS_THROUGH_ENABLED ? _peekNextNextHop() : FieldMap::NODE_NONE;
-                if (nextNext != FieldMap::NODE_NONE)
-                {
-                    const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
-                    if (outbound.type != Routes::EdgeType::NONE)
-                    {
-                        // Pass-through requires BOTH (1) collinear body headings
-                        // AND (2) matching direction across the intersection — the
-                        // shared ADR-023 `_passThroughHeadingOk()` predicate (also
-                        // used by the distance-gated projection collapse) compares
-                        // BODY headings, not raw forward edge headings. A REAR→FRONT
-                        // or FRONT→REAR transition would force the dispatcher to flip
-                        // LineFollower.setReverse(...) mid-flight — instantly swapping
-                        // the active line board and inverting cruise sign in one tick,
-                        // jolting the chassis without a controlled stop. Falling
-                        // through to LINE_OVERSHOOT (with brake, no pass-through) gives
-                        // the controller a clean re-init window before the new edge
-                        // starts. PR #34 review; see TC9 / TC9c.
-                        if (_passThroughHeadingOk(outbound, nextNext))
-                        {
-                            _passThrough = true;
-                        }
-                    }
-                }
+                _passThrough = _lineFollowPassThrough;
 
                 // Arm the overshoot. Always set overshootMode=true (project-wide rule
                 // per ADR-023: the 5cm window dead-reckons through line-offline
@@ -1141,6 +1114,26 @@ void PathTrackerClass::_stepFsm()
                 // deliberate dead-reckon and is not polled.
                 _lineLostTiming = false;
                 _state          = State::LINE_OVERSHOOT;
+            }
+            else if (LineFollower.approachPhase() == ApproachPhase::OVERRUN)
+            {
+                // AC6 — bounded-overrun fault. The LineFollower junction hop had NO
+                // late-line bound before this feature (an unbounded follow). The
+                // anticipatory approach ramp advanced at the kinetic floor past
+                // `predicted + Config::LINE_APPROACH_MAX_MARGIN_CM` without the junction
+                // marker ever classifying — a missed line is a hard fault (ADR-039), not
+                // an unbounded crawl. Enter the SAME Drive-fault path the seek/BLIND miss
+                // uses: `_enterFault` disables the follower and `Drive.stop(true)` halts
+                // the chassis. `isAtIntersection()` above stays the authoritative arrival
+                // (it re-anchors Localization) and wins in the same tick — the plain
+                // overshoot re-arm it dispatches carries no `setApproachTarget`, so the
+                // schedule is disarmed and `approachPhase()` can never read OVERRUN once
+                // detection has fired. Note (S3): a target marker that is simply ABSENT
+                // drives `!isOnline()` → `LOST_LINE_ACTION` inside the follower first;
+                // this OVERRUN bound specifically guards the "on a line but the marker
+                // never classifies past the overrun limit" case.
+                _enterFault(Fault::DRIVE_FAULT, Localization.getCurrentNode(),
+                            _destinationNode);
             }
             return;
         }
@@ -1508,10 +1501,11 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeEdgeType         = Routes::EdgeType::NONE;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
-    // A fault disables the follower above; drop both pass-through eligibility flags
+    // A fault disables the follower above; drop all pass-through eligibility flags
     // so a latched value cannot leak into a post-clearFault() goal's first dispatch.
     _passThrough            = false;
     _projPassThrough        = false;
+    _lineFollowPassThrough  = false;
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
@@ -2424,6 +2418,49 @@ bool PathTrackerClass::_evaluateProjectionPassThrough() const
     return _passThroughHeadingOk(outbound, c);
 }
 
+bool PathTrackerClass::_evaluateLineFollowPassThrough() const
+{
+    // `line(A)–line(B)–line(C)` intersection-gated pass-through gate (F3 — evaluate-once
+    // hoist). Called at LINE→line (junction) arm time in `_dispatchEdgeAfterTurn`:
+    // B == `_nextHop`, `_resolvedBodyHeading` / `_resolvedDirection` already hold the
+    // A→B hop's body heading + direction. This is the dispatch-time twin of the peek the
+    // `LINE_FOLLOW` state historically ran at intersection-detect; the decision is hoisted
+    // to dispatch so the approach ramp knows whether to arm (terminating hop) or stay at
+    // full cruise (pass-through) BEFORE the leading sensor sees the marker.
+    //
+    // The SAME three-part test the old detection peek used — NOT the stricter
+    // `_evaluateProjectionPassThrough` conditions (that gate additionally requires a LINE
+    // outbound edge + a LINE junction C, because a projection collapse re-follows the line
+    // across a marker-less node). Here a BLIND outbound B→C is a valid pass-through target
+    // (the LINE→BLIND handoff releases the follower without braking downstream), so guard
+    // only on edge EXISTENCE + heading.
+
+    // (1) Compiled out → never pass through. Leads so the NEXT_HOP peek is skipped
+    // entirely on a build without pass-through (matches the old detection peek's
+    // `PATH_PASS_THROUGH_ENABLED ? ... : NODE_NONE` lead).
+    const uint8_t nextNext =
+        Config::PATH_PASS_THROUGH_ENABLED ? _peekNextNextHop() : FieldMap::NODE_NONE;
+    if (nextNext == FieldMap::NODE_NONE)
+    {
+        return false;
+    }
+
+    // (2) The outbound edge B→C must exist. `_peekNextNextHop()` already applied the
+    // not-final / NODE_NONE / self-loop guards, so a valid `nextNext` here means the goal
+    // is beyond B; a missing edge is still a normal stop-at-B.
+    const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
+    if (outbound.type == Routes::EdgeType::NONE)
+    {
+        return false;
+    }
+
+    // (3) A→B→C collinear AND same direction — the shared ADR-023 `_passThroughHeadingOk()`
+    // predicate (also used by the distance-gated projection collapse), comparing BODY
+    // headings so a FRONT↔REAR flip (which would swap the active line board mid-flight) is
+    // never a continuation. See the old detection-site comment (PR #34 review; TC9 / TC9c).
+    return _passThroughHeadingOk(outbound, nextNext);
+}
+
 void PathTrackerClass::_chainReset()
 {
     // ADR-059: value-initialize the whole run buffer back to the inactive state.
@@ -2776,14 +2813,55 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             const Config::SpeedPreset preset = speedTierToPreset(q.speed);
             // issue #156: resolve the per-edge lateral follow MODE and compose the reverse-hop
             // sign flip (LEFT stays left-of-TRAVEL on a rear-board hop). LineFollower stays
-            // nav-agnostic — it takes the signed float, not the enum.
-            const Routes::LineFollowMode mode = _resolveLineFollowMode(edge);
-            const float                  sign = decision.reverse ? -1.0f : 1.0f;
-            LineFollower.setEnabled(true)
-                        .setPreset(preset)
-                        .setReverse(decision.reverse)
-                        .setOvershootMode(false)
-                        .setLineFollowOffset(sign * lineFollowModeToSetpoint(mode));
+            // nav-agnostic — it takes the signed float, not the enum. `mode` is also read by the
+            // parity-trace emit below, so it is resolved unconditionally.
+            const Routes::LineFollowMode mode             = _resolveLineFollowMode(edge);
+            const float                  sign             = decision.reverse ? -1.0f : 1.0f;
+            const float                  lineFollowOffset = sign * lineFollowModeToSetpoint(mode);
+
+            // F3 — evaluate-once pass-through hoist. Decide HERE (at dispatch) whether
+            // this hop terminates at `_nextHop` or passes collinearly through it, and
+            // latch the answer. `LINE_FOLLOW` consumes the SAME latch at
+            // intersection-detect (no recompute), and the approach-ramp arm below reads
+            // it too. Pure over headings/geometry — no live yaw. See ADR-023.
+            _lineFollowPassThrough = _evaluateLineFollowPassThrough();
+
+            // C1 — anticipatory approach ramp (the headline behaviour). On a TERMINATING
+            // LINE hop (NOT a pass-through) with `Config::LINE_APPROACH_RAMP_ENABLED`,
+            // predict how far the leading sensor board travels before it reaches the
+            // target line and chain `.setApproachTarget(predictedCm)` so LineFollower
+            // ramps cruise → the kinetic floor over that distance instead of holding full
+            // cruise until detect. The prediction is the PIVOT-TRIMMED edge length
+            // (`_pivotTrimDistance(edge)` — the SAME value `PROJECTION_FOLLOW` drives; NOT
+            // `decision.commandedDistanceCm`, which is 0.0 by design for this
+            // sensor-terminated primitive, so it would make the schedule degenerate and
+            // the ramp a silent no-op) MINUS the direction-aware sensor-to-axle offset
+            // `axleOffsetCm` (front 12.02 / rear 7.68, already resolved above). A
+            // pass-through node keeps FULL cruise — the robot drives straight through it,
+            // so the ramp is suppressed. When the ramp is disabled OR this is a
+            // pass-through, the plain arm (no `setApproachTarget`) DISARMS any prior
+            // schedule — byte-identical to today's flat behaviour. The lateral follow
+            // offset (issue #156) is applied on BOTH arms; the soft-start ramp-up is left
+            // ON (`setTShapeRampUp` default-true): T6 phase-gates the approach so ramp-up
+            // and the anticipatory ramp-down coexist.
+            if (Config::LINE_APPROACH_RAMP_ENABLED && !_lineFollowPassThrough)
+            {
+                const float predictedCm = _pivotTrimDistance(edge) - axleOffsetCm;
+                LineFollower.setEnabled(true)
+                            .setPreset(preset)
+                            .setReverse(decision.reverse)
+                            .setOvershootMode(false)
+                            .setLineFollowOffset(lineFollowOffset)
+                            .setApproachTarget(predictedCm);
+            }
+            else
+            {
+                LineFollower.setEnabled(true)
+                            .setPreset(preset)
+                            .setReverse(decision.reverse)
+                            .setOvershootMode(false)
+                            .setLineFollowOffset(lineFollowOffset);
+            }
 #ifdef PT_PARITY_TRACE
             _ptEmitLineFollow(decision.reverse, q.speed, mode);
 #endif

@@ -67,9 +67,12 @@ from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH
 from tools.path_planner.ctps.config import TURN_SETTLE_ALLOWANCE_S
 from tools.path_planner.ctps.profile import (
     SCALE_CM_S_PER_PWM,
+    ApproachPhase,
     ProfileConfig,
+    approach_speed_at,
     default_config,
     load_profile_config,
+    resolve_approach_schedule,
     resolve_drive_profile,
     resolve_effective_speed,
     resolve_tshape_ramps,
@@ -80,6 +83,7 @@ from tools.path_planner.ctps.profile import (
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 GOLDENS_PATH = FIXTURES_DIR / "tshape_profile_goldens.json"
+APPROACH_GOLDENS_PATH = FIXTURES_DIR / "approach_ramp_goldens.json"
 
 # The sibling headers profile.py's config loader resolves relative to
 # `config_path.parent` (ConfigDrive.h itself + ConfigGlobal.h + ConfigLine.h +
@@ -95,6 +99,15 @@ def _load_goldens() -> list[dict]:
 
 
 GOLDEN_VECTORS = _load_goldens()
+
+
+def _load_approach_goldens() -> list[dict]:
+    """Load the committed approach-ramp golden vectors (T3's ``approach_ramp_dump`` fixture)."""
+    with APPROACH_GOLDENS_PATH.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+APPROACH_GOLDEN_VECTORS = _load_approach_goldens()
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +263,121 @@ def test_resolve_drive_profile_pwm_at_s_matches_golden_pwm_at_samples() -> None:
                 f"DriveProfile.pwm_at_s mismatch for {vector} at "
                 f"traveled={sample['traveled']}: got {pwm}, expected {sample['pwm']}"
             )
+
+
+# ---------------------------------------------------------------------------
+# TC13 (AC10) — approach-ramp golden parity (T5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "vector",
+    APPROACH_GOLDEN_VECTORS,
+    ids=[v["label"] for v in APPROACH_GOLDEN_VECTORS],
+)
+def test_resolve_approach_schedule_matches_golden_exactly(vector: dict) -> None:
+    """``resolve_approach_schedule`` reproduces the golden schedule bit-for-bit.
+
+    Calls the pure kernel directly with the golden vector's own
+    ``(predictedCm, marginCm, maxMarginCm, cruiseMag, floorMag, accel, rampMin,
+    rampMax, noRampEps, minMoveCm)`` columns (the C++ dump's exact resolve
+    inputs) — mirrors how TC1's
+    ``test_resolve_tshape_ramps_matches_golden_exactly`` calls
+    ``resolve_tshape_ramps`` directly with its vector's own columns rather than
+    routing through the real firmware Config. float32 comparison is exact
+    (both sides already round through ``numpy.float32`` inside the kernel, and
+    the C++ dump's ``%.9g`` formatting round-trips a float32 exactly).
+    """
+    schedule = resolve_approach_schedule(
+        vector["predictedCm"],
+        vector["marginCm"],
+        vector["maxMarginCm"],
+        vector["cruiseMag"],
+        vector["floorMag"],
+        vector["accel"],
+        vector["rampMin"],
+        vector["rampMax"],
+        vector["noRampEps"],
+        vector["minMoveCm"],
+    )
+
+    expect = vector["expect"]
+    assert np.float32(schedule.ramp_start_cm) == np.float32(expect["rampStartCm"]), (
+        f"rampStartCm mismatch for {vector}: got {schedule.ramp_start_cm}, "
+        f"expected {expect['rampStartCm']}"
+    )
+    assert np.float32(schedule.floor_start_cm) == np.float32(expect["floorStartCm"]), (
+        f"floorStartCm mismatch for {vector}: got {schedule.floor_start_cm}, "
+        f"expected {expect['floorStartCm']}"
+    )
+    assert np.float32(schedule.overrun_limit_cm) == np.float32(expect["overrunLimitCm"]), (
+        f"overrunLimitCm mismatch for {vector}: got {schedule.overrun_limit_cm}, "
+        f"expected {expect['overrunLimitCm']}"
+    )
+    assert int(schedule.cruise_mag) == int(expect["cruiseMag"]), (
+        f"cruiseMag mismatch for {vector}: got {schedule.cruise_mag}, "
+        f"expected {expect['cruiseMag']}"
+    )
+    assert int(schedule.floor_mag) == int(expect["floorMag"]), (
+        f"floorMag mismatch for {vector}: got {schedule.floor_mag}, "
+        f"expected {expect['floorMag']}"
+    )
+    assert bool(schedule.active) == bool(expect["active"]), (
+        f"active mismatch for {vector}: got {schedule.active}, "
+        f"expected {expect['active']}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vector",
+    APPROACH_GOLDEN_VECTORS,
+    ids=[v["label"] for v in APPROACH_GOLDEN_VECTORS],
+)
+def test_approach_ramp_golden(vector: dict) -> None:
+    """TC13 (AC10): ``approach_speed_at`` reproduces every golden ``speed_at``
+    sample's exact ``(pwmMag, phase)``.
+
+    Re-resolves the schedule for this vector (mirroring how a caller chains
+    the two kernel calls: resolve once, then sample speed-at along the hop),
+    then asserts each golden ``{traveled, pwmMag, phase}`` triple exactly,
+    mapping the golden's phase string onto :class:`ApproachPhase` by name. A
+    degenerate/inactive schedule (T3's dump emitted an empty ``speed_at`` list
+    for those cases: short-hop-below-min-move and ramp-start-non-positive)
+    asserts ``active is False`` and skips the sample sweep — sampling a
+    schedule whose boundaries are not load-bearing is meaningless
+    (``resolve_approach_schedule``'s own docstring: "the caller must not
+    invoke [``approach_speed_at``] on a schedule with active == False").
+    """
+    schedule = resolve_approach_schedule(
+        vector["predictedCm"],
+        vector["marginCm"],
+        vector["maxMarginCm"],
+        vector["cruiseMag"],
+        vector["floorMag"],
+        vector["accel"],
+        vector["rampMin"],
+        vector["rampMax"],
+        vector["noRampEps"],
+        vector["minMoveCm"],
+    )
+
+    expect = vector["expect"]
+    if not expect["active"]:
+        assert schedule.active is False
+        assert expect["speed_at"] == []
+        return
+
+    for sample in expect["speed_at"]:
+        speed = approach_speed_at(schedule, sample["traveled"])
+        expected_phase = ApproachPhase[sample["phase"]]
+        assert int(speed.pwm_mag) == int(sample["pwmMag"]), (
+            f"pwmMag mismatch for {vector} at traveled={sample['traveled']}: "
+            f"got {speed.pwm_mag}, expected {sample['pwmMag']}"
+        )
+        assert speed.phase == expected_phase, (
+            f"phase mismatch for {vector} at traveled={sample['traveled']}: "
+            f"got {speed.phase!r}, expected {expected_phase!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

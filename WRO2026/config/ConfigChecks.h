@@ -189,6 +189,20 @@ namespace Config
                   "T_OR_CROSS junction with zero channels lit and a count above 8 could never be "
                   "satisfied by an 8-channel array.");
 
+    // Anticipatory line-approach ramp checks (ConfigDrive.h)
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(LINE_APPROACH_MARGIN_CM >= 0.0f,
+                  "Config::LINE_APPROACH_MARGIN_CM must be >= 0.0f -- a negative pre-prediction "
+                  "margin would bottom out the ramp AFTER the predicted crossing instead of "
+                  "before it, defeating the anticipatory approach ramp entirely.");
+
+    static_assert(LINE_APPROACH_MAX_MARGIN_CM > 0.0f,
+                  "Config::LINE_APPROACH_MAX_MARGIN_CM must be > 0.0f -- a zero or negative "
+                  "overrun bound would fault LINE_NOT_FOUND at (or before) the predicted "
+                  "crossing itself, leaving no bounded floor-speed search window for a late "
+                  "line.");
+
     // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)
     // -----------------------------------------------------------------------------------------
@@ -332,7 +346,7 @@ namespace Config
                   "not a scale factor. See config/ConfigNav.h.");
 
     // -----------------------------------------------------------------------------------------
-    // External gyro checks (ConfigNav.h, ADR-071)
+    // External gyro checks (ConfigNav.h, ADR-074)
     //
     // COUPLED SITES: Config::GYRO_YAW_SIGN and Config::GYRO_SCALE are applied together, exactly
     // once, inside GyroDecodePolicy.h::decodeGyroYawDeg (called from YawSource) to convert the

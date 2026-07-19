@@ -363,6 +363,140 @@ static void test_rampup_starts_at_deadband_floor_reverse()
 }
 
 // ===========================================================================
+// TC3 — Anticipatory approach-ramp monotonic detect handoff (AC3, 2026-07-17
+// line-approach-ramp plan, T11).
+//
+// Mirrors PathTracker's real dispatch pair over the LineFollower fluent surface
+// directly (T8's `LINE_FOLLOW_INTERSECTION` arm, then the `LINE_FOLLOW` ->
+// `LINE_OVERSHOOT` re-arm at PathTracker.cpp:1027-1033) so the REAL
+// `LineFollower::_applyEnableBuilder` / `update()` drive the handoff, exactly as
+// the T10a/T10b/T10d tests above drive the real controller directly rather than
+// mirroring it. Reuses the file's `deadbandSnap(...)` exact-value assertion
+// mechanism (see T10a at line ~117 and T10d at line ~292).
+//
+// T11 FINDING: writing this test surfaced a real defect in the already-merged T6
+// ramp-down "cruise plateau" branch (the `else` arm of the `remainingCm <=
+// rampDownCm` check) — it fell through to the top-of-tick `presetToPwm(_preset)`
+// default instead of holding the AC3-seeded `_tShapeRampDownStart`, so a hop
+// whose approach ramp reached FLOOR_HOLD before detection (the common,
+// by-design case — AC1) jolted the commanded PWM back UP to full cruise for the
+// plateau portion of the LINE_OVERSHOOT window before ramping back down. Fixed
+// in `LineFollower.cpp`'s ramp-down block (holds `_tShapeRampDownStart` in the
+// plateau when ramp-up is not concurrently in flight); verified byte-identical
+// for the pre-feature / ramp-up-concurrent paths by the full existing suite.
+// ===========================================================================
+
+static void test_TC3_approach_ramp_floor_hold_monotonic_detect_handoff()
+{
+    TEST_SCOPE("TC3: approach-ramp FLOOR_HOLD magnitude is non-increasing into LINE_OVERSHOOT (AC3)");
+
+    resetWorld();
+
+    LineArray.mockSetOnline(true);
+    LineArray.mockSetError(0.0f);
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+
+    // Arm the approach ramp directly (mirrors PathTracker's LINE_FOLLOW_INTERSECTION
+    // dispatch, T8): disable both tShape ramps so the approach branch alone shapes
+    // cruise. predictedCm=100 is comfortably above TSHAPE_MIN_MOVE_CM/the ramp length,
+    // and — because LINE_APPROACH_MARGIN_CM > 0 and LINE_APPROACH_MAX_MARGIN_CM > 0 are
+    // ConfigChecks-enforced invariants — advancing to `traveled == predictedCm` ALWAYS
+    // lands strictly inside [floorStartCm, overrunLimitCm) -> FLOOR_HOLD, regardless of
+    // the exact tuned margin/accel/ramp values.
+    constexpr float predictedCm = 100.0f;
+    LineFollower.setEnabled(true)
+                .setTShapeRampUp(false)
+                .setTShapeRampDown(false)
+                .setApproachTarget(predictedCm);
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    Drive.mockAdvanceEncoders(encDegsForCm(predictedCm), encDegsForCm(predictedCm));
+    LineFollower.update();
+
+    ASSERT_TRUE(LineFollower.approachPhase() == ApproachPhase::FLOOR_HOLD);
+
+    // The dispatched magnitude at the floor is the KINETIC floor (PWM_MOVING_MIN), not
+    // the static deadband floor: past CRUISE the approach branch lowers `stopFloorMag`
+    // to PWM_MOVING_MIN so `deadbandSnap` does not re-snap the ramped-down magnitude back
+    // up to the static floor (see the ApproachRampPolicy.h / update() docs).
+    const int16_t approachFloorMag = Drive.mockRecord().lastSetSpeedL;
+    ASSERT_EQ(approachFloorMag, deadbandSnap(Config::PWM_MOVING_MIN, Config::PWM_MOVING_MIN));
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, Drive.mockRecord().lastSetSpeedR);
+
+    // Detect tick: mirror PathTracker's LINE_OVERSHOOT re-arm (PathTracker.cpp:1027-1033)
+    // — overshoot-mode, ramp-up off, ramp-DOWN on, a fresh distance target. This does NOT
+    // chain `.setApproachTarget(...)`, so the schedule disarms (the LINE_OVERSHOOT
+    // re-arm contract) — the sentinel reads CRUISE — and the T6 AC3 seed reads the
+    // just-disarmed `_approachLastMag` (== the floor magnitude above) to seed the
+    // ramp-down, instead of jolting back to `presetToPwm(_preset)`.
+    LineFollower.setEnabled(true)
+                .setTShapeRampUp(false)
+                .setTShapeRampDown(true)
+                .setOvershootMode(true)
+                .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
+    ASSERT_TRUE(LineFollower.approachPhase() == ApproachPhase::CRUISE);
+
+    LineFollower.update();
+
+    // THE MONOTONIC ASSERT (AC3 / F2): the first LINE_OVERSHOOT tick's commanded
+    // magnitude must be <= the last approach-leg magnitude — never a jolt back toward
+    // full preset cruise on the detect tick.
+    const int16_t overshootFirstMag = Drive.mockRecord().lastSetSpeedL;
+    ASSERT_TRUE(overshootFirstMag <= approachFloorMag);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, Drive.mockRecord().lastSetSpeedR);
+
+    // Non-regression: a second overshoot tick (no further travel) stays flat at the
+    // floor too — no delayed jolt once the plateau/ramp math re-evaluates.
+    LineFollower.update();
+    ASSERT_TRUE(Drive.mockRecord().lastSetSpeedL <= approachFloorMag);
+}
+
+// ===========================================================================
+// TC8 (part 1, AC13 regression companion) — with the approach ramp NEVER armed
+// (no `.setApproachTarget(...)` chained on the first enable — the
+// `Config::LINE_APPROACH_RAMP_ENABLED == false` / pass-through shape), the
+// LINE_OVERSHOOT re-arm seeds from `presetToPwm(_preset)` exactly as before this
+// feature existed — the fix above must not perturb this path (byte-identical).
+// ===========================================================================
+
+static void test_TC8_no_approach_ramp_overshoot_seed_is_byte_identical_to_preset()
+{
+    TEST_SCOPE("TC8: no approach ramp armed -> LINE_OVERSHOOT still seeds from presetToPwm(_preset)");
+
+    resetWorld();
+
+    LineArray.mockSetOnline(true);
+    LineArray.mockSetError(0.0f);
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+
+    // Plain LINE_FOLLOW arm — no `.setApproachTarget(...)` chained, matching a
+    // pass-through hop or `LINE_APPROACH_RAMP_ENABLED == false`.
+    LineFollower.setEnabled(true).setTShapeRampUp(false).setTShapeRampDown(false);
+    ASSERT_TRUE(LineFollower.approachPhase() == ApproachPhase::CRUISE);
+
+    Drive.mockAdvanceEncoders(encDegsForCm(20.0f), encDegsForCm(20.0f));
+    LineFollower.update();
+
+    const int16_t expectedFullCruise = deadbandSnap(presetToPwm(LineFollower.getPreset()));
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, expectedFullCruise);
+
+    // Detect tick: LINE_OVERSHOOT re-arm, exactly as production dispatches it.
+    LineFollower.setEnabled(true)
+                .setTShapeRampUp(false)
+                .setTShapeRampDown(true)
+                .setOvershootMode(true)
+                .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
+    LineFollower.update();
+
+    // Byte-identical to the pre-feature seed: the first overshoot tick still holds full
+    // cruise (the legacy "plateau at presetToPwm(_preset)" value) — no regression from
+    // the TC3 plateau fix, which only changes behaviour when an approach ramp seeded a
+    // DIFFERENT (lower) magnitude.
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, expectedFullCruise);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedR, expectedFullCruise);
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -375,5 +509,7 @@ int main()
     test_T10d_junction_freeze_fires_while_overshoot_mode_enabled();
     test_rampup_starts_at_deadband_floor_forward();
     test_rampup_starts_at_deadband_floor_reverse();
+    test_TC3_approach_ramp_floor_hold_monotonic_detect_handoff();
+    test_TC8_no_approach_ramp_overshoot_seed_is_byte_identical_to_preset();
     TEST_REPORT();
 }

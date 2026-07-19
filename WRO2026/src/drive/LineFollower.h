@@ -51,6 +51,11 @@
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
 #include "../../Config.h"
+#include "ApproachRampPolicy.h"    // Pure distance-domain approach-ramp policy (T2): brings in
+                             // `ApproachSchedule`, `ApproachSpeed`, and the `ApproachPhase` enum
+                             // used by the owner's approach-ramp members and `approachPhase()`
+                             // query. Header-only, `<stdint.h>`-only surface — no Arduino/Config
+                             // dependency of its own (knobs are passed in by the caller).
 #include "../perception/WROLineArray.h"    // Brings in `WROLineArrayClass` and the `LineArray` singleton —
                              // the WRO 2026 8-channel reflectance backend that replaces the
                              // vendor `MatrixLineTracer`. `LineFollower` and `Intersection`
@@ -374,6 +379,39 @@ public:
      */
     LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode mode);
 
+    /**
+     * @brief Arm the anticipatory approach ramp for this enable session — ramp cruise DOWN to
+     *        the kinetic floor over a predicted sensor-crossing distance.
+     *
+     * Used by `PathTracker` on a terminating `LINE_FOLLOW_INTERSECTION` hop so the leading
+     * line-sensor board is already slow by the time it physically detects the target marker,
+     * instead of cruising at full speed until detection and then braking abruptly. The
+     * predicted distance is the pivot-trimmed edge length minus the direction-aware
+     * sensor-to-axle offset (resolved by the caller — this method does NO offset math).
+     *
+     * On apply (`_applyEnableBuilder`) the owner resolves an `ApproachSchedule` via
+     * `resolveApproachSchedule(...)` using `Config::LINE_APPROACH_MARGIN_CM /
+     * _MAX_MARGIN_CM`, `Config::PWM_MOVING_MIN` as the arrival floor, and the shared
+     * `Config::TSHAPE_*` slope/bounds; `update()` then commands
+     * `approachSpeedAt(schedule, traveled).pwmMag` (sign-corrected) as this tick's cruise once
+     * the schedule is past its `CRUISE` phase — during `CRUISE` the soft-start ramp-up
+     * (`.tShape()` off→on entry) keeps ownership of cruise, so the two never fight.
+     * Physical detection stays the authoritative stop; the ramp is anticipatory only.
+     *
+     * @param predictedCm  Predicted distance (cm) the leading board still has to travel before
+     *                     it crosses the target line. Already sensor-frame (offset pre-applied).
+     * @return             `*this` for fluent chaining.
+     * @note Implies `setEnabled(true)` — has no effect on a `setEnabled(false)` transition
+     *       (mirrors `setDistanceTarget(...)`).
+     * @note Suppressed (schedule left disarmed, session runs today's flat path) when
+     *       `Config::LINE_APPROACH_RAMP_ENABLED == false` OR the resolved schedule degrades to
+     *       `active == false` (short hop — see the short-hop known limit in the plan).
+     * @note A `setEnabled(true)` apply WITHOUT this setter DISARMS any prior approach schedule,
+     *       so the `LINE_OVERSHOOT` re-arm clears it — no stale `FLOOR_HOLD`/`OVERRUN` leaks
+     *       forward. Encoder counters are sampled at apply time (like `setDistanceTarget`).
+     */
+    LineFollowerEnableBuilder& setApproachTarget(float predictedCm);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
@@ -396,6 +434,8 @@ private:
     bool                _brakeOnGateOverride      = true;   ///< Pending brake-on-gate flag; only honored when override flag set. Default true matches owner default.
     bool                _hasLineFollowOffsetOverride = false; ///< True iff `_lineFollowOffsetOverride` is meaningful.
     float               _lineFollowOffsetOverride    = 0.0f;  ///< Pending signed lateral-offset bias; only honored when override flag set. See issue #156.
+    bool                _hasApproachTarget        = false;  ///< True iff `_approachPredictedCm` should arm the approach ramp.
+    float               _approachPredictedCm      = 0.0f;   ///< Pending predicted sensor-crossing distance (cm); only honored when flag set AND enabling.
     bool                _executed            = false;  ///< Guards against repeated apply.
 };
 
@@ -568,6 +608,25 @@ public:
      *       Serial-side tuning visibility without contending with the OLED ring.
      */
     bool isPidFrozen() const;
+
+    /**
+     * @brief Phase of the most recent anticipatory approach-ramp evaluation.
+     *
+     * When an approach ramp is armed (via `LineFollowerEnableBuilder::setApproachTarget(...)`),
+     * every `update()` tick evaluates `approachSpeedAt(...)` and records its `ApproachPhase`
+     * here. `PathTracker` polls this for `== ApproachPhase::OVERRUN` — the signal that the
+     * chassis has crawled past `predicted + Config::LINE_APPROACH_MAX_MARGIN_CM` without the
+     * physical line ever being detected, so PathTracker raises its `LINE_NOT_FOUND` fault
+     * rather than crawling forever.
+     *
+     * @return The phase produced by the last armed `update()` tick, or `ApproachPhase::CRUISE`
+     *         (the sentinel) whenever no approach ramp is armed — cleared to `CRUISE` on
+     *         `begin()`, on any disable, and whenever a `setEnabled(true)` apply disarms the
+     *         schedule (no `setApproachTarget`) so a stale `OVERRUN`/`FLOOR_HOLD` never leaks
+     *         into the next hop.
+     * @note Read-only; the single pinned query name (there is no `isApproachOverrun` alias).
+     */
+    ApproachPhase approachPhase() const;
 
     /**
      * @brief Most recent weighted error sample stored by the controller.
@@ -781,6 +840,15 @@ public:
      *                            only when `hasLineFollowOffsetOverride`. Applied to the P term
      *                            on the online, non-junction P+D tick — `_lastErr` stays the raw
      *                            centroid. See issue #156.
+     * @param hasApproachTarget   `true` if `approachPredictedCm` should arm the anticipatory
+     *                            approach ramp. When `false` on an enable transition, any prior
+     *                            approach schedule is DISARMED (the `LINE_OVERSHOOT` re-arm
+     *                            path), so no stale ramp phase leaks forward.
+     * @param approachPredictedCm Predicted sensor-crossing distance (cm); honored only when
+     *                            `hasApproachTarget` is true, `targetEnabled == true`,
+     *                            `Config::LINE_APPROACH_RAMP_ENABLED`, and the resolved schedule
+     *                            is non-degenerate (`active == true`). Encoder baseline is
+     *                            captured here. See `LineFollowerEnableBuilder::setApproachTarget`.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
@@ -798,7 +866,9 @@ public:
                              bool                hasBrakeOnGateOverride,
                              bool                brakeOnGate,
                              bool                hasLineFollowOffsetOverride,
-                             float               lineFollowOffset);
+                             float               lineFollowOffset,
+                             bool                hasApproachTarget,
+                             float               approachPredictedCm);
 
 private:
     // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
@@ -851,6 +921,19 @@ private:
     // trapezoidal profile".
     bool    _useTShapeRampDown   = false;    ///< Set when ramp-down should apply this distance run.
     int16_t _tShapeRampDownStart = 0;        ///< Cruise PWM captured at gate-arm time.
+
+    // Anticipatory approach-ramp state (`.setApproachTarget(cm)` on the enable builder, used by
+    // PathTracker on terminating LINE_FOLLOW_INTERSECTION hops). When `_approachActive`, `update()`
+    // computes traveled cm from the encoder baseline below, evaluates `approachSpeedAt()` on the
+    // resolved schedule, and uses its magnitude as this tick's cruise (overriding the preset and
+    // taking precedence over the `_useTShape*` ramps). Runs ALONGSIDE `_useTShapeRampDown` but the
+    // two are never both meaningfully active on one hop. See the 2026-07-17 line-approach-ramp plan.
+    bool             _approachActive    = false;                    ///< Approach ramp armed for this session.
+    ApproachSchedule _approachSchedule{};                           ///< Resolved schedule; valid only when `_approachActive`.
+    int32_t          _approachStartEncL = 0;                        ///< Left encoder reading at approach arm.
+    int32_t          _approachStartEncR = 0;                        ///< Right encoder reading at approach arm.
+    ApproachPhase    _approachPhase     = ApproachPhase::CRUISE;    ///< Phase of the last `approachSpeedAt` eval; CRUISE sentinel when unarmed. Read by `approachPhase()`.
+    int16_t          _approachLastMag   = 0;                        ///< Last commanded approach magnitude (unsigned) — seeds the LINE_OVERSHOOT ramp-down (AC3).
 
     // Distance-target gate state (`.setDistanceTarget(cm)` on the enable builder, used by
     // PathTracker's PROJECTION_FOLLOW state). When armed, `update()` evaluates the average

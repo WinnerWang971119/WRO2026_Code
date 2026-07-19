@@ -325,7 +325,7 @@ static void test_breakaway_handoff_latches_static_to_kinetic_floor()
     turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.4f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
-    // Second sub-threshold tick. Post-ADR-071 the yaw comes from the external gyro at whole-degree
+    // Second sub-threshold tick. Post-ADR-074 the yaw comes from the external gyro at whole-degree
     // resolution, so a sub-1 deg heading reads back as 0 deg — the pre-migration 0.9x fraction now
     // rounds up to the 1 deg breakaway threshold, so keep this step clearly under 0.5 deg.
     turn_harness::tickAtYaw(startYaw + Config::TURN_BREAKAWAY_MOTION_DEG * 0.4f);

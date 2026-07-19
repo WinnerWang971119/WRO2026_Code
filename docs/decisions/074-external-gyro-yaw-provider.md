@@ -1,4 +1,4 @@
-# ADR-071: External gyro yaw provider — two independent frame-crossing signs
+# ADR-074: External gyro yaw provider — two independent frame-crossing signs
 
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 2 hardening)
