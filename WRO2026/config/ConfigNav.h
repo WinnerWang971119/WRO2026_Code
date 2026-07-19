@@ -261,10 +261,9 @@ namespace Config
     /**
      * @brief Positive scale calibration applied to the gyro's raw decoded heading.
      *
-     * @warning **UNVERIFIED — pending gyro_calib bench (AC-11).** `0.997f` is the mentor's value
-     *          measured on HIS board, carried over as a starting placeholder — it has not been
-     *          measured on this chassis's gyro. Replace it with the value the
-     *          `inoTest/gyro_calib/` sketch Serial-prints once hardware is in hand (AC-10/AC-11).
+     * @note Measured on this chassis's gyro via the `inoTest/gyro_calib/` SCALE phase (2026-07),
+     *       replacing the mentor's `0.997f` placeholder. Re-run that sketch and re-paste if the
+     *       gyro board is swapped.
      * @note Deliberately carries NO value-pinning tripwire (unlike a tuned drive constant): this
      *       constant is *meant* to be overwritten by the calibration output, not defended once
      *       set to a specific number.
@@ -273,7 +272,7 @@ namespace Config
      * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource`.
      */
 #ifndef GYRO_SCALE_DEFAULT
-#define GYRO_SCALE_DEFAULT 0.997f
+#define GYRO_SCALE_DEFAULT 0.9945f
 #endif
     constexpr float GYRO_SCALE = GYRO_SCALE_DEFAULT;
 
@@ -286,10 +285,9 @@ namespace Config
      * reverse all gyro-sourced heading math, the same one-place rule `IMU_YAW_SIGN` documents
      * above.
      *
-     * @warning **UNVERIFIED — pending gyro_calib bench (AC-11).** The placeholder `-1.0f` is a
-     *          coin-flip: the mentor's block code carries no sign, so his handedness cannot be
-     *          read off it. Replace it with the value the `inoTest/gyro_calib/` sketch
-     *          Serial-prints once hardware is in hand (AC-10/AC-11).
+     * @note Confirmed `-1.0f` on this chassis's gyro via the `inoTest/gyro_calib/` SIGN phase
+     *       (2026-07): the mentor's block code carries no sign, so handedness could only be read
+     *       off the bench. Re-run that sketch and re-paste if the gyro board is swapped.
      * @note A `static_assert` in `ConfigChecks.h` enforces the value is exactly `+1.0f` or
      *       `-1.0f` — mirrors the `IMU_YAW_SIGN` structural assert above.
      * @note Consumer: `GyroDecodePolicy.h::decodeGyroYawDeg`, via `YawSource` only.
