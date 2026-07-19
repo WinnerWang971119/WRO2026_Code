@@ -44,6 +44,11 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "manipDirectTest", &TasksClass::manipDirectTest },
     { "beltTest", &TasksClass::beltTest },
     { "readMosaic", &TasksClass::readMosaic },
+    { "rectangleShovel", &TasksClass::rectangleShovel },
+    { "triangleShovel", &TasksClass::triangleShovel },
+    { "pot", &TasksClass::pot },
+    { "mosaic", &TasksClass::mosaic },
+    { "debries", &TasksClass::debries },
     //Add new tasks here
 };
 
@@ -745,8 +750,49 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
     return true;
 }
 
+
+// =============================================================================
+// Competition tasks
+// Very important: Keep task and task task specific. 
+// Do not place every task in a single task. This will make the code hard to read and maintain.
+// =============================================================================
+
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("CY3").setArrivalDirection(Direction::FRONT);
     return _visionRead();
+}
+
+bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)
+{
+    return true;
+}
+
+bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
+{
+    return true;
+}
+
+bool TasksClass::pot(const TaskArgs& /*args*/)
+{
+    return true;
+}
+
+bool TasksClass::mosaic(const TaskArgs& /*args*/)
+{
+    return true;
+}
+
+bool TasksClass::debries(const TaskArgs& /*args*/)
+{
+    return true;
+}
+
+// =============================================================================
+// Private helpers for competition tasks
+// =============================================================================
+
+bool TasksClass::_mosaicAlgo(const TaskArgs& args)
+{
+    return true; //Maybe need to return a enum or num?
 }

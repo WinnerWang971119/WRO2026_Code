@@ -303,6 +303,42 @@ private:
     bool readMosaic(const TaskArgs& args);
 
     /**
+     * @brief Get and put the rectangle shovel
+     * @param args  Ignored.
+     * @return true when finish. 
+     */
+    bool rectangleShovel(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the triangle shovel
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool triangleShovel(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the pot
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool pot(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the mosiac
+     * @param args  Ignored.
+     * @return true when finish.
+     * @note Need the helper _mosiacAlgo to get the mosiac fastest
+     */
+    bool mosaic(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the debries
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool debries(const TaskArgs& args);
+
+    /**
      * @brief Stationary cooperative delay helper for task bodies.
      *
      * @param ms    Timeout in milliseconds.
@@ -346,6 +382,14 @@ private:
      * @return ``true`` once the belt reports done; ``false`` on timeout.
      */
     bool _waitForBelt(uint32_t timeoutMs, const char* label);
+
+    /**
+     * @brief Get the mosaic fastest
+     * @param args  Ignored.
+     * @return true when finish.
+     * @note This is a helper function for the mosaic task.
+     */
+    bool _mosaicAlgo(const TaskArgs& args);
 
     bool _inTask  = false;
     bool _aborted = false;
