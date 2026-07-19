@@ -1646,3 +1646,151 @@ def test_tc19_player_geometry_present_no_roll_renders_grid_outline(tmp_path):
     assert "_tInAnyBoxSpan" in html
     assert "windows.box" in html
     assert "box: _tInAnyBoxSpan(t, windows.box)" in html
+
+
+# ---------------------------------------------------------------------------
+# Axle->body offset plan (T8) — axle_offset embed + JS draw/resolution pins
+# (issue #165, AC1-AC4, AC8)
+# ---------------------------------------------------------------------------
+
+
+def test_axle_tc6_objects_script_embeds_axle_offset_verbatim(tmp_path):
+    """TC6: a layout carrying ``robot.axle_offset`` embeds it verbatim (AC8).
+
+    Key assertion: mirrors P-TC6's embed-and-round-trip pattern — a layout
+    built on the shared :func:`_valid_layout_dict` fixture plus a
+    ``robot.axle_offset = {forward_cm, lateral_cm}`` block renders with the
+    offset present, byte-for-byte, inside the emitted ``const OBJECTS``
+    assignment (both keys, unchanged values) — proving the T1 schema change
+    reaches the page with zero ``player_html.py`` change, as the plan's
+    Decisions section documents (``_objects_script`` embeds the raw dict via
+    ``json.dumps`` after ``layout.validate``).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    layout_dict = _valid_layout_dict()
+    layout_dict["robot"]["axle_offset"] = {"forward_cm": 8.0, "lateral_cm": -1.5}
+
+    out_path = tmp_path / "axle_offset.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    embedded_objects = _extract_embedded_objects(html)
+    assert embedded_objects == layout_dict
+    assert embedded_objects["robot"]["axle_offset"] == {
+        "forward_cm": 8.0,
+        "lateral_cm": -1.5,
+    }
+
+
+def test_axle_tc7_no_objects_and_offset_free_layout_leave_meta_unchanged(tmp_path):
+    """TC7: no-layout and offset-free-layout renders leave PLAYER_META/TC9 green.
+
+    Key assertion (NOT a full-page byte assertion — the plan's AC8 is explicit
+    that the PAGE bytes DO change because ``renderer.js``/``vision.js``/
+    ``cargo.js`` are now different inlined text): ``render(objects=None)``
+    still emits no ``const OBJECTS`` at all (mirrors the pre-existing P-TC5
+    contract, re-asserted here so a future axle_offset regression can't
+    quietly widen when OBJECTS is emitted), and a render carrying an
+    ``axle_offset``-FREE layout still leaves ``PLAYER_META`` equal to the
+    exact TC9 literal (:data:`_EXPECTED_TC9_META`) — both legs prove the
+    axle-offset feature is additive and never perturbs the frozen
+    PLAYER_META/TC9/TC-META contract.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+
+    # Leg 1: no layout at all — no const OBJECTS, TC9 meta unchanged.
+    no_objects_path = tmp_path / "axle_tc7_no_objects.html"
+    render(track_dict, no_objects_path)
+    no_objects_html = no_objects_path.read_text(encoding="utf-8")
+    assert "const OBJECTS" not in no_objects_html
+    assert _extract_embedded_objects(no_objects_html) is None
+    assert _extract_player_meta(no_objects_html) == _EXPECTED_TC9_META
+
+    # Leg 2: a layout present but carrying no axle_offset — OBJECTS embeds,
+    # PLAYER_META is STILL the unchanged TC9 literal.
+    offset_free_layout = _valid_layout_dict()
+    assert "axle_offset" not in offset_free_layout["robot"]
+    offset_free_path = tmp_path / "axle_tc7_offset_free.html"
+    render(track_dict, offset_free_path, objects=offset_free_layout)
+    offset_free_html = offset_free_path.read_text(encoding="utf-8")
+    assert _extract_embedded_objects(offset_free_html) == offset_free_layout
+    assert _extract_player_meta(offset_free_html) == _EXPECTED_TC9_META
+
+
+def test_axle_tc8_draw_sites_reference_axle_to_body_pose_helper():
+    """TC8: source-text pin — every robot-local DRAW site calls axleToBodyPose(.
+
+    Key assertion (tamper-evidence for AC1-AC3, no JS runner exists): the
+    on-disk ``renderer.js`` (body marker + hit-test), ``vision.js`` (cone +
+    the ``k/12`` mosaic-visibility HUD), and ``cargo.js`` (grab/box/drop-zone
+    overlays incl. deployed zones) each reference ``axleToBodyPose(`` at their
+    draw sites — proving the four draw sites were actually wired to the
+    shared ``CTPS_OBJ.axleToBodyPose`` helper (T2) rather than left on the raw
+    axle pose. A future edit that quietly reverts one draw site back to the
+    axle pose fails this test immediately.
+    """
+    renderer_js = (PLAYER_JS_PATH.parent / "renderer.js").read_text(encoding="utf-8")
+    vision_js = (PLAYER_JS_PATH.parent / "vision.js").read_text(encoding="utf-8")
+    cargo_js = (PLAYER_JS_PATH.parent / "cargo.js").read_text(encoding="utf-8")
+
+    assert "axleToBodyPose(" in renderer_js
+    assert "axleToBodyPose(" in vision_js
+    assert "axleToBodyPose(" in cargo_js
+
+
+#: The four cargo EVENT-RESOLUTION HELPERS that receive the already-transformed
+#: body pose as a parameter — they must NOT call axleToBodyPose themselves (the
+#: transform is single-sourced once at the cargo_resolve entry, #165 follow-up).
+_CARGO_RESOLUTION_HELPERS = (
+    "_doGrab",
+    "_doDump",
+    "_doBoxClose",
+    "_doBoxOpen",
+)
+
+
+def test_axle_tc9_cargo_resolution_uses_the_body_pose_single_sourced():
+    """TC9: source-text pin — cargo EVENT RESOLUTION resolves on the BODY pose.
+
+    The gripper is body-mounted, so a grab must resolve exactly where the zone
+    is DRAWN (the body pose, T5). This reverses the original plan's "resolution
+    stays on the axle" decision: ``cargo_resolve`` now wraps the per-event pose
+    in ``axleToBodyPose(...)`` before dispatching, so the drawn and resolved
+    zones can never disagree by the offset vector.
+
+    Key assertions (text heuristic, robust to formatting):
+
+    * ``cargo_resolve``'s isolated body references ``axleToBodyPose(`` — the
+      transform is applied ONCE at the resolution entry.
+    * Each of ``_doGrab`` / ``_doDump`` / ``_doBoxClose`` / ``_doBoxOpen`` does
+      NOT reference ``axleToBodyPose`` — they operate on the body pose passed in,
+      so the transform stays single-sourced (never re-derived per helper).
+
+    Offset-free traces are unaffected: ``axleToBodyPose`` returns the pose
+    unchanged when there is no ``axle_offset``, so every cargo golden (none carry
+    an offset) resolves byte-identically.
+    """
+    cargo_js = (PLAYER_JS_PATH.parent / "cargo.js").read_text(encoding="utf-8")
+
+    resolve_match = re.search(
+        r"function\s+cargo_resolve\s*\([\s\S]*?\n    \}", cargo_js
+    )
+    assert resolve_match is not None, "could not isolate cargo_resolve's body in cargo.js"
+    assert "axleToBodyPose(" in resolve_match.group(0), (
+        "cargo_resolve must resolve against the body pose (axleToBodyPose) so the "
+        "drawn and resolved zones agree"
+    )
+
+    for name in _CARGO_RESOLUTION_HELPERS:
+        match = re.search(
+            r"function\s+" + re.escape(name) + r"\s*\([\s\S]*?\n    \}", cargo_js
+        )
+        assert match is not None, f"could not isolate {name}'s function body in cargo.js"
+        assert "axleToBodyPose" not in match.group(0), (
+            f"{name} must operate on the body pose passed in, not re-derive it — "
+            "the transform is single-sourced at cargo_resolve"
+        )

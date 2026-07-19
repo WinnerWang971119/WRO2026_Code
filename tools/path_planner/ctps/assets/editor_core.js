@@ -52,6 +52,8 @@
     var ROBOT_ARROW_TIP = 0.28;  // heading-arrow tip x (frac of half-side)
     var ROBOT_ARROW_BACK = 0.18; // heading-arrow base setback (frac of half-side)
     var ROBOT_ARROW_HALF = 0.2;  // heading-arrow base half-width (frac of half-side)
+    var AXLE_DOT_R = 4;          // robot-axle-centre marker radius (px)
+    var AXLE_LABEL_DX = 7;       // axle-centre label x-offset from the dot (px)
     var NODE_DOT_R = 4;          // field-node dot radius (px)
     var NODE_LABEL_DX = 7;       // field-node label x-offset from its dot (px)
     var NODE_HALO_W = 3;         // dark paint-order halo behind a node label (px)
@@ -103,6 +105,7 @@
         _colors = {
             text: _cssVar("--ctps-text"),
             accent: _cssVar("--ctps-accent"),
+            axle: _cssVar("--ctps-axle"),
             muted: _cssVar("--ctps-muted"),
             borderStrong: _cssVar("--ctps-border-strong"),
             bg: _cssVar("--ctps-bg"),
@@ -566,7 +569,40 @@
         ctx.restore();
     }
 
-    /** Draw the Robot-tab backdrop: robot box + zones overlay + labels + vision cone. */
+    /**
+     * Draw the robot AXLE CENTRE as a red dot + label on the Robot tab. The
+     * editor draws the body box + zones + cone at the body-centre origin (0,0)
+     * -- everything the operator authors is body-centre-relative, exactly as the
+     * player draws them at `axleToBodyPose` (the body pose). The rotation axle --
+     * the point that sits on a graph node and that the robot pivots about -- is
+     * offset from the body centre by the NEGATED `axle_offset`: the player uses
+     * `body = axle + Rot(h)*offset`, so `axle = body - Rot(h)*offset`, and the
+     * editor pose is identity (h = 0), leaving the axle at local
+     * `(-forward_cm, -lateral_cm)`. With no offset the axle coincides with the
+     * body centre (dot at the origin). Reads the offset defensively -- a
+     * missing/NaN component is 0 -- so it never throws on a partial state.
+     */
+    function drawAxleCenter(ctx, view) {
+        var off = E.state.axleOffset || {};
+        var fwd = (typeof off.forward_cm === "number" && isFinite(off.forward_cm))
+            ? off.forward_cm : 0;
+        var lat = (typeof off.lateral_cm === "number" && isFinite(off.lateral_cm))
+            ? off.lateral_cm : 0;
+        var C = _theColors();
+        var p = OBJ.project(view, -fwd, -lat);
+        ctx.save();
+        ctx.fillStyle = C.axle;
+        ctx.beginPath();
+        ctx.arc(p.px, p.py, AXLE_DOT_R, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.font = LABEL_FONT;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText("robot axle center", p.px + AXLE_LABEL_DX, p.py);
+        ctx.restore();
+    }
+
+    /** Draw the Robot-tab backdrop: robot box + zones overlay + labels + vision cone + axle centre. */
     function drawRobotBackdrop(ctx, view) {
         drawRobotBox(ctx, view);
         var rob = E.state.robot;
@@ -576,6 +612,7 @@
             _drawZoneLabels(ctx, view, rob);
         }
         drawRobotVisionCone(ctx, view);
+        drawAxleCenter(ctx, view);
     }
 
     /**

@@ -57,6 +57,7 @@
 #include "Tasks.h"
 #include "src/perception/Vision.h"
 #include "src/perception/WROLineArray.h"
+#include "src/nav/YawSource.h"
 
 namespace
 {
@@ -175,8 +176,11 @@ static bool lineArrayNeededThisTick()
  * reorder `_dispatchNext()` ahead of the sub-FSM updates or this guarantee
  * breaks (host-tested).
  *
- * `Drive.update()` (between LineArray and the follower) and everything from
- * `Localization.update()` onward stay UNCONDITIONAL.
+ * `YawSource.update()` runs FIRST of all and UNCONDITIONALLY (issue #163): one
+ * gated gyro read refreshes the tick-scoped yaw cache so every later `readYawDeg`
+ * consumer (Drive, Localization) serves the same fresh value from a single device
+ * transaction. `Drive.update()` (between LineArray and the follower) and
+ * everything from `Localization.update()` onward stay UNCONDITIONAL.
  *
  * Reopen drain: the gate's closed->open edge arms a state-keyed drain that
  * read-and-clears any departure-junction latch every open tick (after
@@ -190,7 +194,7 @@ static bool lineArrayNeededThisTick()
  * whose sensor sits past the node never sees the marker) so the drain still ends
  * promptly (Error Handling -> phantom junction on gate reopen).
  *
- * Order: [LineArray] -> Drive -> [LineFollower -> Intersection] -> Manipulator
+ * Order: YawSource -> [LineArray] -> Drive -> [LineFollower -> Intersection] -> Manipulator
  *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace
  *     (bracketed steps gated on `lineNeeded`).
  */
@@ -201,8 +205,15 @@ void cooperativeTick()
     // AND the SEGMENT_COUNT constant) so the loop-time benchmark stays
     // representative (issue #123).
 
+    // YawSource.update() refreshes the tick-scoped gyro yaw cache FIRST, with one
+    // gated device read, so every consumer that calls readYawDeg later in this same
+    // tick (Drive, Localization) serves the freshly-cached value from a single
+    // device transaction instead of each triggering its own inline re-read (AC-5).
+    YawSource.update();
+
     // Line-array gate (issue #164). Resolve the predicate ONCE so the three
-    // gated consumer updates below cannot disagree within a tick.
+    // gated consumer updates below cannot disagree within a tick. LineArray.update()
+    // itself now runs inside the `if (lineNeeded)` block below.
     const bool lineNeeded = lineArrayNeededThisTick();
 
     // Reopen-drain + gate observable state (see the doxygen block above).
@@ -351,6 +362,7 @@ void setup()
     const bool battOk = (battVoltage >= Config::BATT_MIN_VOLTAGE_V);
 
     const bool arrayOk = LineArray.begin();
+    const bool yawOk   = YawSource.begin();    // MUST run before Drive/Localization — both read yaw through YawSource
     const bool driveOk = Drive.begin();
     const bool lineOk  = LineFollower.begin();
     const bool intOk   = Intersection.begin();
@@ -369,7 +381,7 @@ void setup()
     Tasks.setTickCallback(cooperativeTick);
     Vision.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(battOk && arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
+    _setupFailed = !(battOk && arrayOk && yawOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
 
     if (_setupFailed)
     {
@@ -384,6 +396,7 @@ void setup()
             EventTrace.pushEvent("BATT LOW");
         }
         if (!arrayOk)  { Serial.println(F("  - LineArray"));    EventTrace.pushEvent("FAIL ARR"); }
+        if (!yawOk)    { Serial.println(F("  - YawSource"));    EventTrace.pushEvent("FAIL YAW"); }
         if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
         if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
         if (!intOk)    { Serial.println(F("  - Intersection")); EventTrace.pushEvent("FAIL INT"); }

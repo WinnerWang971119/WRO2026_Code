@@ -1085,6 +1085,7 @@
         _bindMosaicFields();
         _bindMosaicMode();
         _bindVisionFields();
+        _bindAxleOffsetFields();
         refreshMosaicPanel();
     }
 
@@ -1103,6 +1104,7 @@
         _renderMosaicCounts();
         _updateCountsTotal();
         _reflectVisionFields();
+        _reflectAxleOffsetFields();
     }
 
     // ----- Robot tab: vision-cone fields (data-mosaic-vision) ----------------
@@ -1210,6 +1212,63 @@
         var unbounded = document.querySelector("[data-mosaic-vision-unbounded]");
         if (unbounded) {
             unbounded.checked = isUnbounded;
+        }
+    }
+
+    // ----- Robot tab: axle-offset fields (data-axle-offset) -----------------
+    // The axle->body-centre offset (issue #165) writes straight onto a
+    // top-level `E.state.axleOffset`, mirroring how the vision cone binds to
+    // `E.state.vision`. editor_io.js round-trips that same state: `_axleOffsetDict`
+    // emits it on Save, `_parseAxleOffset` reads it on Load. Both components 0 is
+    // equivalent to "no offset" (Data Model: absent == {0,0}), so a both-zero
+    // edit collapses `E.state.axleOffset` to null and Save omits the block.
+
+    /** One `data-axle-offset` input changed: write `E.state.axleOffset[key]`. */
+    function onAxleOffsetFieldChange(ev) {
+        var el = ev.target;
+        var key = el.getAttribute("data-axle-offset");
+        if (key !== "forward_cm" && key !== "lateral_cm") {
+            return;
+        }
+        var offset = E.state.axleOffset || { forward_cm: 0, lateral_cm: 0 };
+        offset[key] = _num(el.value, offset[key] || 0);
+        // Both zero == no offset: collapse so Save omits the block rather than
+        // writing {0,0} (matches editor_io.js's absent-clears-offset semantics).
+        E.state.axleOffset =
+            (offset.forward_cm === 0 && offset.lateral_cm === 0) ? null : offset;
+        // Repaint (not resize) -- the offset doesn't change the Robot-tab fit, it
+        // just moves the red axle-centre marker, so a plain redraw avoids a view
+        // jump on every keystroke.
+        if (E.redraw) {
+            E.redraw();
+        }
+        if (E.refreshSaveState) {
+            E.refreshSaveState();
+        }
+    }
+
+    /** Bind the axle-offset forward/lateral inputs. */
+    function _bindAxleOffsetFields() {
+        var els = document.querySelectorAll("[data-axle-offset]");
+        for (var i = 0; i < els.length; i++) {
+            els[i].addEventListener("input", onAxleOffsetFieldChange);
+            els[i].addEventListener("change", onAxleOffsetFieldChange);
+        }
+    }
+
+    /**
+     * Reflect `E.state.axleOffset` onto the `[data-axle-offset]` inputs. A null
+     * offset (no offset) leaves the inputs blank -- a blank field reads back as 0
+     * on the next edit, so "no offset" and "0 offset" stay indistinguishable.
+     */
+    function _reflectAxleOffsetFields() {
+        var offset = E.state.axleOffset;
+        var els = document.querySelectorAll("[data-axle-offset]");
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var key = el.getAttribute("data-axle-offset");
+            el.value = (offset && offset[key] !== undefined && offset[key] !== null)
+                ? _fmt(offset[key]) : "";
         }
     }
 

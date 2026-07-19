@@ -498,7 +498,17 @@
                 if (!ev || ev.type !== "manip") {
                     continue;
                 }
-                var pose = poseAt ? poseAt(ev.t) : { x: 0, y: 0, h: 0 };
+                var axlePose = poseAt ? poseAt(ev.t) : { x: 0, y: 0, h: 0 };
+                // Resolve against the BODY pose -- the exact pose the grab/box
+                // zones are DRAWN at (axleToBodyPose, the draw sites) -- so a tile
+                // inside the drawn zone resolves and one outside does not; the
+                // drawn and resolved zones can never disagree. The gripper is
+                // body-mounted, so grabbing is body-relative; the axle is only the
+                // node/pivot anchor. A zero/absent axle_offset makes axleToBodyPose
+                // a no-op, so every offset-free trace resolves byte-identically.
+                var pose = (OBJ && OBJ.axleToBodyPose)
+                    ? OBJ.axleToBodyPose(axlePose, robotCfg)
+                    : axlePose;
                 var err = _applyManip(state, ev.method, ev.arg, pose, objects, robotCfg);
                 if (err) {
                     if (!silent) {
@@ -593,7 +603,9 @@
         if (!robotCfg) {
             return;
         }
-        var pose = CTPS.engine.poseAt(state.t);
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(CTPS.engine.poseAt(state.t), state.robotCfg)
+            : CTPS.engine.poseAt(state.t);
         OBJ.drawZones(ctx, view, pose, robotCfg, OBJ.project);
     }
 
@@ -750,7 +762,9 @@
         if (!mask.grab && !mask.box && !mask.dump) {
             return;
         }
-        var pose = CTPS.engine.poseAt(state.t);
+        var pose = (OBJ && OBJ.axleToBodyPose)
+            ? OBJ.axleToBodyPose(CTPS.engine.poseAt(state.t), state.robotCfg)
+            : CTPS.engine.poseAt(state.t);
         OBJ.drawDeployedZones(ctx, view, pose, robotCfg, OBJ.project, mask);
     }
 

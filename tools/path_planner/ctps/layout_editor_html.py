@@ -299,6 +299,22 @@ _BODY_MARKUP: str = """\
                     Unbounded range
                 </label>
             </section>
+            <section id="ctps-editor-robot-axle"
+                     class="ctps-panel ctps-mosaic-cone-group" hidden>
+                <div class="ctps-mosaic-cone-title">Axle offset</div>
+                <div class="ctps-editor-field-row">
+                    <label class="ctps-editor-field">
+                        <span class="ctps-editor-field-label">Forward (cm)</span>
+                        <input type="number" step="0.1" id="ctps-editor-axle-forward"
+                               class="ctps-editor-input" data-axle-offset="forward_cm">
+                    </label>
+                    <label class="ctps-editor-field">
+                        <span class="ctps-editor-field-label">Lateral (cm)</span>
+                        <input type="number" step="0.1" id="ctps-editor-axle-lateral"
+                               class="ctps-editor-input" data-axle-offset="lateral_cm">
+                    </label>
+                </div>
+            </section>
             <section id="ctps-editor-mosaic-panel"
                      class="ctps-panel ctps-mosaic-tab" hidden>
                 <div class="ctps-panel-title">Mosaic</div>

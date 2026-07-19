@@ -122,6 +122,54 @@
         return { x: pose.x + lx * c - ly * s, y: pose.y + lx * s + ly * c };
     }
 
+    /**
+     * Read one offset component, defaulting to 0 when missing or not a
+     * finite number (defensive, like the rest of this file's readers).
+     */
+    function _finiteOr0(v) {
+        return (typeof v === "number" && isFinite(v)) ? v : 0;
+    }
+
+    /**
+     * Shift an axle pose to the body-centre pose using the layout's
+     * `robot.axle_offset` (robot-local `{forward_cm, lateral_cm}`; each
+     * defaults to 0 when the block or key is missing/not a finite number).
+     * When both components are 0, returns `pose` UNCHANGED — the SAME
+     * object, no allocation — so a no-offset render stays byte-identical to
+     * today. Otherwise returns a SHALLOW COPY of `pose` with `x`/`y` moved
+     * to the body centre and `h` (and any other keys) left untouched. The
+     * body centre reuses `_localToWorld` (Contracts: single-source the
+     * offset math, do not re-derive the rotation) with `local = (forward_cm,
+     * lateral_cm)`. Never throws: a null/malformed `pose` is returned
+     * unchanged, matching this file's defensive/non-fatal style (e.g.
+     * `drawZones`' `!robotCfg || !pose` no-op).
+     *
+     * @param pose the axle pose `{ x, y, h, ... }` (cm, cm, deg).
+     * @param robotCfg the layout `robot` section (reads `.axle_offset`).
+     * @return the body-centre pose (the SAME object when there is no offset).
+     */
+    function axleToBodyPose(pose, robotCfg) {
+        if (!pose) {
+            return pose;
+        }
+        var offset = robotCfg && robotCfg.axle_offset;
+        var fwd = offset ? _finiteOr0(offset.forward_cm) : 0;
+        var lat = offset ? _finiteOr0(offset.lateral_cm) : 0;
+        if (fwd === 0 && lat === 0) {
+            return pose;
+        }
+        var out = {};
+        for (var key in pose) {
+            if (Object.prototype.hasOwnProperty.call(pose, key)) {
+                out[key] = pose[key];
+            }
+        }
+        var w = _localToWorld(pose, fwd, lat);
+        out.x = w.x;
+        out.y = w.y;
+        return out;
+    }
+
     /** Begin an axis-aligned rectangle path (in the CURRENT ctx transform). */
     function _pathRect(ctx, x, y, w, h) {
         ctx.beginPath();
@@ -363,4 +411,5 @@
     window.CTPS_OBJ.drawZones = drawZones;
     window.CTPS_OBJ.drawDeployedZones = drawDeployedZones;
     window.CTPS_OBJ.localToWorld = _localToWorld;
+    window.CTPS_OBJ.axleToBodyPose = axleToBodyPose;
 })();

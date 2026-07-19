@@ -552,7 +552,10 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 #: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
 #: content must fail this test loudly rather than silently pass.
 _PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
-_RENDERER_JS_SHA256: str = "f41c95fd97bfe4104166323eedd0c00dfe6748e7a659f40a1ccd76949e2044e4"
+# Re-frozen after merging origin/main: the file now carries both the #165
+# axle->body render offset (_drawActors + hitTest anchor the robot marker to the
+# body pose via CTPS_OBJ.axleToBodyPose) and the reverse-pivot REAR arc render.
+_RENDERER_JS_SHA256: str = "c60ccbd95c1e1aeca953e776cb10e2918214041db74220dfab6d18dd0539fc51"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:

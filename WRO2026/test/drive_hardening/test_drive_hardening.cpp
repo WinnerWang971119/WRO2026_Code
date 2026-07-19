@@ -48,9 +48,10 @@
  *
  * TICK IDIOM: a sustained IMU-read failure is scripted via `mmL.mockResult =
  * MMLower::RESULT::ERROR` (mirrors `test_yaw_source.cpp`), then `Drive.update()` is called
- * repeatedly. `YawSource::readYawDeg`'s internal retry-once backoff calls `delay(2)` on every
- * failed read, which is what actually advances the mock clock tick-by-tick here — no manual
- * `mockAdvanceMillis()` is needed to reach `Config::TURN_IMU_STALL_TIMEOUT_MS`.
+ * repeatedly via `tickUntilFault()`. `YawSource::readYawDeg` now reads the external gyro with NO
+ * internal retry delay (the retired STM32 read path's `delay(IMU_READ_RETRY_DELAY_MS)` backoff is
+ * gone), so `tickUntilFault()` advances the mock clock itself (`mockAdvanceMillis()`) once per
+ * iteration to reach `Config::TURN_IMU_STALL_TIMEOUT_MS`.
  *
  * TC8 (#153, fabricated 0.0 yaw fallback) — `_execTurnDeg`, `_execTurnToYaw`, `getYaw()`, and
  * `holdYaw()` each read the current yaw via `YawSource.readYawDegOr(fallback)`; before the fix
@@ -104,12 +105,25 @@ void resetWorld()
     Drive.clearFault();
 }
 
+/// Mock-clock advance per `tickUntilFault()` iteration. The gyro read path has no internal
+/// `delay()` to move `g_mockMillis` on its own (unlike the retired STM32 read path's
+/// retry-once backoff), so this helper drives the clock explicitly. Small enough that
+/// `Config::TURN_IMU_STALL_TIMEOUT_MS` (500ms default) needs many iterations — well inside the
+/// `maxTicks` budgets callers pass — so a future retune of either constant doesn't false-fail.
+constexpr uint32_t kFaultWatchdogTickAdvanceMs = 10;
+
 /// @brief Tick `Drive.update()` until `Drive.hasFault()` latches or @p maxTicks is exhausted
 ///        (a bug that stops the watchdog from tripping fails loudly instead of hanging ctest).
+///
+/// Advances the mock clock by `kFaultWatchdogTickAdvanceMs` before each `Drive.update()` call so
+/// a persistent scripted IMU-read failure (`mmL.mockResult = MMLower::RESULT::ERROR`) actually
+/// accumulates elapsed time against `Config::TURN_IMU_STALL_TIMEOUT_MS` — the gyro read path has
+/// no internal retry `delay()` to do this on its own.
 void tickUntilFault(int maxTicks)
 {
     for (int i = 0; i < maxTicks && !Drive.hasFault(); ++i)
     {
+        mockAdvanceMillis(kFaultWatchdogTickAdvanceMs);
         Drive.update();
     }
 }
@@ -158,11 +172,12 @@ void tc7_drain_fault_early_out()
     // move-only and a stored local corrupts the queue, per the Drive builder RAII gotcha).
     Drive.turnDeg(90).async();
 
-    // Tick until the persistent-IMU-read-failure watchdog escalates to a hard fault. Each
-    // failed read costs one internal `delay(IMU_READ_RETRY_DELAY_MS)` retry inside
-    // `YawSource::readYawDeg`, so the mock clock advances ~2ms/tick; the watchdog trips once
-    // that accumulated time reaches `Config::TURN_IMU_STALL_TIMEOUT_MS` (500ms by default) —
-    // budget the tick cap generously so a future retune of either constant doesn't false-fail.
+    // Tick until the persistent-IMU-read-failure watchdog escalates to a hard fault.
+    // `tickUntilFault()` advances the mock clock by `kFaultWatchdogTickAdvanceMs` itself each
+    // iteration (the gyro read path has no internal retry `delay()` to do it for us); the
+    // watchdog trips once that accumulated time reaches `Config::TURN_IMU_STALL_TIMEOUT_MS`
+    // (500ms by default) — budget the tick cap generously so a future retune of either constant
+    // doesn't false-fail.
     tickUntilFault(2000);
 
     ASSERT_TRUE(Drive.hasFault());
