@@ -939,12 +939,17 @@
      * `TRACK.pivots[i]` span — overlays a transient planted-wheel PIN
      * (`--ctps-accent`, the marker's own colour token) plus a faint ARC GUIDE
      * (`--ctps-muted`): a circle through the box's current position, centred
-     * on the planted wheel, at the marker's own live turning radius. That
-     * radius needs no extra schema field — the dense arc keyframes already
-     * put `pose` exactly on the circle of radius R around the planted wheel,
-     * so `hypot(pose - center)` recovers it directly. Both tokens are already
-     * resolved by `_resolveColors()` — no new CSS token, no CSS-asset edit
-     * (ADR-053 carve-out). A missing/out-of-span/malformed pivot segment
+     * on the planted wheel, at the marker's own live turning radius. The pin
+     * centre is `seg.cx`/`seg.cy` (the pre-computed planted-wheel world centre)
+     * — read verbatim, never re-derived from `seg.wheel`/heading here — so a
+     * REAR pivot (#54 / ADR-073) needs NO player-side direction logic: the
+     * Python builder already flips `cx`/`cy` onto the post-flip (correct world /
+     * travel) side, and `seg.direction` / `seg.wheel` ride along as informational
+     * overlay metadata. That radius needs no extra schema field — the dense arc
+     * keyframes already put `pose` exactly on the circle of radius R around the
+     * planted wheel, so `hypot(pose - center)` recovers it directly. Both tokens
+     * are already resolved by `_resolveColors()` — no new CSS token, no CSS-asset
+     * edit (ADR-053 carve-out). A missing/out-of-span/malformed pivot segment
      * degrades to the plain box draw: the overlay is simply skipped, never
      * thrown (registry non-fatal contract).
      */

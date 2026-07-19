@@ -19,6 +19,7 @@
 #include "PathTrackerParityTrace.h"
 #include "../nav/PivotTrimPolicy.h"
 #include "../nav/ReturnToNodePolicy.h"
+#include "../nav/ReversePivotPolicy.h"
 #include "../nav/StopAtLinePolicy.h"
 #include "../util/WROMath.h"    // encDegToCm — the ADR-059 measured boundary-carry conversion
 
@@ -594,6 +595,7 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
         case Fault::WALL_NOT_SQUARE:      return "WSQ";
         case Fault::PIVOT_TRIM_UNDERFLOW: return "PTU";
         case Fault::LINE_LOST:            return "LLN";
+        case Fault::PIVOT_DIRECTION_MISMATCH: return "PDM";
     }
     return "??";
 }
@@ -1053,10 +1055,11 @@ void PathTrackerClass::_stepFsm()
                 // Dead-reckon with the axle offset of the board that LED this hop. A REAR
                 // hop tracked with the front board's offset lands off-node and feeds that
                 // error into the next dead-reckoned hop, so a reverse overshoot uses the
-                // rear board's own offset.
+                // rear board's own offset. Single-sourced through the shared policy
+                // (ADR-073, #54) so this LINE-overshoot budget cannot drift from the seek
+                // budget, the offline validator, or the sim.
                 const float overshootAxleOffsetCm =
-                    overshootReverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
-                                     : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+                    pivotOvershootBudgetCm(_resolvedDirection);
 
                 // ----------------------------------------------------------------
                 // ADR-036 — LINE-incoming pivot trim (per-turn compensation).
@@ -2076,24 +2079,98 @@ void PathTrackerClass::_onPlanNextHop()
         Config::BIDIRECTIONAL_AUTO_ENABLED,
         Config::LINE_BOARD_COUNT);
 
-    // ADR-036: pivots are FRONT-only in v1 (#54). The wheel + δ are derived for
-    // forward traversal, so force FRONT on any pivot-adjacent hop — the approach
-    // `u→v` (`_approachingPivot`) or the departure `v→w` (`_departingPivot`) —
-    // and never silently downgrade to a counter-rotation: the author chose a
-    // single-wheel pivot for a clearance a center turn may not have. Because
-    // FRONT is always available, the `reverseUnavailable(...)` guard below is
-    // inert for pivot hops (that is the intended "FRONT genuinely unavailable
-    // faults via the existing guard" backstop — no separate pivot-skip path).
+    // -----------------------------------------------------------------------
+    // Force-SAME: a pivot commits to the direction it APPROACHED in (issue #54,
+    // ADR-073, supersedes the v1 force-FRONT). A single-wheel pivot is a rigid
+    // 3-node maneuver, so its departure `v→w` MUST leave in the same direction
+    // its approach `u→v` arrived — otherwise δ and the (possibly flipped) wheel
+    // are wrong. This is the direct generalization of the old force-FRONT, which
+    // forced BOTH legs FRONT.
     //
-    // This force-FRONT is the single invariant the seek/LINE overshoot trims rely
-    // on: a pivot-adjacent hop is always FRONT, so the seek dispatch's δ-budget
-    // (`_dispatchEdgeAfterTurn`) and the validator's δ-budget both use the FRONT
-    // offset. #54 (REAR pivots) must add a REAR δ-budget on the seek + LINE
-    // overshoot paths BEFORE relaxing this — see the ADR-044 trigger.
-    if (_departingPivot.active || _approachingPivot.active)
+    // The APPROACH hop resolves its direction FREELY above (it may be REAR now),
+    // and we STAMP that resolved direction onto the latch so the departure can
+    // adopt it next hop. The DEPARTURE hop (`_departingPivot.active`) is FORCED
+    // to the stored approach direction. A binding higher-precedence override on
+    // the departure that truly contradicts the approach direction cannot be
+    // reconciled, so it hard-faults (`PIVOT_DIRECTION_MISMATCH`) rather than run
+    // a mis-trimmed maneuver — the validator rejects the statically-visible case
+    // offline; this is the runtime backstop. Ordinary AUTO never contradicts:
+    // force-SAME just pins the departure's AUTO rung to the approach direction.
+    // -----------------------------------------------------------------------
+    if (_departingPivot.active)
     {
-        resolved = Direction::FRONT;
+        // A binding direction override on the DEPARTURE edge `v→w`, derived with
+        // the SAME precedence resolveDirection uses so this "would a rung force a
+        // contradicting direction?" test matches what resolveDirection actually
+        // returns: per-edge `direction_override` (step 1) → pipeline direction
+        // default (step 2) → builder ARRIVAL override, last hop only (step 3) →
+        // builder ROUTE override, all hops (step 4). The short-circuit order below
+        // mirrors resolveDirection exactly; the AUTO heuristic (step 5) is NOT
+        // binding, so force-SAME is free to pin the AUTO rung to the approach
+        // direction.
+        //
+        // Arrival/route are included even though they are RUNTIME-only builder
+        // overrides: for a pivot `(u,v,w)` whose goal is `w`, the departure `v→w`
+        // is the last hop, so a `.setArrivalDirection(...)` (or a
+        // `.setRouteDirection(...)`) can genuinely resolve the departure to a
+        // direction that contradicts the approach. Unlike per-edge/pipeline
+        // overrides, builder overrides are invisible to the offline validator (NO
+        // static backstop), so this runtime check is the only guard against
+        // silently overwriting the operator's explicit arrival/route direction
+        // with a mis-trimmed pivot.
+        Direction bindingDir = Direction::AUTO;
+        if (edge.direction_override == Routes::DirectionMode::FORCE_FORWARD)
+        {
+            bindingDir = Direction::FRONT;
+        }
+        else if (edge.direction_override == Routes::DirectionMode::FORCE_REVERSE)
+        {
+            bindingDir = Direction::REAR;
+        }
+        else if (Routes::PIPELINE_CONFIG.direction == Routes::DirectionMode::FORCE_FORWARD)
+        {
+            bindingDir = Direction::FRONT;
+        }
+        else if (Routes::PIPELINE_CONFIG.direction == Routes::DirectionMode::FORCE_REVERSE)
+        {
+            bindingDir = Direction::REAR;
+        }
+        else if (isLastHop && builderArrival != Direction::AUTO)
+        {
+            bindingDir = builderArrival;
+        }
+        else if (builderRoute != Direction::AUTO)
+        {
+            bindingDir = builderRoute;
+        }
+
+        if (bindingDir != Direction::AUTO && bindingDir != _departingPivot.dir)
+        {
+            Serial.print(F("[PathTracker] ADR-073: pivot direction mismatch at v="));
+            Serial.print(cur);
+            Serial.print(F(" approach="));
+            Serial.print(static_cast<uint8_t>(_departingPivot.dir));
+            Serial.print(F(" departure-pin="));
+            Serial.println(static_cast<uint8_t>(bindingDir));
+            _enterFault(Fault::PIVOT_DIRECTION_MISMATCH, cur, nxt);
+            return;
+        }
+
+        // Force-SAME: the departure adopts the pivot's approach direction. The
+        // REAR +180 body flip is applied below when `bodyTarget` is computed, and
+        // the wheel flip when `resolvedTurnMode` is resolved.
+        resolved = _departingPivot.dir;
     }
+
+    // Stamp the resolved (final) direction of THIS hop onto BOTH latch copies.
+    // `_pendingPivot` was copied from `_approachingPivot` above BEFORE the
+    // direction was resolved, so writing only one would leave the departing carry
+    // at AUTO and force-SAME would misfire (spec latch-ordering note). When this
+    // hop is a pivot-approach, `resolved` is its approach direction; when it is
+    // also a chained pivot's departure, `resolved` is the forced value, so the
+    // next pivot inherits a consistent direction.
+    _approachingPivot.dir = resolved;
+    _pendingPivot.dir     = resolved;
 
     // ------------------------------------------------------------------------
     // Early reverse-availability guard.
@@ -2127,6 +2204,52 @@ void PathTrackerClass::_onPlanNextHop()
         return;
     }
 
+    // ------------------------------------------------------------------------
+    // Pivot-scoped REAR-seek serviceability (issue #54, ADR-073).
+    //
+    // A REAR stop-at-line SEEK on the APPROACH leg of a pivot re-anchors the
+    // axle short of the pivot node on the crossing line with the REAR board
+    // (ADR-027). On a <2-board chassis that rear board is absent, so
+    // `resolveStopAtLine`'s `boardOK` gate silently forces `seek = false` and
+    // the leg would classify BLIND_DEAD_RECKON — degrading to an open-loop
+    // dead-reckon reverse that fires the pivot off-target instead of
+    // hard-faulting (ADR-039: no silent seek degradation).
+    //
+    // This check MUST run HERE — pre-turn, keyed off the RESOLVED direction —
+    // rather than inside the STOP_AT_LINE_SEEK dispatch case: the board gate
+    // degrades the primitive to BLIND_DEAD_RECKON BEFORE it can ever classify
+    // as a seek, so a dispatch-case guard is unreachable (the T10 KNOWN GAP).
+    // "Seek requested" is asked directly of the SAME resolver with the board
+    // gate forced OPEN (`lineBoardCount = 2` => `boardOK` always true =>
+    // `seek == requested`), NOT read back from the post-degrade primitive.
+    //
+    // Scoped to `_approachingPivot.active` (this hop APPROACHES a pivot) and to
+    // a BLIND edge (the only edge type a seek dispatches on; a REAR LINE
+    // approach on <2 boards is already caught by the LINE guard above), so it
+    // does NOT widen the documented NON-pivot forced-REAR STOP_AT_LINE ->
+    // dead-reckon-reverse degrade — a legitimate open-loop reverse on 1 board.
+    // ------------------------------------------------------------------------
+    if (_approachingPivot.active && resolved == Direction::REAR
+        && Config::LINE_BOARD_COUNT < 2 && edge.type == Routes::EdgeType::BLIND)
+    {
+        const bool seekAutoRule =
+            Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(nxt);
+        const StopAtLineQuery seekRequestQuery{
+            _activeStopAtLine,
+            edge.stop_at_line_override,
+            _resolveBlindMode(edge),
+            Routes::PIPELINE_CONFIG.blind,
+            resolved,
+            (uint8_t) 2,    // force boardOK open: seek == requested (boardOK is >= 2)
+            seekAutoRule};
+        if (resolveStopAtLine(seekRequestQuery).seek)
+        {
+            _printReverseUnavailable(cur, nxt, F("pivot REAR-seek"));
+            _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
+            return;
+        }
+    }
+
     float bodyTarget = edge.heading_deg;
     if (resolved == Direction::REAR)
     {
@@ -2143,9 +2266,58 @@ void PathTrackerClass::_onPlanNextHop()
     // (0.5° by default), so the shared turn fires and the pivot wheel applies — no firmware
     // min-angle change is needed. The wheel and the δ come from the SAME resolved record, so
     // they cannot disagree.
+    // ADR-073 (#54): a REAR departure rolls the driven wheel BACKWARD, so the
+    // stored forward-sense wheel plants the opposite side — `resolvePivotWheel`
+    // flips PIVOT_LEFT<->PIVOT_RIGHT for a REAR pivot (FRONT/AUTO unchanged). The
+    // table is the wheel authority; the flip is a pure function of the resolved
+    // approach direction latched on the departing pivot.
     const Routes::TurnMode resolvedTurnMode =
-        _departingPivot.active ? _departingPivot.wheel : Routes::PIPELINE_CONFIG.turn;
+        _departingPivot.active
+            ? resolvePivotWheel(_departingPivot.wheel, _departingPivot.dir)
+            : Routes::PIPELINE_CONFIG.turn;
     const uint8_t turnModeByte = _turnModeToByte(resolvedTurnMode);
+
+    // ------------------------------------------------------------------------
+    // Commanded-delta sign tripwire (issue #54, ADR-073, TC16). The dispatched
+    // pivot wheel is the stored table's authority (`resolvePivotWheel` above),
+    // NEVER derived from the live delta — doing so reintroduces ADR-036
+    // Blocker-1. This only ASSERTS the table and the geometry agree: a CCW body
+    // turn (delta > 0) plants the LEFT wheel driving forward / the RIGHT wheel
+    // driving in reverse, and a CW turn (delta < 0) the opposite — so the wheel
+    // the delta sign implies (direction-corrected through the SAME policy) must
+    // equal the dispatched wheel. A gross disagreement means the table and the
+    // realised geometry diverged; fault rather than pivot the wrong way.
+    //
+    // Only meaningful past the turn tolerance: a valid pivot always turns well
+    // past it, and the offline `_PIVOT_MAX_TURN_DEG = 179` cap precludes the
+    // near-180 sign ambiguity, so a sub-tolerance |delta| (no meaningful sign)
+    // is skipped rather than special-cased.
+    if (_departingPivot.active)
+    {
+        const float pivotDelta = wrapDeltaDeg(bodyTarget - currentWorld);
+        if (fabsf(pivotDelta) > Config::NAV_TURN_TOLERANCE_DEG)
+        {
+            const Routes::TurnMode expectedForwardWheel =
+                (pivotDelta > 0.0f) ? Routes::TurnMode::PIVOT_LEFT
+                                    : Routes::TurnMode::PIVOT_RIGHT;
+            const Routes::TurnMode expectedWheel =
+                resolvePivotWheel(expectedForwardWheel, _departingPivot.dir);
+            if (resolvedTurnMode != expectedWheel)
+            {
+                Serial.print(F("[PathTracker] ADR-073: pivot commanded-delta sign "
+                               "tripwire at v="));
+                Serial.print(cur);
+                Serial.print(F(" delta="));
+                Serial.print(pivotDelta);
+                Serial.print(F(" wheel="));
+                Serial.print(turnModeByte);
+                Serial.print(F(" expected="));
+                Serial.println(_turnModeToByte(expectedWheel));
+                _enterFault(Fault::PIVOT_DIRECTION_MISMATCH, cur, nxt);
+                return;
+            }
+        }
+    }
 
     // Dispatch the pre-edge turn through the SHARED helper — the same path the return prologue
     // uses (issue #36, #6). It owns the skip-when-aligned decision (NAV_TURN_TOLERANCE_DEG), the
@@ -2715,8 +2887,6 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
         return;
     }
 
-    const bool reverse = (_resolvedDirection == Direction::REAR);
-
     // -----------------------------------------------------------------------
     // Build the resolved query for the terminal one-hop classifier
     // (`EdgeDispatchPolicy.h::resolveEdgeDispatch`, issue #108). Every input is
@@ -2725,10 +2895,11 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     // and owns the trim-clamp arithmetic, but introduces no new cross-hop state.
     // -----------------------------------------------------------------------
 
-    // Direction-aware axle offset (the seek's overshoot channel), exactly as the
-    // pre-refactor `seekAxleOffsetCm`: a REAR seek rolls the rear board's own offset.
-    const float axleOffsetCm =
-        reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    // Direction-aware axle offset (the seek's overshoot channel), single-sourced
+    // through the shared policy (ADR-073, #54): a REAR seek rolls the rear board's
+    // own offset, so this seek budget cannot drift from the LINE-overshoot budget,
+    // the offline validator, or the sim.
+    const float axleOffsetCm = pivotOvershootBudgetCm(_resolvedDirection);
     const float departingTrimCm   = _departingPivot.active ? _departingPivot.trim_cm : 0.0f;
     const float approachingTrimCm = _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
 
@@ -2914,6 +3085,13 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
         case DispatchPrimitive::STOP_AT_LINE_SEEK:
         {
+            // Pivot-scoped REAR-seek serviceability is enforced UPSTREAM in
+            // `_onPlanNextHop` (issue #54, ADR-073), keyed off the resolved direction
+            // and the "seek requested" rungs BEFORE `resolveStopAtLine`'s board gate can
+            // silently degrade a 1-board REAR seek to BLIND_DEAD_RECKON. A guard here
+            // would be dead: that degrade re-classifies the primitive away from
+            // STOP_AT_LINE_SEEK before this case is ever reached (the T10 KNOWN GAP).
+
             // BLIND + seek (ADR-027). A pass-through LINE->BLIND handoff leaves the
             // LineFollower enabled (T5's brake-on-gate=false path); release it WITHOUT
             // braking before handing the wheels to the Drive seek so the two writers

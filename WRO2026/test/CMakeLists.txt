@@ -316,6 +316,31 @@ function(add_speed_chain_routes_force_include target)
 endfunction()
 
 # -----------------------------------------------------------------------------------------
+# Force-include the reverse-pivot shadow routes table (`fixtures/routes_reverse_pivots.h`,
+# T9, issue #54 / ADR-073) BEFORE any source-file parsing — the same shadow trick as
+# `add_speed_chain_routes_force_include`, pointed at the hand-authored 20-node table carrying
+# the seven reverse-pivot components (authored-REAR, AUTO-REAR coherent-run, binding-
+# contradiction, reset-node reject + FRONT-pinned accept, chained-reverse pair). NOT
+# single-sourced from `field_fixture.py`, NOT governed by ADR-050 — the binding-contradiction
+# and reverse-reachable reset-node components are BUILT to be validator-rejected, so neither
+# `build_routes.py` nor `regenerate_routes_fixture.py` could ever emit this table. Used by the
+# T10 reverse-pivot host FSM targets (`test_reverse_pivot_dispatch`,
+# `test_reverse_pivot_seek_1board`).
+# -----------------------------------------------------------------------------------------
+function(add_reverse_pivot_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${FIXTURE_ROUTES_DIR}/routes_reverse_pivots.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_reverse_pivots.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
 # Force-include the issue-#106 PathTracker+Drive real-link peripheral mocks BEFORE any
 # source-file parsing — the same load-bearing shadow trick as `add_hal_force_includes` /
 # `add_mission_mock_force_includes`, pointed at `hal_mocks/EventTrace.h` + the three
@@ -2740,6 +2765,76 @@ target_compile_definitions(test_path_tracker_lost_line PRIVATE HOP_SETTLE_MS_DEF
 add_fixture_routes_force_include(test_path_tracker_lost_line)
 add_path_force_includes(test_path_tracker_lost_line)
 add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
+
+# =========================================================================================
+# Test executables — reverse (REAR-traversal) single-wheel pivot host FSM tests
+# (issue #54, ADR-073, T10). Same real-link recipe as `test_path_tracker_lost_line` above —
+# real `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` +
+# `path_mocks.cpp` globals — but shadow the T9 `fixtures/routes_reverse_pivots.cpp` (20-node,
+# 7-pivot toy table) instead of `routes_fixture.cpp`, via `add_reverse_pivot_routes_force_include`
+# FIRST (its `ROUTES_H` must win before any header pulls production `routes.h`), then
+# `add_path_force_includes` (EventTrace + path_mocks peripherals) exactly like every sibling
+# PathTracker+Drive real-link target.
+#
+# Two targets:
+#   - `test_reverse_pivot_dispatch` — the default 2-board chassis (`LINE_BOARD_COUNT` == 2,
+#     no override). Covers AC1 (REAR-approached pivot dispatches the FLIPPED wheel), AC2/TC3
+#     (a >90 deg AUTO pivot runs coherently under force-SAME instead of degrading to a center
+#     turn), TC4/AC3 (a binding departure contradiction faults PIVOT_DIRECTION_MISMATCH), and
+#     TC12 (a REAR seek whose approaching-pivot trim exceeds the REAR overshoot budget faults
+#     PIVOT_TRIM_UNDERFLOW) + TC16 (the commanded-delta sign tripwire).
+#   - `test_reverse_pivot_seek_1board` — `LINE_BOARD_COUNT_DEFAULT=1` (ConfigLine.h's
+#     compile-time override hook, added alongside this target — mirrors the existing
+#     `LINE_JUNCTION_T_MIN_ON_DEFAULT` idiom; ZERO default-behavior change for the real sketch
+#     or the Python pipeline, which hardcodes its OWN `LINE_BOARD_COUNT` in `sim/runtime.py`,
+#     untouched by this header). Covers the AC8/TC11 non-pivot forced-REAR STOP_AT_LINE ->
+#     dead-reckon-reverse degrade (unchanged) AND the pivot-scoped REAR-seek
+#     REVERSE_UNAVAILABLE fault. ADR-073's Fix 1 HOISTED that guard out of
+#     `case DispatchPrimitive::STOP_AT_LINE_SEEK` up into `_onPlanNextHop` (pre-turn, keyed off
+#     the RESOLVED direction and the "seek requested" rungs, asked of the resolver with the
+#     board gate forced open), so it now fires BEFORE `resolveStopAtLine`'s own board gate can
+#     silently degrade the REAR seek to `BLIND_DEAD_RECKON`. The finding is therefore reachable
+#     and the fault FIRES against the real FSM — no longer the pre-hoist documented gap. See
+#     that test file's docblock.
+# =========================================================================================
+add_executable(test_reverse_pivot_dispatch
+    ${TEST_DIR}/test_reverse_pivot_dispatch.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_reverse_pivots.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_reverse_pivot_dispatch PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_reverse_pivot_dispatch PRIVATE HOP_SETTLE_MS_DEFAULT=0)
+add_reverse_pivot_routes_force_include(test_reverse_pivot_dispatch)   # FIRST (ROUTES_H)
+add_path_force_includes(test_reverse_pivot_dispatch)                 # EventTrace + path_mocks peripherals
+add_test(NAME reverse_pivot_dispatch COMMAND test_reverse_pivot_dispatch)
+
+add_executable(test_reverse_pivot_seek_1board
+    ${TEST_DIR}/test_reverse_pivot_seek_1board.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_reverse_pivots.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_reverse_pivot_seek_1board PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# 1-board chassis (ConfigLine.h's LINE_BOARD_COUNT_DEFAULT override hook) + the same
+# HOP_SETTLE_MS=0 pin as every sibling dispatch-assertion target.
+target_compile_definitions(test_reverse_pivot_seek_1board
+    PRIVATE LINE_BOARD_COUNT_DEFAULT=1 HOP_SETTLE_MS_DEFAULT=0)
+add_reverse_pivot_routes_force_include(test_reverse_pivot_seek_1board)   # FIRST (ROUTES_H)
+add_path_force_includes(test_reverse_pivot_seek_1board)                 # EventTrace + path_mocks peripherals
+add_test(NAME reverse_pivot_seek_1board COMMAND test_reverse_pivot_seek_1board)
 
 # --- EncoderSource lower-MCU encoder / task-done adapter test (T5 #141), real-linked ---
 add_executable(test_encoder_source

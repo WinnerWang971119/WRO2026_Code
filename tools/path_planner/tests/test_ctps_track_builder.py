@@ -140,7 +140,7 @@ from tools.path_planner.ctps.profile import default_config
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.pipeline_config import SpeedTier
+from tools.path_planner.pipeline_config import SpeedTier, TurnMode
 from tools.path_planner.planner import (
     BlindDecayParams,
     compute_all_pairs_next_hop,
@@ -1756,6 +1756,258 @@ def test_tc13_chained_sensor_departure_pivots_land_on_final_node():
     t0s_chained_sensor = [segment["t0"] for segment in track.pivots]
     assert t0s_chained_sensor == sorted(t0s_chained_sensor)   # emitted in chronological order
     assert all(segment["wheel"] == "right" for segment in track.pivots)
+
+
+# ===========================================================================
+# RP1-RP4 — REVERSE (REAR-traversal) single-wheel pivot arc render (#54 /
+# ADR-073, T6). The sim exposes each taken pivot's DERIVED direction + PLANTED
+# (post-flip) wheel via ``taken_pivot`` (T4); ``track_builder`` consumes that
+# instead of re-deriving, so the arc plants on the flipped (correct world /
+# travel) side, ``pivots[]`` carries ``direction`` + the planted wheel, and a
+# REAR sensor-terminated departure re-anchors along the TRAVEL-frame ray. The
+# direction is NEVER recorded in the command stream (recorder / trace_loader
+# untouched, ADR-054) — it is derived by the sim. Reuses the T9 reverse-pivot
+# fixtures ``make_authored_rear_pivot_field`` / ``make_auto_rear_approach_pivot_field``;
+# RP3 builds a minimal REAR-LINE-departing field inline (no available T9
+# fixture departs a REAR pivot over a sensor leg).
+# ===========================================================================
+
+
+def _forward_pivot_wheel(field, u: str, v: str, w: str) -> str:
+    """Return the stored FORWARD-sense pivot wheel ("left"/"right") for (u, v, w).
+
+    Reads the direction-agnostic :meth:`PathTrackerSim.find_pivot_turn` record so
+    a test can assert the emitted PLANTED wheel is a genuine L<->R FLIP of the
+    stored forward wheel — not a coincidence of the fixture's turn sign.
+    """
+    graph, next_hop = pivot_field_data.build_graph_and_next_hop(field)
+    sim = PathTrackerSim(field, graph, next_hop, VirtualChassis.from_field_data(field))
+    record = sim.find_pivot_turn(u, v, w)
+    assert record is not None
+    return "left" if record.wheel == TurnMode.PIVOT_LEFT else "right"
+
+
+# ---------------------------------------------------------------------------
+# RP1 — authored REAR pivot: wheel flips, arc plants on the flipped side, lands
+# ---------------------------------------------------------------------------
+
+
+def test_rp1_authored_rear_pivot_flips_wheel_arc_about_flipped_side():
+    """RP1 (AC9): an authored-REAR pivot arcs about the FLIPPED-side planted wheel.
+
+    ``make_authored_rear_pivot_field`` pins both pivot legs ``direction:"rear"``.
+    The emitted ``pivots`` segment must carry ``direction == "rear"`` and the
+    PLANTED (post-flip) wheel — the L<->R flip of the stored forward wheel — and
+    the dense arc sub-keyframes + the segment centre must match the documented
+    Contracts formula computed with that FLIPPED wheel sign. Before the flip the
+    arc rotated about the wrong-side wheel and drifted ~13 cm off ``L2``; the
+    chassis-nudge now lands the chassis on the node.
+    """
+    field = pivot_field_data.make_authored_rear_pivot_field()
+    track = _build_quiet(_goto_trace(field, "L2"), field)
+
+    lx, ly = field.NODES["L2"]
+    last = track.keyframes[-1]
+    assert hypot(last["x"] - lx, last["y"] - ly) < _POSE_TOL
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 1
+    segment = track.pivots[0]
+    assert segment["direction"] == "rear"
+
+    # The PLANTED wheel is a genuine L<->R flip of the stored forward-sense wheel.
+    forward_wheel = _forward_pivot_wheel(field, "L0", "L1", "L2")
+    flipped = {"left": "right", "right": "left"}[forward_wheel]
+    assert segment["wheel"] == flipped
+
+    # Locate the arc via the segment's [t0, t1] bracket (the approach leg
+    # densifies, so the arc is not at a fixed index) — same idiom as TC2.
+    n = ceil(abs(segment["theta_deg"]) / ARC_STEP_DEG)
+    arc_start_idx = next(
+        i for i, kf in enumerate(track.keyframes) if kf["t"] > segment["t0"]
+    )
+    approach_end = track.keyframes[arc_start_idx - 1]
+    arc = track.keyframes[arc_start_idx : arc_start_idx + n]
+    assert len(arc) == n
+
+    radius_cm = parse_track_cm_from_config() / 2.0
+    flipped_sign = 1 if flipped == "left" else -1
+    (wx, wy), expected_centers = _expected_arc_centers(
+        approach_end["x"],
+        approach_end["y"],
+        approach_end["h"],
+        theta_deg=segment["theta_deg"],
+        wheel_sign=flipped_sign,
+        radius_cm=radius_cm,
+        n=n,
+    )
+    # The segment centre + every arc sub-keyframe rotate about the FLIPPED wheel.
+    assert segment["cx"] == pytest.approx(wx, abs=1e-6)
+    assert segment["cy"] == pytest.approx(wy, abs=1e-6)
+    for kf, (ex, ey) in zip(arc, expected_centers):
+        assert kf["x"] == pytest.approx(ex, abs=1e-6)
+        assert kf["y"] == pytest.approx(ey, abs=1e-6)
+
+    # The flip is load-bearing: the UN-flipped (forward-sense) wheel would plant
+    # a full track-width (2R) away, on the wrong world side.
+    (wx_unflipped, wy_unflipped), _ = _expected_arc_centers(
+        approach_end["x"],
+        approach_end["y"],
+        approach_end["h"],
+        theta_deg=segment["theta_deg"],
+        wheel_sign=-flipped_sign,
+        radius_cm=radius_cm,
+        n=n,
+    )
+    assert hypot(segment["cx"] - wx_unflipped, segment["cy"] - wy_unflipped) > radius_cm
+
+
+# ---------------------------------------------------------------------------
+# RP2 — AUTO-resolved REAR approach: direction is DERIVED by the sim, not
+# authored; the >90 deg pivot runs coherently
+# ---------------------------------------------------------------------------
+
+
+def test_rp2_auto_rear_approach_direction_derived_by_sim():
+    """RP2 (AC9, AC1/AC2 render side): an AUTO-REAR pivot's ``direction`` is sim-derived.
+
+    ``make_auto_rear_approach_pivot_field`` carries NO authored direction
+    override: the ``U -> V`` approach resolves REAR purely under
+    ``BIDIRECTIONAL_AUTO`` (a >90 deg, non-axis-aligned entry), and force-SAME
+    holds the >90 deg departure REAR too. The emitted ``direction == "rear"``
+    therefore proves ``track_builder`` reads the sim's DERIVED taken-pivot
+    surface rather than re-deriving from the command stream (which carries no
+    direction — ADR-054). The 120 deg pivot RAN coherently (a single arc landing
+    on-node), not degraded to a center turn.
+    """
+    field = pivot_field_data.make_auto_rear_approach_pivot_field()
+
+    # Direct proof the sim DERIVED REAR (not the axis-aligned tie-goes-FRONT
+    # trap): walk the field and read the taken-pivot surface.
+    graph, next_hop = pivot_field_data.build_graph_and_next_hop(field)
+    walk_sim = PathTrackerSim(
+        field, graph, next_hop, VirtualChassis.from_field_data(field)
+    )
+    walk_sim.localization.zero_heading_from_current()
+    for _prim, _snap in walk_sim.step_through("W"):
+        pass
+    taken = walk_sim.taken_pivot("U", "V", "W")
+    assert taken is not None
+    assert taken.direction == _runtime.Direction.REAR
+
+    track = _build_quiet(_goto_trace(field, "W"), field)
+
+    wx_node, wy_node = field.NODES["W"]
+    last = track.keyframes[-1]
+    assert hypot(last["x"] - wx_node, last["y"] - wy_node) < _POSE_TOL
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 1
+    segment = track.pivots[0]
+    assert segment["direction"] == "rear"
+    assert segment["theta_deg"] == pytest.approx(120.0, abs=1e-6)   # the sharp AUTO pivot RAN
+
+    forward_wheel = _forward_pivot_wheel(field, "U", "V", "W")
+    assert segment["wheel"] == {"left": "right", "right": "left"}[forward_wheel]
+
+
+# ---------------------------------------------------------------------------
+# RP3 — REAR sensor-departure: pending_pivot_land re-anchors on the TRAVEL ray
+# ---------------------------------------------------------------------------
+
+
+def _rear_line_departing_pivot_field():
+    """Build a minimal REAR pivot whose DEPARTURE is a LINE (sensor) leg.
+
+    No T9 fixture departs a REAR pivot over a sensor-terminated leg (both REAR
+    fixtures dead-reckon out), so this constructs one inline via the same
+    ``pivot_field_data._make_field`` helper the module's fixtures use — it does
+    NOT touch ``pivot_field_data`` (T9's file). ``Z -> P`` is a REAR-pinned
+    BLIND approach; ``P -> Q`` is a REAR-pinned LINE edge into the junction line
+    node ``Q``. The 70 deg turn keeps ``delta = (T/2)*tan(35 deg) ~= 6.3 cm``
+    inside the REAR overshoot budget (7.68 cm). Departure resolves REAR
+    (force-SAME) and is sensor-terminated (``line_reverse`` + ``line_overshoot``),
+    so it drives the FULL edge (no departing trim) and lands ``delta`` PAST ``Q``
+    — exactly the residual ``pending_pivot_land`` must re-anchor along the
+    TRAVEL-frame departure ray.
+    """
+    from math import cos, radians, sin
+
+    turn_deg = 70.0
+    z = (0.0, 0.0)
+    p = (60.0, 0.0)                     # Z->P heading 0 (REAR => body faces 180)
+    out_cm = 50.0
+    q = (
+        p[0] + out_cm * cos(radians(turn_deg)),
+        p[1] + out_cm * sin(radians(turn_deg)),
+    )
+    return pivot_field_data._make_field(
+        nodes={"Z": z, "P": p, "Q": q},
+        node_types={"Z": "blind", "P": "line", "Q": "line"},
+        line_segments=[("P", "Q")],
+        blind_edges=[("Z", "P")],
+        pivot_turns=[("Z", "P", "Q")],
+        start_node="Z",
+        start_heading_deg=0.0,
+        edges=[
+            {"type": "BLIND", "u": "Z", "v": "P", "direction": "rear"},
+            {"type": "LINE", "u": "P", "v": "Q", "direction": "rear"},
+        ],
+    )
+
+
+def test_rp3_rear_sensor_departure_lands_on_node_via_travel_ray():
+    """RP3 (AC9, spec item 4): a REAR sensor-departure re-anchors on the TRAVEL ray.
+
+    The REAR pivot departs over a LINE (sensor) leg, so the sim dead-reckons the
+    full edge and lands ``delta`` past ``Q``; ``pending_pivot_land`` pulls that
+    residual back along the TRAVEL-frame departure ray onto ``Q``. On a REAR
+    pivot the arc-end BODY heading points OPPOSITE travel, so the pre-#54
+    body-frame ray would pull the landing the WRONG way — ~2*delta (~12.6 cm)
+    PAST ``Q``. Landing exactly on ``Q`` proves the +180 travel-frame flip.
+    """
+    field = _rear_line_departing_pivot_field()
+    track = _build_quiet(_goto_trace(field, "Q"), field)
+
+    qx, qy = field.NODES["Q"]
+    last = track.keyframes[-1]
+    assert hypot(last["x"] - qx, last["y"] - qy) < _POSE_TOL
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 1
+    segment = track.pivots[0]
+    assert segment["direction"] == "rear"
+    forward_wheel = _forward_pivot_wheel(field, "Z", "P", "Q")
+    assert segment["wheel"] == {"left": "right", "right": "left"}[forward_wheel]
+
+
+# ---------------------------------------------------------------------------
+# RP4 — a pivot-free trace's Track.to_dict() stays byte-identical (schema v1)
+# ---------------------------------------------------------------------------
+
+
+def test_rp4_pivot_free_trace_to_dict_byte_identical_schema_v1():
+    """RP4 (AC9/AC12): the new REAR ``direction`` key never touches a pivot-free trace.
+
+    ``direction`` (and the planted-``wheel`` value) live ONLY inside ``pivots[]``
+    entries, and ``to_dict()`` omits ``pivots`` entirely when empty. So a
+    pivot-free trace keeps EXACTLY its pre-#54 top-level key set with
+    ``schema_version == 1`` — byte-identical emission (the real field's
+    ``PIVOT_TURNS`` is empty, so this is the shipped-trace guarantee).
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    result = track.to_dict()
+    assert result["schema_version"] == 1
+    assert "pivots" not in result
+    assert set(result.keys()) == {
+        "schema_version",
+        "field",
+        "duration_s",
+        "keyframes",
+        "events",
+    }
 
 
 # ===========================================================================

@@ -102,8 +102,17 @@ namespace Config
      * line-following configuration introduced by ADR-024 — required for the
      * auto-direction step in `PathTracker::_resolveDirection`).
      * When set to 1, `LINE_REAR_I2C_PORT` is ignored at compile time.
+     *
+     * @note **Compile-time override:** guarded by `#ifndef LINE_BOARD_COUNT_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_BOARD_COUNT_DEFAULT=1`
+     *       without editing this file — same idiom as `LINE_JUNCTION_T_MIN_ON_DEFAULT`
+     *       below (issue #54, T10: a 1-board real-FSM host target). Range-guarded to
+     *       `{1, 2}` in `ConfigChecks.h`.
      */
-    constexpr uint8_t LINE_BOARD_COUNT = 2;
+#ifndef LINE_BOARD_COUNT_DEFAULT
+#define LINE_BOARD_COUNT_DEFAULT 2
+#endif
+    constexpr uint8_t LINE_BOARD_COUNT = LINE_BOARD_COUNT_DEFAULT;
 
     /**
      * @brief I²C port index (1..4) on Wire1 carrying the FRONT line-sensor board.
