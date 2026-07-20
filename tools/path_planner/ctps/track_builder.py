@@ -2443,6 +2443,7 @@ def build(trace: Trace, field_data) -> Track:
                         # the pre-run keyframe.
                         tail_x, tail_y, tail_h = run_tail_pose()
                         step_dist = hypot(snap.x_cm - tail_x, snap.y_cm - tail_y)
+                        turn_mag = abs(wrap_pm180(snap.heading_deg - tail_h))
                         if step_dist <= _TRANSLATION_EPS_CM:
                             # Zero-motion primitive. A real (above-tolerance)
                             # heading change breaks the run (it is not collinear
@@ -2463,7 +2464,6 @@ def build(trace: Trace, field_data) -> Track:
                             # repairs). A hard 1e-9 threshold here re-introduced it
                             # on the real field, which the perfectly-collinear toy
                             # fixtures could not surface.
-                            turn_mag = abs(wrap_pm180(snap.heading_deg - tail_h))
                             if turn_mag > NAV_TURN_TOLERANCE_DEG:
                                 # A real in-place turn: flush the open run FIRST so
                                 # ``append_turn_keyframes`` renders the rotation
@@ -2505,6 +2505,43 @@ def build(trace: Trace, field_data) -> Track:
                                 if hop_settle_s > 0 and tag not in _RETURN_DRIVE_TAGS:
                                     append_dwell_keyframe(hop_settle_s)
                                 pending_turn_dwell = False
+                            # SQUARE-then-advance: a primitive that BOTH rotates
+                            # and translates is two physical maneuvers, and the
+                            # firmware always runs them in that order — the wall
+                            # interlude's `Drive.wallStop(...).setHeading(facing)`
+                            # turns in place to the wall normal (its internal
+                            # SQUARE phase) and only then presses the rear
+                            # straight into the wall (PathTracker.cpp,
+                            # `_beginWallStop`). The sim collapses both into ONE
+                            # `ACT_WALL_STOP` record (`_wall_reset_interlude`
+                            # phase 1 mutates heading AND the on-axis coordinate
+                            # before its single yield), so without this split the
+                            # whole rotation is handed to `_densify_drive`, which
+                            # lerps heading by traveled-distance fraction — the
+                            # player then renders the robot pirouetting WHILE it
+                            # crosses the standoff, a maneuver the robot never
+                            # performs. Emit the rotation as its own in-place turn
+                            # at the run-tail position first (turn-profile timed),
+                            # so the advance below runs at a FIXED heading.
+                            #
+                            # Gated on the SAME NAV_TURN_TOLERANCE_DEG as the
+                            # zero-motion arm above: a sub-tolerance pass-through
+                            # alignment stays transparent (the advance's own
+                            # snapshot still pins the corrected heading byte-exact),
+                            # so every collinear line / blind / projection run
+                            # renders byte-unchanged. `pending_turn_dwell` is
+                            # deliberately NOT re-armed — the square is INTERNAL
+                            # to one firmware move, which never settles between
+                            # squaring and pushing.
+                            if turn_mag > NAV_TURN_TOLERANCE_DEG:
+                                # Close the open run first so the rotation renders
+                                # from the run's last EMITTED keyframe; after the
+                                # flush that keyframe is byte-exact the run tail
+                                # (TC7), so the turn is genuinely in place.
+                                flush_run()
+                                append_turn_keyframes(
+                                    tail_x, tail_y, snap.heading_deg
+                                )
                             # A CHAINED blind hop (ADR-059) rides its resolved
                             # per-hop (start_pwm, end_pwm, chain) on the primitive
                             # tuple — CTPS CONSUMES those recorded speeds for the
