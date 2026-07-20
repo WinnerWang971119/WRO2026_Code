@@ -66,13 +66,14 @@ namespace Config
                   "PWM_MOVING_MIN must be in (0, PWM_MIN_MAGNITUDE]");
 
     // -----------------------------------------------------------------------------------------
-    // Turn PD controller checks (ConfigDrive.h, ADR-068)
+    // Turn profile controller checks (ConfigDrive.h, ADR-078)
     //
-    // `Drive::_updateTurnProfile` (via `TurnPDPolicy.h`) is a per-tick PD + kinetic creep floor
-    // + slew-limited ramp-up. These eight asserts pin the physical/dynamical relationships
-    // between the PD knobs so a future retune of any ONE of them cannot silently desync from
-    // the others and produce a turn that hunts to its timeout on every dispatch (the plan's
-    // single sharpest failure mode — see docs/plans/2026-07-16-turn-pd-controller.md).
+    // `Drive::_updateTurnProfile` (via `TurnProfilePolicy.h`) is a gated speed profile:
+    // breakaway kick -> CRUISE -> CREEP -> terminal SETTLE. These asserts pin the
+    // physical/dynamical relationships between the profile's knobs so a future retune of any ONE
+    // of them cannot silently desync from the others and produce a turn that hunts to its
+    // timeout on every dispatch (the plan's single sharpest failure mode — see
+    // docs/plans/2026-07-21-turn-profile-controller.md).
     // -----------------------------------------------------------------------------------------
 
     // (a) The settle band must be at least one physical step wide, or NO sample can ever land
@@ -94,41 +95,32 @@ namespace Config
                   "the debounce requires and EVERY turn silently hunts to TURN_TIMEOUT_MS. Widen "
                   "TURN_TOLERANCE_DEG, lower TURN_SETTLE_SAMPLES, or re-bench a lower creep PWM.");
 
-    // (c)/(d) The creep floor must sit strictly below its own hand-off threshold, and must be a
-    // real, non-zero push — a zero or negative creep floor could never sustain rotation.
-    static_assert(TURN_CREEP_PWM < TURN_CREEP_THRESH_PWM,
-                  "Config::TURN_CREEP_PWM must be < TURN_CREEP_THRESH_PWM — otherwise the PD "
-                  "would hand off to a creep command it could already command unfloored, making "
-                  "TURN_CREEP_THRESH_PWM's hand-off band meaningless.");
+    // The CREEP window must sit strictly above the settle band, or there is no CREEP zone at
+    // all — `turnPhaseFor` would jump straight from CRUISE to SETTLE on every dispatch.
+    static_assert(TURN_CREEP_WINDOW_DEG > TURN_TOLERANCE_DEG,
+                  "Config::TURN_CREEP_WINDOW_DEG must be > TURN_TOLERANCE_DEG — the creep window "
+                  "must sit strictly above the settle band, or turnPhaseFor never selects CREEP "
+                  "and the profile jumps straight from CRUISE to SETTLE.");
+
+    // (d) The creep floor must be a real, non-zero push — a zero or negative creep floor could
+    // never sustain rotation.
     static_assert(TURN_CREEP_PWM > 0,
                   "Config::TURN_CREEP_PWM must be > 0 — a zero or negative creep floor could "
-                  "never sustain in-place rotation once the PD's authority drops below "
-                  "TURN_CREEP_THRESH_PWM.");
+                  "never sustain in-place rotation once the profile hands off to the CREEP "
+                  "phase.");
+
+    // The creep magnitude must sit below the cruise magnitude, or CREEP would not be a
+    // deceleration from CRUISE at all — it would match or exceed it.
+    static_assert(TURN_CREEP_PWM < TURN_CRUISE_PWM,
+                  "Config::TURN_CREEP_PWM must be < TURN_CRUISE_PWM — the CREEP phase must be "
+                  "slower than CRUISE, or hard-switching from CRUISE to CREEP would not actually "
+                  "slow the turn down.");
 
     // (e) At least one in-band sample must be required, or the debounce is a no-op and the turn
     // exits on the very first (possibly noisy) in-band tick.
     static_assert(TURN_SETTLE_SAMPLES >= 1,
                   "Config::TURN_SETTLE_SAMPLES must be >= 1 — zero would make the settle "
                   "debounce a no-op, exiting on the first in-band sample with no confirmation.");
-
-    // (f)/(g) The slew step must be strictly positive (or the ramp-up limiter never lets the
-    // command grow at all), and it must be able to cross the creep-to-threshold hand-off gap in
-    // a single tick, or a command growing off the creep floor lands back inside the gap and gets
-    // re-floored to the SAME creep value every tick — the "ramp" never actually grows.
-    static_assert(TURN_SLEW_PWM_PER_TICK > 0,
-                  "Config::TURN_SLEW_PWM_PER_TICK must be > 0 — zero would freeze the command at "
-                  "its seeded start value forever, since growth is never permitted.");
-    static_assert(TURN_SLEW_PWM_PER_TICK >= (TURN_CREEP_THRESH_PWM - TURN_CREEP_PWM),
-                  "Config::TURN_SLEW_PWM_PER_TICK must be able to cross the "
-                  "(TURN_CREEP_THRESH_PWM - TURN_CREEP_PWM) hand-off gap in a single tick. "
-                  "NOTE: this deviates from the turn-PD plan's literal AC8(g) text "
-                  "(`TURN_SLEW_PWM_PER_TICK >= TURN_CREEP_PWM`), which fails to compile even "
-                  "with the plan's OWN placeholder values (slew=10, creep=15) and with the "
-                  "bench-measured values (slew=10, creep=38) -- flagged for review in the T3 "
-                  "handoff, not silently resolved. A slew step smaller than this gap means a "
-                  "command growing off the creep floor lands back inside "
-                  "[TURN_CREEP_PWM, TURN_CREEP_THRESH_PWM) and turnCreepFloor snaps it straight "
-                  "back to TURN_CREEP_PWM every tick -- the ramp-up limit would be a lie.");
 
     // (h) The turn's own timeout must fire before Drive's blocking-drain ceiling, or a hunting
     // turn (non-faulting by design) could stall the drain's 10 s-per-command budget instead of
@@ -139,13 +131,13 @@ namespace Config
                   "ceiling, or a hunting turn eats the whole drain budget instead of the turn's "
                   "own bounded give-up.");
 
-    // (i) The static breakaway floor must sit ABOVE the kinetic creep floor — starting an in-place
-    // spin from rest breaks more (scrub) friction than sustaining one, so a breakaway at or below
-    // the creep would defeat its own purpose (bench: 46 vs 38 on Lofaix).
-    static_assert(TURN_BREAKAWAY_PWM > TURN_CREEP_PWM,
-                  "Config::TURN_BREAKAWAY_PWM must be > TURN_CREEP_PWM — the from-rest static "
-                  "breakaway floor is higher than the kinetic floor that sustains an already-"
-                  "moving spin. A breakaway <= creep cannot start a turn the creep floor could "
+    // (i) The static breakaway floor must sit AT OR ABOVE the kinetic creep floor — starting an
+    // in-place spin from rest breaks more (scrub) friction than sustaining one, so a breakaway
+    // below the creep would defeat its own purpose (bench: 46 vs 38 on Lofaix).
+    static_assert(TURN_BREAKAWAY_PWM >= TURN_CREEP_PWM,
+                  "Config::TURN_BREAKAWAY_PWM must be >= TURN_CREEP_PWM — the from-rest static "
+                  "breakaway floor is at or above the kinetic floor that sustains an already-"
+                  "moving spin. A breakaway below creep cannot start a turn the creep floor could "
                   "not already start.");
 
     // (j) The breakaway kick must be reachable within the default authority ceiling, or the ±power
@@ -161,6 +153,13 @@ namespace Config
                   "Config::TURN_BREAKAWAY_MOTION_DEG must be >= TURN_MIN_RESOLVABLE_DEG — the "
                   "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
                   "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
+
+    // The SETTLE nudge's P gain must be positive, or a residual error would command zero (or
+    // negative, i.e. away-from-target) correction and never actually settle.
+    static_assert(TURN_SETTLE_KP > 0.0f,
+                  "Config::TURN_SETTLE_KP must be > 0 — a zero or negative settle nudge P gain "
+                  "would either apply no correction or push AWAY from the target inside the "
+                  "SETTLE phase.");
 
     // -----------------------------------------------------------------------------------------
     // GYRO straight heading-hold PD checks (ConfigDrive.h, ADR-075, issue #169)
