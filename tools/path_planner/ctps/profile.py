@@ -49,7 +49,7 @@ Public API (see the plan Contracts, 2026-07-09 CTPS motion-profile spec)
   with phase boundaries, ``pwm_at_s``, closed-form phase durations.
 - :func:`resolve_turn_profile` -> :class:`TurnProfile` — display-only constant
   angular rate (from ``TURN_CRUISE_PWM``) plus a nominal settle-allowance tail
-  (ADR-068; render-layer-only, mirrors ADR-061's ``HOP_SETTLE_MS`` posture).
+  (ADR-078; render-layer-only, mirrors ADR-061's ``HOP_SETTLE_MS`` posture).
 - :func:`sample_drive` / :func:`sample_turn` — dense-near-ramps keyframe lists.
 - :func:`resolve_effective_speed` — Config defaults + per-command overrides
   (sign-by-cruise start speed, no-brake -> endSpeed = cruise).
@@ -163,7 +163,7 @@ class ProfileConfig:
     speed_normal: int     # SPEED_NORMAL preset PWM (default cruise)
     speed_fast: int       # SPEED_FAST preset PWM
     line_cruise: int      # ConfigLine::CRUISE_SPEED (line-follow cruise)
-    turn_cruise_pwm: int  # TURN_CRUISE_PWM (the PD's authority clamp, ADR-068)
+    turn_cruise_pwm: int  # TURN_CRUISE_PWM (the CRUISE magnitude of the phase profile, ADR-078)
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
     rear_axle_offset_cm: float  # LINE_SENSOR_AXLE_OFFSET_REAR_CM (REAR overshoot window)
@@ -692,9 +692,10 @@ def deadband_snap(pwm: int, pwm_min: int, pwm_max: int) -> int:
     its deadband), and any magnitude above ``pwm_max`` is clipped to ``pwm_max``,
     sign preserved. This is the snap the firmware move-profile emit path applies
     to a drive command's velocity floor. **Not** used for the turn path anymore
-    (ADR-068): the PD executor's creep floor replaces it there (AC3 — a turn
-    command is never snapped to ``PWM_MIN_MAGNITUDE``), so :func:`resolve_turn_profile`
-    reads ``TURN_CRUISE_PWM`` directly instead of calling this function.
+    (ADR-078): the gated phase profile's own CRUISE/CREEP magnitudes are the
+    floor there (a turn command is never snapped to ``PWM_MIN_MAGNITUDE``), so
+    :func:`resolve_turn_profile` reads ``TURN_CRUISE_PWM`` directly instead of
+    calling this function.
 
     :param pwm: signed PWM command.
     :param pwm_min: motor deadband floor (``PWM_MIN_MAGNITUDE``).
@@ -1360,28 +1361,29 @@ class TurnProfile:
     """A resolved turn or pivot: a DISPLAY-ONLY constant-rate + settle-tail model.
 
     Produced by :func:`resolve_turn_profile`. The real firmware turn executor
-    (``Drive.cpp::_updateTurnProfile``, ADR-068) is a per-tick PD controller —
-    ``speed = Kp*err + Kd*d(err)``, clamped to ``TURN_CRUISE_PWM``, slew-limited
-    on ramp-up, and floored to a fixed kinetic creep once ``|cmd|`` drops below
-    ``TURN_CREEP_THRESH_PWM``. Its settling time is PLANT-dependent (chassis
+    (``Drive.cpp::_updateTurnProfile``, ADR-078) runs a GATED PHASE PROFILE, not
+    a continuous control law: a from-rest breakaway kick, then a fixed-fast
+    CRUISE phase at ``TURN_CRUISE_PWM``, then a fixed-slow CREEP phase once the
+    error enters the creep window, then a terminal SETTLE nudge that lands the
+    turn inside tolerance. Its settling time is still PLANT-dependent (chassis
     inertia, battery voltage, floor friction, IMU noise) and has **no
-    closed-form solution** — reproducing the PD/creep/breakaway dynamics here
-    is explicitly out of scope. This class does not attempt it.
+    closed-form solution** — reproducing the breakaway/CRUISE/CREEP/SETTLE
+    dynamics here is explicitly out of scope. This class does not attempt it.
 
     Instead the render is a NOMINAL constant angular rate derived from
-    ``TURN_CRUISE_PWM`` (the PD's authority clamp — the PWM the controller
-    saturates at for any error above the creep threshold, i.e. for most of a
-    typical turn) plus a fixed :data:`~tools.path_planner.ctps.config.
-    TURN_SETTLE_ALLOWANCE_S` tail standing in for the final creep-to-tolerance-
-    and-brake phase. This is **render-layer-only** timing, in the same spirit
-    as ADR-061's ``HOP_SETTLE_MS`` posture: the CTPS player is a visualizer,
-    not a physics sim, and the parity trace excludes turn timing by
-    construction (ADR-050), so this model has zero effect on firmware-vs-sim
-    parity.
+    ``TURN_CRUISE_PWM`` (the fixed CRUISE magnitude of the phase profile — the
+    PWM the executor commands for most of a typical turn, from breakaway until
+    the error drops into the creep window) plus a fixed :data:`~tools.
+    path_planner.ctps.config.TURN_SETTLE_ALLOWANCE_S` tail standing in for the
+    final CREEP-to-tolerance-and-SETTLE phase. This is **render-layer-only**
+    timing, in the same spirit as ADR-061's ``HOP_SETTLE_MS`` posture: the CTPS
+    player is a visualizer, not a physics sim, and the parity trace excludes
+    turn timing by construction (ADR-050), so this model has zero effect on
+    firmware-vs-sim parity.
 
     ``cruise_pwm`` is the (unsnapped) ``TURN_CRUISE_PWM`` magnitude — the real
-    firmware turn path no longer applies ``deadbandSnap`` to any turn command
-    (AC3), so this render doesn't either. ``theta_deg`` is the signed swing
+    firmware turn path never applies ``deadbandSnap`` to any turn command
+    (ADR-078), so this render doesn't either. ``theta_deg`` is the signed swing
     (CCW positive). ``omega_deg_s`` is DERIVED from the single visual scale +
     the chassis track (no second scale constant): a wheel at PWM ``p`` moves
     ``v = SCALE * p`` cm/s; a counter-rotation spins both wheels, so
@@ -1420,7 +1422,7 @@ class TurnProfile:
         added exactly once, when the FULL sweep has been reached
         (``phi >= |theta|``) — every earlier sub-keyframe is timed by the pure
         constant rate. That renders as one long final step into the target
-        pose (a stand-in for the PD's creep-and-brake tail) rather than a
+        pose (a stand-in for the CREEP-and-SETTLE tail) rather than a
         second swept-angle stage, matching the "fixed settle allowance" model
         (not a second angular rate).
 
@@ -1446,13 +1448,14 @@ def resolve_turn_profile(
 ) -> TurnProfile:
     """Resolve a turn / pivot into a DISPLAY-ONLY constant-rate :class:`TurnProfile`.
 
-    The PD executor's true duration is plant-dependent and not closed-form
-    (ADR-068), so this renders a NOMINAL model instead of reproducing the
-    control loop: a single constant angular rate derived from
-    ``TURN_CRUISE_PWM`` (the PD's authority clamp — unsnapped, since the
-    firmware turn path no longer applies ``deadbandSnap`` to any turn command,
-    AC3) plus a fixed :data:`~tools.path_planner.ctps.config.
-    TURN_SETTLE_ALLOWANCE_S` settle tail (see :class:`TurnProfile`).
+    The gated phase profile's true duration is plant-dependent and not
+    closed-form (ADR-078), so this renders a NOMINAL model instead of
+    reproducing the breakaway/CRUISE/CREEP/SETTLE phases: a single constant
+    angular rate derived from ``TURN_CRUISE_PWM`` (the fixed CRUISE magnitude
+    of the phase profile — unsnapped, since the firmware turn path never
+    applies ``deadbandSnap`` to any turn command) plus a fixed :data:`~tools.
+    path_planner.ctps.config.TURN_SETTLE_ALLOWANCE_S` settle tail (see
+    :class:`TurnProfile`).
 
     The angular rate is DERIVED from the single visual scale + the chassis
     track (no second scale constant): a wheel at PWM ``p`` moves at
@@ -1912,7 +1915,7 @@ def sample_turn(
     picks up the nominal :data:`~tools.path_planner.ctps.config.
     TURN_SETTLE_ALLOWANCE_S` tail (see :meth:`TurnProfile.time_at_angle`), so
     the final step into the target pose renders as one long final interval — a
-    stand-in for the PD's creep-and-brake phase, NOT a second swept-angle
+    stand-in for the CREEP-and-SETTLE phase, NOT a second swept-angle
     stage. The endpoints are forced exact so T10 can pin the last sub-keyframe
     to the snapshot pose.
 
