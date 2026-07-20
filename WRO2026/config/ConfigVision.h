@@ -229,8 +229,15 @@ namespace Config
      *
      * MUST be one of the four wall-supplied station colours (YELLOW / BLUE / GREEN / WHITE) so a
      * real tile can actually be fetched for it — enforced in `ConfigChecks.h`.
+     *
+     * @note `WHITE` collides with MiniR4OLED.h's `#define WHITE SSD1306_WHITE` in any TU that
+     *       includes `<MatrixMiniR4.h>` before this header, so guard the reference to the
+     *       enumerator by name exactly as the `enum class Color` declaration above does.
      */
+#pragma push_macro("WHITE")
+#undef WHITE
     constexpr Color VISION_MASK_FALLBACK_COLOR = Color::WHITE;   // must be a wall station colour
+#pragma pop_macro("WHITE")
 
     /**
      * @brief Maximum UNKNOWN cells a masked read tolerates. Above this the frame is a genuine

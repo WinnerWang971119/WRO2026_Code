@@ -214,7 +214,9 @@ bool VisionClass::_classifyCandidate(
     Config::Color  outColors[Config::VISION_CELL_COUNT],
     uint8_t        outHue[Config::VISION_CELL_COUNT],
     uint8_t&       firstBadCell,
-    uint8_t&       badRaw) const
+    uint8_t&       badRaw,
+    bool           tolerant,
+    uint8_t        maxUnknown) const
 {
     // Unpack into per-SLOT hue / sta arrays (device order S1..S12).
     uint8_t hue[Config::VISION_CELL_COUNT];
@@ -225,12 +227,14 @@ bool VisionClass::_classifyCandidate(
     // the latch ONLY after every active cell validates. This is what makes AC4's "no overwrite on
     // failure" hold (the caller commits the latch only on a true return).
     //
-    // UNKNOWN-cell masking (Config::VISION_MASK_UNKNOWN_ENABLED): when enabled, an UNKNOWN cell no
-    // longer aborts the read — it is LATCHED honestly as UNKNOWN and counted, so a frame with a few
-    // unreadable / surprise-colour cells is still usable (the mosaic planner injects a fallback for
-    // them; see Config::VISION_MASK_FALLBACK_COLOR). Only when the UNKNOWN count exceeds
-    // Config::VISION_MASK_MAX_UNKNOWN_CELLS is the frame treated as a genuine failure. Vision itself
-    // never fakes a colour here — getColor() keeps reporting UNKNOWN, so hue tuning stays truthful.
+    // Tolerance is a parameter (not a compile-time constant) so the ONE loop serves three modes:
+    //   - strict            (tolerant=false)               — first UNKNOWN aborts (ADR-037).
+    //   - mission mask       (tolerant=true, maxUnknown=cap) — latch up to `cap` UNKNOWN cells, else
+    //                                                          fail; the mosaic planner injects a
+    //                                                          fallback for the latched UNKNOWNs.
+    //   - diagnostic          (tolerant=true, maxUnknown=CELL_COUNT) — never fail on UNKNOWN.
+    // In every tolerant case an UNKNOWN cell is LATCHED honestly as UNKNOWN and counted — Vision
+    // never fakes a colour, so getColor() / the console screens stay truthful.
     uint8_t unknownCount     = 0;
     uint8_t firstUnknownCell = 0xFF;
     uint8_t firstUnknownRaw  = 0;
@@ -245,7 +249,7 @@ bool VisionClass::_classifyCandidate(
 
         if (col == Config::Color::UNKNOWN)
         {
-            if (!Config::VISION_MASK_UNKNOWN_ENABLED)
+            if (!tolerant)
             {
                 // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
                 // Record the first offending CELL index and the raw hue of its mapped slot. The
@@ -268,10 +272,10 @@ bool VisionClass::_classifyCandidate(
         outHue[c]    = hue[slot];
     }
 
-    // Mask mode over-budget: too many UNKNOWN cells is a genuine failure (bad camera / lighting),
-    // so surface it exactly like the strict guard would — the caller must NOT latch this frame.
-    if (Config::VISION_MASK_UNKNOWN_ENABLED &&
-        unknownCount > Config::VISION_MASK_MAX_UNKNOWN_CELLS)
+    // Tolerant over-budget: too many UNKNOWN cells is a genuine failure (bad camera / lighting), so
+    // surface it exactly like the strict guard would — the caller must NOT latch this frame. In the
+    // diagnostic path `maxUnknown` == VISION_CELL_COUNT, so this branch can never trip there.
+    if (tolerant && unknownCount > maxUnknown)
     {
         firstBadCell = firstUnknownCell;
         badRaw       = firstUnknownRaw;
@@ -300,6 +304,24 @@ bool VisionClass::_classifyCandidate(
 
 bool VisionClass::readMosaic()
 {
+    // Mission read: strict by default (ADR-037), or mask-tolerant up to the cap when enabled.
+    return _readMosaic(false);
+}
+
+bool VisionClass::readMosaicRaw()
+{
+    // Diagnostic read: always tolerant, no UNKNOWN cap (see _readMosaic).
+    return _readMosaic(true);
+}
+
+bool VisionClass::_readMosaic(bool diagnostic)
+{
+    // Resolve the classification tolerance ONCE for this read. Diagnostic reads never fail on
+    // UNKNOWN (cap == VISION_CELL_COUNT); mission reads follow the mask config.
+    const bool tolerant = diagnostic ? true : Config::VISION_MASK_UNKNOWN_ENABLED;
+    const uint8_t maxUnknown =
+        diagnostic ? Config::VISION_CELL_COUNT : Config::VISION_MASK_MAX_UNKNOWN_CELLS;
+
     for (uint8_t attempt = 0; attempt < kMaxAttempts; ++attempt)
     {
         // ---------------------------------------------------------------------------------
@@ -410,8 +432,9 @@ bool VisionClass::readMosaic()
                         Config::Color cellColors[Config::VISION_CELL_COUNT];
                         uint8_t       cellHue[Config::VISION_CELL_COUNT];
 
-                        const bool allValid =
-                            _classifyCandidate(words, cellColors, cellHue, badCellIndex, badCellRaw);
+                        const bool allValid = _classifyCandidate(
+                            words, cellColors, cellHue, badCellIndex, badCellRaw, tolerant,
+                            maxUnknown);
 
                         if (allValid)
                         {

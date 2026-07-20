@@ -33,6 +33,7 @@ namespace
         "BATT",         // Item::BATT
         "LINE VIEW",    // Item::LINE_VIEW
         "VISION VIEW",  // Item::VISION_VIEW
+        "VISION TEST",  // Item::VISION_TEST
         "GYRO VIEW",    // Item::GYRO_VIEW
         "GYRO ZERO",    // Item::GYRO_ZERO
         "CAL LINE",     // Item::CAL_LINE
@@ -62,6 +63,21 @@ namespace
 
     /** @brief Mosaic cells carried by `Console::DiagSample::visionCell`. */
     const uint8_t kVisionCellCount = 12;
+
+    /**
+     * @brief The operator's EXPECTED mosaic colour code — the card placed on the mat for VISION
+     *        TEST. **EDIT THIS to match your card.**
+     *
+     * One `static_cast<uint8_t>(Config::Color)` per cell, row-major over the 4x3 mosaic (cell =
+     * row*4 + col), same indexing as `Console::DiagSample::visionCell` and `kColorLetters`
+     * (0=?/UNKNOWN, 1=Y, 2=B, 3=G, 4=W, 5=R). OperatorPanel.cpp static_asserts these codes against
+     * `Config::Color`, so a code drift is a compile error, not a silent mis-grade.
+     */
+    const uint8_t kExpectedMosaic[kVisionCellCount] = {
+        4, 3, 1, 2,    // W G Y B
+        3, 4, 2, 2,    // G W B B
+        1, 1, 4, 3,    // Y Y W G
+    };
 
     /** @brief Line-array channels per board carried by `Console::DiagSample::lineRaw`. */
     const uint8_t kLineChannelCount = 8;
@@ -394,6 +410,7 @@ bool Console::isDispatchable(Console::Item item, const Console::BootReport& boot
     case Console::Item::LINE_VIEW:
         return boot.lineArray;
     case Console::Item::VISION_VIEW:
+    case Console::Item::VISION_TEST:
         return boot.vision;
     case Console::Item::GYRO_VIEW:
         return boot.yaw;
@@ -438,6 +455,10 @@ void OperatorConsoleClass::begin()
     _lineReqIssued   = false;
     _lastVisionReqMs = 0;
     _visionReqIssued = false;
+
+    _visionTestReqIssued = false;
+    _visionTestJudged    = false;
+    _visionTestPass      = false;
 
     _gyroBaselineDeg = 0.0;
     _gyroBaselineSet = false;
@@ -543,6 +564,23 @@ void OperatorConsoleClass::update(const Console::ConsoleInput& in, Console::Cons
             if (_state == Console::State::SELF_TEST)
             {
                 _updateSelfTest(in);
+            }
+            break;
+
+        case Console::State::VISION_TEST:
+            if (in.btnUp && in.btnDown)
+            {
+                _beginWait(_state, false);
+            }
+            else
+            {
+                _handleViewButtons(in, downEdge);
+            }
+            // Grade once the one-shot read lands — only while still in the screen (a BTN press
+            // above may have exited it, exactly like the SELF TEST abort path).
+            if (_state == Console::State::VISION_TEST)
+            {
+                _updateVisionTest(in);
             }
             break;
 
@@ -737,8 +775,10 @@ bool OperatorConsoleClass::_stateOwnsRead(Console::State state, Console::ActionR
         return state == Console::State::VIEW_LINE || state == Console::State::SELF_TEST;
 
     case Console::ActionRequest::READ_MOSAIC:
-        // VIEW_VISION's pull cadence, and the SELF TEST sequencer's Check::VISION.
-        return state == Console::State::VIEW_VISION || state == Console::State::SELF_TEST;
+        // VIEW_VISION's pull cadence, the SELF TEST sequencer's Check::VISION, and the VISION TEST
+        // one-shot read.
+        return state == Console::State::VIEW_VISION || state == Console::State::SELF_TEST ||
+               state == Console::State::VISION_TEST;
 
     default:
         // ActionRequest::NONE is the free slot and every side-effect action is tracked by
@@ -781,6 +821,13 @@ void OperatorConsoleClass::_enterState(Console::State next)
 
     case Console::State::VIEW_VISION:
         _visionReqIssued = false;
+        break;
+
+    case Console::State::VISION_TEST:
+        // Fresh grade every entry: re-request the one-shot read and drop the prior verdict.
+        _visionTestReqIssued = false;
+        _visionTestJudged    = false;
+        _visionTestPass      = false;
         break;
 
     case Console::State::SELF_TEST:
@@ -882,7 +929,7 @@ void OperatorConsoleClass::_handleViewButtons(const Console::ConsoleInput& in, b
         return;
     }
 
-    if (_state == Console::State::VIEW_VISION)
+    if (_state == Console::State::VIEW_VISION || _state == Console::State::VISION_TEST)
     {
         // An advisory diagnostic must never leave a latched fault for the mission.
         _clearVisionPending = true;
@@ -927,6 +974,9 @@ void OperatorConsoleClass::_confirmItem(const Console::ConsoleInput& in)
         break;
     case Console::Item::VISION_VIEW:
         _enterState(Console::State::VIEW_VISION);
+        break;
+    case Console::Item::VISION_TEST:
+        _enterState(Console::State::VISION_TEST);
         break;
     case Console::Item::GYRO_VIEW:
         _enterState(Console::State::VIEW_GYRO);
@@ -1239,6 +1289,22 @@ void OperatorConsoleClass::_servicePullCadence(const Console::ConsoleInput& in)
             _lastVisionReqMs = in.nowMs;
             _visionReqIssued = true;
         }
+        return;
+    }
+
+    if (_state == Console::State::VISION_TEST)
+    {
+        // ONE-SHOT (not a cadence): grade a single fresh read per entry. Guarded by
+        // `_visionTestReqIssued` so the read fires exactly once; re-entering the item re-tests.
+        if (!in.boot.vision)
+        {
+            return;
+        }
+        if (!_visionTestReqIssued && _requestAction(Console::ActionRequest::READ_MOSAIC))
+        {
+            _readInFlight        = Console::ActionRequest::READ_MOSAIC;
+            _visionTestReqIssued = true;
+        }
     }
 }
 
@@ -1250,6 +1316,47 @@ void OperatorConsoleClass::_updateGyroBaseline(const Console::ConsoleInput& in)
         _gyroBaselineDeg = in.sample.gyroYawDeg;
         _gyroBaselineSet = true;
     }
+}
+
+void OperatorConsoleClass::_updateVisionTest(const Console::ConsoleInput& in)
+{
+    if (_visionTestJudged)
+    {
+        return;    // One-shot: graded already. Re-enter the item to run a fresh test.
+    }
+    if (!_visionTestReqIssued)
+    {
+        return;    // The one-shot read has not been dispatched yet (that is `_servicePullCadence`).
+    }
+    if (_readInFlight == Console::ActionRequest::READ_MOSAIC)
+    {
+        return;    // Read still in flight — wait for its notifyReadDone before grading.
+    }
+
+    // The requested read has completed (notifyReadDone cleared `_readInFlight`) and the adapter has
+    // refreshed the pulled `visionCell` / `visionFaultKind`. Grade exactly once and raise the
+    // verdict signal so the adapter's LED + buzzer report PASS / FAIL.
+    _visionTestJudged = true;
+
+    if (in.sample.visionFaultKind != kVisionFaultNone)
+    {
+        // A transport fault means the board could not be read at all — cannot confirm a match.
+        _visionTestPass = false;
+        _signal         = Console::Signal::FAIL;
+        return;
+    }
+
+    bool allMatch = true;
+    for (uint8_t c = 0; c < kVisionCellCount; ++c)
+    {
+        if (in.sample.visionCell[c] != kExpectedMosaic[c])
+        {
+            allMatch = false;
+            break;
+        }
+    }
+    _visionTestPass = allMatch;
+    _signal         = allMatch ? Console::Signal::PASS : Console::Signal::FAIL;
 }
 
 // =============================================================================================
@@ -1272,6 +1379,9 @@ void OperatorConsoleClass::_publishFrame(
         break;
     case Console::State::VIEW_VISION:
         _renderVisionView(in, out);
+        break;
+    case Console::State::VISION_TEST:
+        _renderVisionTest(in, out);
         break;
     case Console::State::VIEW_GYRO:
         _renderGyroView(in, out);
@@ -1438,6 +1548,74 @@ void OperatorConsoleClass::_renderVisionView(
 
     pos = _rowAppend(out.rows[3], 0, "FAULT: ");
     _rowAppend(out.rows[3], pos, visionFaultName(in.sample.visionFaultKind));
+}
+
+void OperatorConsoleClass::_renderVisionTest(
+    const Console::ConsoleInput& in,
+    Console::ConsoleFrame&       out) const
+{
+    // Row 0: title, plus the verdict tag once the read has been graded.
+    uint8_t pos0 = _rowAppend(out.rows[0], 0, "VISION TEST");
+    if (_visionTestJudged)
+    {
+        _rowAppend(out.rows[0], pos0, _visionTestPass ? "  PASS" : "  FAIL");
+    }
+
+    // Rows 1-2: detected (GOT) vs expected (EXP) colour letters, aligned column-for-column so the
+    // operator eyeballs which cell differs. No spaces between letters — 4 + 12 = 16 <= TEXT_COLS.
+    uint8_t p1 = _rowAppend(out.rows[1], 0, "GOT ");
+    uint8_t p2 = _rowAppend(out.rows[2], 0, "EXP ");
+    for (uint8_t c = 0; c < kVisionCellCount; ++c)
+    {
+        const uint8_t got = in.sample.visionCell[c];
+        const uint8_t exp = kExpectedMosaic[c];
+        p1 = _rowAppendChar(out.rows[1], p1, (got < kColorLetterCount) ? kColorLetters[got] : '?');
+        p2 = _rowAppendChar(out.rows[2], p2, (exp < kColorLetterCount) ? kColorLetters[exp] : '?');
+    }
+
+    // Row 3: status line — reading, read fault, all-match, or the first mismatch spelled out.
+    if (!_visionTestJudged)
+    {
+        _rowSet(out.rows[3], "reading...");
+        return;
+    }
+    if (in.sample.visionFaultKind != kVisionFaultNone)
+    {
+        _rowSet(out.rows[3], "READ FAULT");
+        return;
+    }
+
+    uint8_t wrong    = 0;
+    uint8_t firstBad = 0xFF;
+    for (uint8_t c = 0; c < kVisionCellCount; ++c)
+    {
+        if (in.sample.visionCell[c] != kExpectedMosaic[c])
+        {
+            ++wrong;
+            if (firstBad == 0xFF)
+            {
+                firstBad = c;
+            }
+        }
+    }
+
+    if (wrong == 0)
+    {
+        _rowSet(out.rows[3], "all 12 match");
+        return;
+    }
+
+    // "<n> bad c<i> <E>-><G>" — e.g. "1 bad c4 G->?".
+    char*         row = out.rows[3];
+    uint8_t       pos = _rowAppendInt(row, 0, static_cast<int32_t>(wrong));
+    pos               = _rowAppend(row, pos, " bad c");
+    pos               = _rowAppendInt(row, pos, static_cast<int32_t>(firstBad));
+    pos               = _rowAppendChar(row, pos, ' ');
+    const uint8_t e   = kExpectedMosaic[firstBad];
+    const uint8_t g   = in.sample.visionCell[firstBad];
+    pos               = _rowAppendChar(row, pos, (e < kColorLetterCount) ? kColorLetters[e] : '?');
+    pos               = _rowAppend(row, pos, "->");
+    _rowAppendChar(row, pos, (g < kColorLetterCount) ? kColorLetters[g] : '?');
 }
 
 void OperatorConsoleClass::_renderGyroView(
