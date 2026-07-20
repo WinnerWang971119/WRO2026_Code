@@ -27,8 +27,8 @@
  * The vendor `MiniR4SmartCamReader` / `MiniR4.Vision` are deliberately NOT used (its parser
  * runs off the end of a non-void function on a misaligned start, overruns a fixed stack buffer
  * on a corrupt length byte, and false-syncs on a `0xAA`-as-data byte — see the plan). We talk
- * to the camera UART directly via `Config::VISION_SERIAL` (see ConfigVision.h — it resolves
- * to `Serial2` on the R4 WiFi, the D0/D1 header socket; `MiniR4.Uart` is the same port).
+ * to the camera UART directly via `Config::VISION_SERIAL` (see ConfigVision.h — bench-confirmed
+ * to be `Serial1` at 115200, matching the vendor `MiniR4SmartCamReader::Begin()`).
  * We do NOT `#include <MatrixMiniR4.h>` from here.
  */
 

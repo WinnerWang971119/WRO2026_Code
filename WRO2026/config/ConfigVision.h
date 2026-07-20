@@ -25,21 +25,23 @@
 /**
  * @brief The `HardwareSerial` port the HUE12 camera is wired to.
  *
- * The camera lives on the R4's dedicated UART socket — Arduino pins D0 (RX) / D1 (TX).
- * On the **UNO R4 WiFi** the Renesas core inserts an internal UART ahead of the header
- * socket, so that socket is `Serial2` (UART2 = pins 1/0); `Serial1` there is pins 22/23,
- * which are not on the headers and carry the on-board ESP32/WiFi link — opening it never
- * reaches the camera. The MatrixMiniR4 library agrees: `MiniR4.Uart` is constructed as
- * `UART(UART2_TX_PIN, UART2_RX_PIN)` (its trailing "or Serial1" comment is Minima-era,
- * where the same socket happens to be UART1). Selecting the port through this one macro
- * keeps `Vision.cpp` and `tools/vision_bench/vision_bench.ino` on a single source of truth.
+ * Bench-measured 2026-07: the camera streams valid frames (`0xAA` header, length 9, checksum)
+ * on **`Serial1` at 115200 baud** (see `VISION_UART_BAUD`). A dual-UART baud-sweep probe saw a
+ * steady ~16 fps of `0xAA`-headed frames on `Serial1` and NOTHING on `Serial2`. This matches the
+ * vendor driver `MiniR4SmartCamReader`, whose `Begin()` does `Serial1.begin(115200)`.
  *
- * @note Guarded with `#ifndef` so the host test build can alias it onto its single mock
- *       UART; `test/mocks/Arduino.h` defines `Serial2` as the mock `Serial1` object so
- *       `readMosaic()` reads the same stream the tests feed via `mockSerial1Feed`.
+ * On the MATRIX Mini R4 the physical "UART" socket is routed to `Serial1`. The D0/D1 header
+ * socket (`Serial2` = UART2 = pins 1/0) is NOT the camera and reads dead-silent. Do NOT change
+ * this to `Serial2`: an earlier commit did exactly that — inferring the port from `MiniR4.Uart`
+ * instead of measuring — and it broke the read. Selecting the port through this one macro keeps
+ * `Vision.cpp` and `tools/vision_bench/vision_bench.ino` on a single source of truth.
+ *
+ * @note Guarded with `#ifndef` so a host/bench build can override the port from the command line.
+ *       The host tests feed the mock `Serial1` directly (`mockSerial1Feed`), which this macro
+ *       already selects — no alias needed.
  */
 #ifndef VISION_SERIAL
-#define VISION_SERIAL Serial2
+#define VISION_SERIAL Serial1
 #endif
 
 namespace Config
@@ -73,24 +75,29 @@ namespace Config
      * @brief Number of packed 16-bit words per HUE12 UART frame.
      *
      * @note This is NOT the slot count or cell count — it is the wire framing parameter
-     *       that determines when a complete frame has been received. TODO: verify at bench T8.
+     *       that determines when a complete frame has been received. Bench-confirmed: the wire
+     *       shows `AA 09 ...` — an `0xAA` header followed by a length byte of 9.
      */
-    constexpr uint8_t VISION_FRAME_WORDS = 9;   // packed words per frame; TODO verify T8
+    constexpr uint8_t VISION_FRAME_WORDS = 9;   // packed words per frame; bench-confirmed (AA 09)
 
     /**
      * @brief UART baud rate for the HUE12 camera link.
      *
-     * Must match the `.mbr4` contract program's configured baud. TODO: bench-verify at T8.
+     * Bench-confirmed 2026-07 at 115200 — matches the vendor `MiniR4SmartCamReader::Begin()`
+     * (`Serial1.begin(115200)`). The camera streamed clean framed data only at this baud; 9600
+     * (the former placeholder) produced framing garbage.
      */
-    constexpr uint32_t VISION_UART_BAUD = 9600;   // contract-program baud; TODO bench-verify T8
+    constexpr uint32_t VISION_UART_BAUD = 115200;   // vendor SmartCamReader baud; bench-confirmed
 
     /**
      * @brief Per-read-attempt timeout in milliseconds for the HUE12 UART reader.
      *
-     * Must be at least `(VISION_FLUSH_DISCARD_FRAMES + 1)` emission periods long to
-     * guarantee at least one fresh frame is available after flush. TODO: tune at bench T8.
+     * Must be at least `(VISION_FLUSH_DISCARD_FRAMES + 1)` emission periods long to guarantee at
+     * least one fresh frame is available after flush. Bench-measured rate is ~16 fps (~63 ms /
+     * frame), so DISCARD+1 = 2 frames ≈ 125 ms; 250 ms leaves comfortable margin (and the reader
+     * retries once on top of this).
      */
-    constexpr uint16_t VISION_READ_TIMEOUT_MS = 120;   // >= (DISCARD+1) emission periods; TODO T8
+    constexpr uint16_t VISION_READ_TIMEOUT_MS = 250;   // >= (DISCARD+1) frame periods @ ~16 fps
 
     /**
      * @brief Number of frames discarded after a UART flush before latching the mosaic result.
