@@ -296,9 +296,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    //PathTracker.goTo("i1");
-    //Drive.driveDist(50).setPower(60).setMode(DriveMode::RAW);
-    Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
+    Drive.turnDeg(90);
     return true;
 }
 

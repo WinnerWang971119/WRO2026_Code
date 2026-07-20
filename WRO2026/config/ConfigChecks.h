@@ -252,9 +252,27 @@ namespace Config
     // ...and must NOT collide with the differential-drive pair (M2/M3).
     static_assert(BELT_M_ID != MOTOR_LEFT_ID && BELT_M_ID != MOTOR_RIGHT_ID,
                   "BELT_M_ID collides with a drive motor (MOTOR_LEFT_ID/MOTOR_RIGHT_ID).");
-    // Belt direction sign is applied at the ManipBelt driver boundary; must be exactly +/-1.
+    // Belt encoder read sign is applied in ManipBelt::_getDegrees(); must be exactly +/-1.
     static_assert(BELT_DIR_SIGN == 1 || BELT_DIR_SIGN == -1,
                   "BELT_DIR_SIGN must be +1 or -1.");
+    // The POSITION loop's creep phase is what lets a move stop inside tolerance. A creep speed
+    // at or above the coarse speed collapses the two phases into single-speed bang-bang, which
+    // overshoots the tolerance band every tick and dithers until the watchdog fires.
+    static_assert(BELT_POS_CREEP_SPEED > 0 && BELT_POS_CREEP_SPEED < BELT_MOVE_SPEED,
+                  "BELT_POS_CREEP_SPEED must be positive and below BELT_MOVE_SPEED, or a "
+                  "POSITION move cannot settle inside BELT_POS_TOL_DEG.");
+    // The slow zone must be wider than the tolerance band, otherwise the loop is still at
+    // coarse speed when it enters tolerance and overshoots straight back out.
+    static_assert(BELT_POS_SLOW_ZONE_DEG > BELT_POS_TOL_DEG,
+                  "BELT_POS_SLOW_ZONE_DEG must exceed BELT_POS_TOL_DEG.");
+    // Arrival tolerance must exceed the stall detector's motion epsilon, or the loop can sit
+    // inside tolerance while the stall detector still counts the residual creep as motion.
+    static_assert(BELT_POS_TOL_DEG > BELT_POS_MOTION_EPS_DEG,
+                  "BELT_POS_TOL_DEG must exceed BELT_POS_MOTION_EPS_DEG.");
+    static_assert(BELT_POS_MOTION_EPS_DEG > 0, "BELT_POS_MOTION_EPS_DEG must be positive.");
+    // A stall must be detectable before the wall-clock watchdog, or it never fires.
+    static_assert(BELT_POS_STALL_MS > 0 && BELT_POS_STALL_MS < BELT_MOVE_TIMEOUT_MS,
+                  "BELT_POS_STALL_MS must be positive and below BELT_MOVE_TIMEOUT_MS.");
     // Table sizes must be non-empty.
     static_assert(SORTER_BIN_COUNT >= 1, "SORTER_BIN_COUNT must be >= 1.");
     static_assert(BELT_STATION_COUNT >= 1, "BELT_STATION_COUNT must be >= 1.");

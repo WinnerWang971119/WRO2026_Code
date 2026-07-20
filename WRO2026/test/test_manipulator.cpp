@@ -241,44 +241,203 @@ static void test_TC5_sortto_out_of_range_no_write_and_done()
 }
 
 // ===========================================================================
-// TC6 — belt POSITION move to MID (target 400) from getDegrees()==100.
+// Belt POSITION helpers.
 //
-// rotateFor is RELATIVE: delta = 400 - 100 = 300 (>0) -> +|BELT_MOVE_SPEED| speed,
-// degree magnitude 300. Completion is read from ChkRotateEnd; once the mock's
-// rotate-end flag is set true, belt.update() returns the belt to IDLE (done).
+// The POSITION move is closed on the R4 (ManipBelt::update()), not by the lower MCU's
+// rotateFor — that primitive delivers only a fraction of the commanded degrees on this
+// hardware and never reports done. So a POSITION test scripts the encoder itself:
+// set a position, call update(), assert on the speed the loop chose.
+//
+// mockSetDegrees seeds the RAW encoder; _getDegrees() applies Config::BELT_DIR_SIGN to
+// produce the logical frame. Seed through the same sign so the intended LOGICAL value
+// lands, whatever the sign is configured to.
+// ===========================================================================
+
+/// @brief Put the belt's logical position at @p logicalDeg (belt is on M1).
+static void seedBeltLogicalDeg(int32_t logicalDeg)
+{
+    MiniR4.M1.mockSetDegrees((int32_t) (Config::BELT_DIR_SIGN * logicalDeg));
+}
+
+// ===========================================================================
+// TC6 — belt POSITION move to MID: the R4 loop drives coarse, creeps, then stops.
+//
+// Seeds the belt well below MID so the move starts outside the slow zone, then walks it
+// in: coarse speed while far, creep speed inside BELT_POS_SLOW_ZONE_DEG, stop + brake
+// once inside BELT_POS_TOL_DEG. Asserts the sign, both speed phases, and that no
+// rotateFor is issued at all.
 // ===========================================================================
 
 static void test_TC6_belt_position_move_to_mid()
 {
-    TEST_SCOPE("TC6: belt.toStation(MID) issues a +speed rotateFor(delta); ChkRotateEnd ends it");
+    TEST_SCOPE("TC6: belt.toStation(MID) drives the R4 position loop coarse->creep->stop");
 
     resetWorld();
     clearTickCallback();
 
-    // MID's absolute target comes from config (the user tunes it). Seed the encoder a fixed
-    // 300 deg BELOW it so a real POSITION move of exactly 300 toward FAR_END is issued,
-    // regardless of the configured MID value. mockSetDegrees seeds the PHYSICAL encoder while
-    // _getDegrees() folds in Config::BELT_DIR_SIGN, so seed through the same sign to land the
-    // intended value in the belt's logical frame.
-    const int32_t midDeg     = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
-    const int32_t logicalCur = midDeg - 300;
-    MiniR4.M1.mockSetDegrees((int32_t) (Config::BELT_DIR_SIGN * logicalCur));    // belt is on M1
+    // MID's absolute target comes from config (the operator tunes it). Start a fixed distance
+    // BELOW it, outside the slow zone, so the coarse phase is exercised regardless of the
+    // configured MID value.
+    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    const int32_t farBelow = midDeg - (Config::BELT_POS_SLOW_ZONE_DEG + 300);
+    seedBeltLogicalDeg(farBelow);
 
     Manipulator.belt.toStation(Config::BeltStation::MID);    // POSITION, abs target midDeg
 
-    // rotateFor called once, driving toward FAR_END (logical +speed, i.e. physical sign ==
-    // BELT_DIR_SIGN) with |delta| == 300.
-    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 1);
-    ASSERT_GT((int16_t) (MiniR4.M1.lastRotateSpeed * Config::BELT_DIR_SIGN), (int16_t) 0);
-    ASSERT_EQ(MiniR4.M1.lastRotateDegree, (uint16_t) (midDeg - logicalCur));
-
-    // Move is in flight (POS_MOVE) until the rotate-done bit is set.
+    // Arming issues no drive command — update() owns every write.
+    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 0);
     ASSERT_FALSE(Manipulator.belt.isDone());
 
-    // Signal the lower MCU "rotate done"; a single update() retires the move.
-    MiniR4.M1.mockRotateEnded = true;
+    // First tick: far from target -> COARSE, positive (target is above current).
     Manipulator.belt.update();
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) Config::BELT_MOVE_SPEED);
+    ASSERT_FALSE(Manipulator.belt.isDone());
+
+    // Walk into the slow zone -> CREEP, still positive, still in flight.
+    seedBeltLogicalDeg(midDeg - (Config::BELT_POS_SLOW_ZONE_DEG / 2));
+    mockAdvanceMillis(20);
+    Manipulator.belt.update();
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) Config::BELT_POS_CREEP_SPEED);
+    ASSERT_FALSE(Manipulator.belt.isDone());
+
+    // Arrive inside tolerance -> stop, brake, IDLE.
+    seedBeltLogicalDeg(midDeg);
+    mockAdvanceMillis(20);
+    Manipulator.belt.update();
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) 0);
+    ASSERT_TRUE(MiniR4.M1.lastBrake);
     ASSERT_TRUE(Manipulator.belt.isDone());
+
+    // The lower MCU's position primitive is never used.
+    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 0);
+}
+
+// ===========================================================================
+// TC6b — a POSITION move that starts inside tolerance is a no-op.
+//
+// Guards the early-out in beltTo(): no drive command, immediately done, so a blocking
+// drain on an already-positioned belt returns at once.
+// ===========================================================================
+
+static void test_TC6b_belt_position_already_there_is_noop()
+{
+    TEST_SCOPE("TC6b: beltTo() inside BELT_POS_TOL_DEG is an immediate no-op");
+
+    resetWorld();
+    clearTickCallback();
+
+    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    // Just inside tolerance — must NOT start a move.
+    seedBeltLogicalDeg(midDeg - (Config::BELT_POS_TOL_DEG - 1));
+
+    const uint32_t speedCallsBefore = MiniR4.M1.setSpeedCallCount;
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+
+    ASSERT_TRUE(Manipulator.belt.isDone());
+    ASSERT_EQ(MiniR4.M1.setSpeedCallCount, speedCallsBefore);
+    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 0);
+}
+
+// ===========================================================================
+// TC6c — the loop drives NEGATIVE when the target is below the current position.
+//
+// The direction is re-derived from `target - current` every tick, so a target on the
+// other side must flip the commanded sign. This is the property that makes the loop
+// self-correcting on overshoot.
+// ===========================================================================
+
+static void test_TC6c_belt_position_drives_negative_when_target_below()
+{
+    TEST_SCOPE("TC6c: POSITION move below the current position commands negative speed");
+
+    resetWorld();
+    clearTickCallback();
+
+    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    // Start ABOVE the target, outside the slow zone.
+    seedBeltLogicalDeg(midDeg + Config::BELT_POS_SLOW_ZONE_DEG + 300);
+
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    Manipulator.belt.update();
+
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) (-Config::BELT_MOVE_SPEED));
+    ASSERT_FALSE(Manipulator.belt.isDone());
+}
+
+// ===========================================================================
+// TC6d — a jammed POSITION move ends on the stall detector, not the watchdog.
+//
+// The belt is held still (encoder never changes) while the clock advances past
+// BELT_POS_STALL_MS. The move must brake and report done — a jam must never hang a
+// blocking drain — and it must do so well before BELT_MOVE_TIMEOUT_MS.
+// ===========================================================================
+
+static void test_TC6d_belt_position_stall_ends_move()
+{
+    TEST_SCOPE("TC6d: a POSITION move whose encoder never moves ends on BELT_POS_STALL_MS");
+
+    resetWorld();
+    clearTickCallback();
+
+    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    seedBeltLogicalDeg(midDeg - (Config::BELT_POS_SLOW_ZONE_DEG + 300));
+
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    Manipulator.belt.update();
+    ASSERT_FALSE(Manipulator.belt.isDone());
+
+    // Hold the encoder dead still across the stall window. The position never changes, so the
+    // stall reference never advances.
+    mockAdvanceMillis((uint32_t) Config::BELT_POS_STALL_MS);
+    Manipulator.belt.update();
+
+    ASSERT_TRUE(Manipulator.belt.isDone());
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) 0);
+    ASSERT_TRUE(MiniR4.M1.lastBrake);
+    // Ended on the stall path, long before the wall-clock watchdog would have fired.
+    ASSERT_GT((uint32_t) Config::BELT_MOVE_TIMEOUT_MS, (uint32_t) Config::BELT_POS_STALL_MS);
+}
+
+// ===========================================================================
+// TC6e — a slow creep is NOT mistaken for a stall.
+//
+// Stall detection measures against a reference that only advances on confirmed motion,
+// never against the previous tick. At creep speed the belt moves less than
+// BELT_POS_MOTION_EPS_DEG in a single tick, so a per-tick comparison would read a healthy
+// creep as a jam. This walks the belt in sub-epsilon steps across more than the stall
+// window and asserts the move survives.
+// ===========================================================================
+
+static void test_TC6e_belt_position_slow_creep_is_not_a_stall()
+{
+    TEST_SCOPE("TC6e: sub-epsilon per-tick motion accumulates and does not trip the stall");
+
+    resetWorld();
+    clearTickCallback();
+
+    const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
+    int32_t       cur    = midDeg - (Config::BELT_POS_SLOW_ZONE_DEG + 300);
+    seedBeltLogicalDeg(cur);
+
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    Manipulator.belt.update();
+
+    // Advance in steps SMALLER than the motion epsilon, for longer than the stall window.
+    // Real motion accumulates past the epsilon, so the reference keeps advancing.
+    const uint32_t stepMs = 20;
+    const uint32_t steps  = ((uint32_t) Config::BELT_POS_STALL_MS / stepMs) * 3;
+    for (uint32_t i = 0; i < steps; ++i)
+    {
+        cur += 1;    // below BELT_POS_MOTION_EPS_DEG per tick, but it adds up
+        seedBeltLogicalDeg(cur);
+        mockAdvanceMillis(stepMs);
+        Manipulator.belt.update();
+        if (Manipulator.belt.isDone()) { break; }
+    }
+
+    // Still driving: real progress was made, so neither the stall detector nor an early
+    // tolerance match retired the move.
+    ASSERT_FALSE(Manipulator.belt.isDone());
 }
 
 // ===========================================================================
@@ -385,49 +544,71 @@ static void test_TC8_belt_home_resets_settles_then_moves_to_mid()
     Manipulator.belt.update();
 
     const int32_t midDeg = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg;
-    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 1);
-    ASSERT_EQ(MiniR4.M1.lastRotateDegree, (uint16_t) midDeg);
-    // Drive is toward FAR_END (logical +speed): physical rotate sign == BELT_DIR_SIGN.
-    ASSERT_GT((int16_t) (MiniR4.M1.lastRotateSpeed * Config::BELT_DIR_SIGN), (int16_t) 0);
+    // The chained MID move is now ARMED but not yet driving: beltTo() issues no command, so
+    // update() still shows the stall's speed until the next tick runs the POSITION loop.
     ASSERT_FALSE(Manipulator.belt.isDone());
 
-    // Signal the MID move complete; a single update() retires the whole sequence.
-    MiniR4.M1.mockRotateEnded = true;
+    // Next tick drives toward FAR_END (positive, since the freshly zeroed encoder sits below
+    // MID's positive target).
+    mockAdvanceMillis(20);
     Manipulator.belt.update();
+    ASSERT_GT(MiniR4.M1.lastSpeed, (int16_t) 0);
+    ASSERT_FALSE(Manipulator.belt.isDone());
+    // The lower MCU's position primitive is never used.
+    ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 0);
+
+    // Deliver the belt to MID; a single update() sees the error inside tolerance and retires
+    // the whole home sequence.
+    seedBeltLogicalDeg(midDeg);
+    mockAdvanceMillis(20);
+    Manipulator.belt.update();
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) 0);
     ASSERT_TRUE(Manipulator.belt.isDone());
 }
 
 // ===========================================================================
 // TC9 (AC10) — POSITION-move watchdog forces completion at BELT_MOVE_TIMEOUT_MS.
 //
-// Start a POSITION move with the rotate-end flag held FALSE forever. update() must
-// keep the move in flight until millis()-start >= BELT_MOVE_TIMEOUT_MS, then the
-// watchdog fires and forces IDLE (done).
+// The watchdog and the stall detector are different escapes. A belt that never MOVES ends
+// on the stall detector (TC6d), long before the watchdog. This covers the other case: a
+// belt that keeps moving but never arrives — a slipping belt, or a target it cannot reach.
+// The encoder is advanced every tick so the stall detector never fires, and the move must
+// survive until millis()-start >= BELT_MOVE_TIMEOUT_MS, then be forced to IDLE.
 // ===========================================================================
 
 static void test_TC9_belt_position_watchdog_fires()
 {
-    TEST_SCOPE("TC9: POSITION move watchdog fires at BELT_MOVE_TIMEOUT_MS (AC10)");
+    TEST_SCOPE("TC9: a moving-but-never-arriving POSITION move hits BELT_MOVE_TIMEOUT_MS (AC10)");
 
     resetWorld();
     clearTickCallback();
 
-    // Encoder far from the target so a real (nonzero) POSITION move is issued.
-    MiniR4.M1.mockSetDegrees(0);
-    MiniR4.M1.mockRotateEnded = false;    // never reports done — force the watchdog path
-
+    seedBeltLogicalDeg(0);
     Manipulator.belt.beltTo(800);    // |800 - 0| = 800 -> POS_MOVE in flight
     ASSERT_FALSE(Manipulator.belt.isDone());
 
-    // Just below the watchdog ceiling: still in flight.
-    mockAdvanceMillis(Config::BELT_MOVE_TIMEOUT_MS - 1);
-    Manipulator.belt.update();
-    ASSERT_FALSE(Manipulator.belt.isDone());
+    // Walk the clock to just below the ceiling, moving the belt AWAY from the target each
+    // tick so it never arrives and the stall detector never trips.
+    const uint32_t stepMs = 100;
+    int32_t        cur    = 0;
+    uint32_t       spent  = 0;
+    while (spent + stepMs < (uint32_t) Config::BELT_MOVE_TIMEOUT_MS)
+    {
+        cur -= 50;    // real motion, wrong direction — never reaches +800
+        seedBeltLogicalDeg(cur);
+        mockAdvanceMillis(stepMs);
+        spent += stepMs;
+        Manipulator.belt.update();
+        // Must still be driving: neither arrival nor stall applies.
+        ASSERT_FALSE(Manipulator.belt.isDone());
+    }
 
     // Cross the ceiling: the watchdog fires and forces completion.
-    mockAdvanceMillis(1);    // now == BELT_MOVE_TIMEOUT_MS since the move start
+    mockAdvanceMillis((uint32_t) Config::BELT_MOVE_TIMEOUT_MS - spent);
     Manipulator.belt.update();
     ASSERT_TRUE(Manipulator.belt.isDone());
+    ASSERT_EQ(MiniR4.M1.lastSpeed, (int16_t) 0);
+    ASSERT_TRUE(MiniR4.M1.lastBrake);
 }
 
 // ===========================================================================
@@ -539,7 +720,6 @@ static void test_TC12_reset_homes_all_servos_and_belt()
     // belt.home() ran: reset()'s TIMED stall toward LEFT/HOME was kicked off (setSpeed issued,
     // belt now in flight). Drive it through the full reset -> settle -> MID sequence.
     ASSERT_FALSE(Manipulator.belt.isDone());
-    MiniR4.M1.mockRotateEnded = false;    // hold the chained MID move in flight
     mockAdvanceMillis(Config::BELT_RESET_MS);
     Manipulator.belt.update();            // stall done -> reset(), enter SETTLE
     // The completing stall re-zeroed the encoder via resetCounter().
@@ -548,8 +728,9 @@ static void test_TC12_reset_homes_all_servos_and_belt()
     mockAdvanceMillis(Config::BELT_HOME_SETTLE_MS);
     Manipulator.belt.update();            // settle done -> toStation(MID) issued (still in flight)
     ASSERT_FALSE(Manipulator.belt.isDone());
-    // Finish the chained MID move.
-    MiniR4.M1.mockRotateEnded = true;
+    // Deliver the belt to MID to finish the chained move.
+    seedBeltLogicalDeg(Config::BELT_STATIONS[(uint8_t) Config::BeltStation::MID].deg);
+    mockAdvanceMillis(20);
     Manipulator.belt.update();
     ASSERT_TRUE(Manipulator.belt.isDone());
 }
@@ -618,6 +799,10 @@ int main()
     test_TC4_sortto_valid_bin_commands_sorter();
     test_TC5_sortto_out_of_range_no_write_and_done();
     test_TC6_belt_position_move_to_mid();
+    test_TC6b_belt_position_already_there_is_noop();
+    test_TC6c_belt_position_drives_negative_when_target_below();
+    test_TC6d_belt_position_stall_ends_move();
+    test_TC6e_belt_position_slow_creep_is_not_a_stall();
     test_TC7_belt_timed_move_to_far_end();
     test_TC8_belt_home_resets_settles_then_moves_to_mid();
     test_TC9_belt_position_watchdog_fires();

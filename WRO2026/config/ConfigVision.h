@@ -21,6 +21,27 @@
  *       corrupts); see the mapping's docblock below. Mirrors `Config.h`'s
  *       `PATH_PASS_THROUGH_ENABLED` and `ConfigManipulator.h`'s `SORTER_RC_ID` / `BELT_M_ID`.
  */
+
+/**
+ * @brief The `HardwareSerial` port the HUE12 camera is wired to.
+ *
+ * The camera lives on the R4's dedicated UART socket — Arduino pins D0 (RX) / D1 (TX).
+ * On the **UNO R4 WiFi** the Renesas core inserts an internal UART ahead of the header
+ * socket, so that socket is `Serial2` (UART2 = pins 1/0); `Serial1` there is pins 22/23,
+ * which are not on the headers and carry the on-board ESP32/WiFi link — opening it never
+ * reaches the camera. The MatrixMiniR4 library agrees: `MiniR4.Uart` is constructed as
+ * `UART(UART2_TX_PIN, UART2_RX_PIN)` (its trailing "or Serial1" comment is Minima-era,
+ * where the same socket happens to be UART1). Selecting the port through this one macro
+ * keeps `Vision.cpp` and `tools/vision_bench/vision_bench.ino` on a single source of truth.
+ *
+ * @note Guarded with `#ifndef` so the host test build can alias it onto its single mock
+ *       UART; `test/mocks/Arduino.h` defines `Serial2` as the mock `Serial1` object so
+ *       `readMosaic()` reads the same stream the tests feed via `mockSerial1Feed`.
+ */
+#ifndef VISION_SERIAL
+#define VISION_SERIAL Serial2
+#endif
+
 namespace Config
 {
     // -----------------------------------------------------------------------------------------

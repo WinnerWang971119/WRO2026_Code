@@ -92,41 +92,98 @@ namespace Config
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
     /**
-     * @brief Belt motor direction sign (`+1` or `-1`). Applied ONCE at the `ManipBelt`
-     *        driver boundary — the `_setSpeed` / `_rotateFor` speed argument and the
-     *        `_getDegrees` read — so the sign convention above holds no matter how the
-     *        belt motor is wired (ADR-045 style single-point sign, like `GYRO_YAW_SIGN`).
-     * @note  This is the LOGICAL-direction knob (which physical end is FAR_END). It is a
-     *        different axis from `BELT_MOTOR_REVERSE`, which fixes motor/encoder AGREEMENT so
-     *        the closed-loop `rotateFor` can complete. On this build both come out such that
-     *        `BELT_DIR_SIGN = +1` and `BELT_MOTOR_REVERSE = true` home the belt correctly.
+     * @brief Belt encoder READ sign (`+1` or `-1`) — converts raw encoder degrees into the
+     *        logical position frame described above (0 at HOME, increasing toward FAR_END).
+     *
+     * Applied ONCE, in `ManipBelt::_getDegrees()` only. It is deliberately NOT applied to the
+     * speed commands (`_setSpeed`): a sign applied to BOTH the command and the read cancels
+     * out of every position calculation — `beltTo()` derives its drive direction from
+     * `target - current`, so scaling both sides by the same factor leaves the chosen direction
+     * unchanged and the knob does nothing. Read-only is what makes it a real knob.
+     *
+     * Bench-measured on this build (`inoTest/belt_rotate_authority`, travel mapping): a
+     * POSITIVE hardware speed command drives the raw encoder DOWN, and `reset()`'s homing
+     * command (`-BELT_STALL_SPEED`) drives it UP into the HOME end-stop. HOME therefore sits at
+     * the raw-encoder maximum, and travel away from HOME runs raw NEGATIVE — confirmed
+     * independently by the post-home reading of `-11` as the belt relaxes off the stop. Negating
+     * the read puts HOME at logical 0 with FAR_END positive, which is what keeps the
+     * `BELT_STATIONS` targets positive and the `+speed = FAR_END` convention above true.
+     *
+     * @note Separate axis from `BELT_MOTOR_REVERSE`, which selects which physical direction the
+     *       hardware calls positive. Changing either one alone flips the logical frame.
+     * @warning Flipping this inverts every POSITION move. If the belt drives away from its
+     *          target instead of toward it, this is the constant to check first.
      */
-    constexpr int8_t   BELT_DIR_SIGN        = +1;    // logical +speed = FAR_END on this build
+    constexpr int8_t   BELT_DIR_SIGN        = -1;    // logical position = -raw on this build
 
     /**
      * @brief Reverse the belt motor's power direction (`setReverse` / `SetDCMotorDir`).
      *
-     * The belt encoder counts OPPOSITE to the motor's power on this build, so the lower MCU's
-     * closed-loop `rotateFor` (POSITION moves) saw the count run away from target and hung to
-     * the `BELT_MOVE_TIMEOUT_MS` watchdog. Reversing the MOTOR (the working `SetDCMotorDir`
-     * half of `setReverse`) brings motor + encoder back into agreement so `rotateFor`
-     * completes — verified on hardware via `inoTest/belt_encoder_probe`. `SetEncoderDir`
-     * (flip the encoder instead) does NOT work: the STM32 rotate controller ignores it, which
-     * is why the vendor left it commented out of `setReverse`.
-     * @note `true` on the current belt (measured: +motor command drove the count negative).
+     * Selects which physical travel direction the hardware treats as a positive speed command.
+     * `true` on this build, which makes `reset()`'s `-BELT_STALL_SPEED` drive into the HOME
+     * end-stop; `BELT_DIR_SIGN` then puts the encoder read in the matching logical frame.
+     *
+     * @note This was originally set to `true` to bring motor and encoder into agreement so the
+     *       lower MCU's closed-loop `rotateFor` would complete. That rationale no longer
+     *       applies — bench measurement showed `rotateFor` delivers only ~43% of the commanded
+     *       degrees and never reports done on this belt regardless of this flag, so POSITION
+     *       moves are now closed on the R4 (see `ManipBelt::update()`). The flag is retained
+     *       purely as the physical-direction selector, and its current value is what homes the
+     *       belt into the correct end-stop.
+     * @warning Flipping this reverses which end `reset()` homes into. `BELT_DIR_SIGN` must be
+     *          flipped with it, or every POSITION move inverts.
      */
-    constexpr bool     BELT_MOTOR_REVERSE   = true;    // flip motor to agree with the encoder
+    constexpr bool     BELT_MOTOR_REVERSE   = true;    // selects the hardware-positive direction
 
     /** @brief Belt encoder pulses per revolution (LEGO EV3). TODO confirm. */
     constexpr uint16_t BELT_PPR             = 360;    // LEGO EV3; TODO confirm
     /** @brief Belt free-run speed spec (RPM). TODO confirm. */
     constexpr uint16_t BELT_RPM             = 300;    // TODO confirm
-    /** @brief Magnitude of a POSITION-mode belt move (PWM). TODO. */
-    constexpr int16_t  BELT_MOVE_SPEED      = 55;     // POSITION-move magnitude; TODO
+    /**
+     * @brief COARSE speed for a POSITION-mode belt move, used while the belt is further than
+     *        `BELT_POS_SLOW_ZONE_DEG` from its target.
+     * @note Bench-validated shape: coarse approach, then creep. See `BELT_POS_CREEP_SPEED`.
+     */
+    constexpr int16_t  BELT_MOVE_SPEED      = 60;     // POSITION-move coarse approach speed
+
+    /**
+     * @brief CREEP speed for a POSITION-mode belt move, used inside `BELT_POS_SLOW_ZONE_DEG`.
+     *
+     * The single most important constant in the position loop. A single-speed bang-bang loop
+     * CANNOT settle: at `BELT_MOVE_SPEED` the belt covers far more ground per tick than
+     * `BELT_POS_TOL_DEG`, so it overshoots the tolerance band every iteration and dithers until
+     * the watchdog fires. Dropping to a creep inside the slow zone is what makes the tolerance
+     * physically reachable.
+     * @warning Lowering this below the motor's stiction floor stalls the belt just short of
+     *          target, which the stall detector then reports as a jam.
+     */
+    constexpr int16_t  BELT_POS_CREEP_SPEED = 15;    // POSITION-move settling speed
+
+    /** @brief Distance from target at which a POSITION move drops to `BELT_POS_CREEP_SPEED`. */
+    constexpr int32_t  BELT_POS_SLOW_ZONE_DEG = 250;
+
+    /**
+     * @brief Arrival tolerance for a POSITION move (encoder degrees).
+     * @note Must comfortably exceed the per-tick travel at `BELT_POS_CREEP_SPEED`, or the loop
+     *       cannot stop inside it. ~0.7% of the belt's measured 3756 deg span.
+     */
+    constexpr int32_t  BELT_POS_TOL_DEG = 25;
+
+    /** @brief Encoder movement below which the belt counts as not moving, for stall detection. */
+    constexpr int32_t  BELT_POS_MOTION_EPS_DEG = 2;
+
+    /**
+     * @brief Stillness that ends a POSITION move as jammed.
+     * @note Measured against a reference position that only advances when real motion is seen —
+     *       NOT against the previous tick — so a legitimately slow creep is never mistaken for a
+     *       stall (at creep speed the belt moves well under `BELT_POS_MOTION_EPS_DEG` in a
+     *       single ~8 ms tick).
+     */
+    constexpr uint32_t BELT_POS_STALL_MS = 700;
     /** @brief Magnitude of the stall-home drive toward HOME (PWM). TODO. */
-    constexpr int16_t  BELT_STALL_SPEED      = 18;     // stall-home magnitude (toward HOME); TODO
+    constexpr int16_t  BELT_STALL_SPEED      = 14;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
-    constexpr uint32_t BELT_RESET_MS         = 2000;   // stall-home timed run; TODO
+    constexpr uint32_t BELT_RESET_MS         = 5000;   // stall-home timed run; TODO
     /**
      * @brief Wall-clock ceiling for the servo settle-home poll in `ManipulatorClass::begin()`
      *        (grabber/sorter/dumper). NOT the belt home ceiling: `ManipBelt::begin()` bounds its
@@ -135,7 +192,7 @@ namespace Config
      */
     constexpr uint32_t BELT_RESET_TIMEOUT_MS = BELT_RESET_MS + 1000;  // servo settle-home ceiling
     /** @brief Watchdog ceiling for a POSITION-mode belt move (ms). TODO. */
-    constexpr uint32_t BELT_MOVE_TIMEOUT_MS = 4000;   // POSITION-move watchdog; TODO
+    constexpr uint32_t BELT_MOVE_TIMEOUT_MS = 8000;   // POSITION-move watchdog; TODO
     /**
      * @brief Settle dwell between the home stall (which is braked to a stop) and the chained
      *        MID move. Gives the lower MCU a clean tick gap to switch from the stall's
@@ -197,9 +254,9 @@ namespace Config
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
-        { BeltMode::POSITION, 640, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
+        { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
+        { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
         { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
         { BeltMode::POSITION,    340,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
         { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
