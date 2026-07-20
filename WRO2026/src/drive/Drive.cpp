@@ -1158,6 +1158,116 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
 // TURN_TIMEOUT_MS (brake + log residual + done, WITHOUT a fault or queue clear).
 // -----------------------------------------------------------------------------------------
 
+#ifdef TURN_TRACE
+// -----------------------------------------------------------------------------------------
+// Per-tick turn diagnostic trace (bench only — compiled ONLY under -DTURN_TRACE).
+//
+// Samples are buffered in SRAM and dumped as CSV when the turn ends, NOT printed per tick:
+// a Serial write inside the loop would itself perturb the tick period, and the tick period
+// is one of the things this exists to measure. Cost when enabled: ~2.6 kB SRAM.
+//
+// Read the dump for, in order:
+//   1. `dt_ms`  — the REAL tick period. Every settle-band invariant assumes ~22.66 ms.
+//   2. `yaw`    — does it respond to `moveL`/`moveR` at all, and in the right direction?
+//   3. `err`    — the limit-cycle amplitude. If |err| never drops under TURN_TOLERANCE_DEG,
+//                 the debounce is not at fault; the chassis genuinely never reaches the band.
+//   4. `inband` — if this increments and resets repeatedly, it IS a debounce miss.
+//   5. `cmd_raw` vs `cmd_out` — how much the clamp/slew/creep floor is reshaping the PD.
+// -----------------------------------------------------------------------------------------
+namespace
+{
+    /// @brief One recorded tick. Fixed-point to keep the buffer affordable in SRAM.
+    struct TurnTraceSample
+    {
+        uint16_t tMs;           ///< ms since the first recorded tick of this turn.
+        int16_t  yawDeci;       ///< measured yaw * 10 (deg).
+        int16_t  errDeci;       ///< progress-frame error * 10 (deg).
+        int16_t  dtMs;          ///< measured tick period feeding the D term.
+        int16_t  cmdRaw;        ///< PD output BEFORE clamp / slew / creep.
+        int16_t  cmdOut;        ///< command actually dispatched (post creep floor).
+        int16_t  moveL;         ///< dispatched left-wheel PWM.
+        int16_t  moveR;         ///< dispatched right-wheel PWM.
+        uint8_t  brokeAway;     ///< 1 once the breakaway floor handed off to the kinetic creep.
+        uint8_t  inBandCount;   ///< settle debounce counter as of this tick.
+    };
+
+    constexpr uint16_t TURN_TRACE_CAP = 160;    ///< ~3.6 s at a 22.66 ms tick — covers a timeout.
+
+    TurnTraceSample _ttBuf[TURN_TRACE_CAP];
+    uint16_t        _ttCount    = 0;
+    uint32_t        _ttStartMs  = 0;
+    bool            _ttOverflow = false;
+
+    /// @brief Append one tick. Silently drops (and flags) samples past the buffer cap.
+    void ttRecord(
+        uint32_t nowMs, float yaw, float errProg, float dtSec, float cmdRaw, float cmdOut,
+        int16_t moveL, int16_t moveR, bool brokeAway, uint8_t inBandCount)
+    {
+        if (_ttCount == 0)
+        {
+            _ttStartMs  = nowMs;
+            _ttOverflow = false;
+        }
+        if (_ttCount >= TURN_TRACE_CAP)
+        {
+            _ttOverflow = true;
+            return;
+        }
+        TurnTraceSample& s = _ttBuf[_ttCount++];
+        s.tMs              = (uint16_t) (nowMs - _ttStartMs);
+        s.yawDeci          = (int16_t) lroundf(yaw * 10.0f);
+        s.errDeci          = (int16_t) lroundf(errProg * 10.0f);
+        s.dtMs             = (int16_t) lroundf(dtSec * 1000.0f);
+        s.cmdRaw           = (int16_t) constrain(lroundf(cmdRaw), -32000L, 32000L);
+        s.cmdOut           = (int16_t) lroundf(cmdOut);
+        s.moveL            = moveL;
+        s.moveR            = moveR;
+        s.brokeAway        = brokeAway ? 1 : 0;
+        s.inBandCount      = inBandCount;
+    }
+
+    /// @brief Dump the buffer as CSV and reset it for the next turn.
+    void ttDump(const char* reason)
+    {
+        Serial.print(F("[TT-TRACE] end="));
+        Serial.print(reason);
+        Serial.print(F(" samples="));
+        Serial.print(_ttCount);
+        if (_ttOverflow)
+        {
+            Serial.print(F(" (TRUNCATED)"));
+        }
+        Serial.println();
+        Serial.println(F("[TT-TRACE] t_ms,yaw,err,dt_ms,cmd_raw,cmd_out,moveL,moveR,broke,inband"));
+        for (uint16_t i = 0; i < _ttCount; ++i)
+        {
+            const TurnTraceSample& s = _ttBuf[i];
+            Serial.print(F("[TT-TRACE] "));
+            Serial.print(s.tMs);
+            Serial.print(',');
+            Serial.print(s.yawDeci / 10.0f, 1);
+            Serial.print(',');
+            Serial.print(s.errDeci / 10.0f, 1);
+            Serial.print(',');
+            Serial.print(s.dtMs);
+            Serial.print(',');
+            Serial.print(s.cmdRaw);
+            Serial.print(',');
+            Serial.print(s.cmdOut);
+            Serial.print(',');
+            Serial.print(s.moveL);
+            Serial.print(',');
+            Serial.print(s.moveR);
+            Serial.print(',');
+            Serial.print(s.brokeAway);
+            Serial.print(',');
+            Serial.println(s.inBandCount);
+        }
+        _ttCount = 0;
+    }
+}    // namespace
+#endif    // TURN_TRACE
+
 void DriveClass::_updateTurnProfile()
 {
     if (_turnProfileState == TurnProfileState::IDLE)
@@ -1220,6 +1330,9 @@ void DriveClass::_updateTurnProfile()
         _turnProfileState = TurnProfileState::IDLE;
         _turnDone         = true;
         _moveDone         = true;    // single-task-done bit collapse (matches _updateProfile).
+#ifdef TURN_TRACE
+        ttDump("SETTLED");
+#endif
         return;
     }
 
@@ -1237,6 +1350,9 @@ void DriveClass::_updateTurnProfile()
         _turnProfileState = TurnProfileState::IDLE;
         _turnDone         = true;
         _moveDone         = true;
+#ifdef TURN_TRACE
+        ttDump("TIMEOUT");
+#endif
         return;
     }
 
@@ -1265,6 +1381,9 @@ void DriveClass::_updateTurnProfile()
 
     // Operator order is a contract (TurnPDPolicy.h): pdStep -> clamp -> slewLimit -> creepFloor.
     float cmd = turnPdStep(errProg, _turnErrOld, dtSec, Config::TURN_KP, Config::TURN_KD);
+#ifdef TURN_TRACE
+    const float cmdRaw = cmd;    // pre clamp/slew/creep, for the bench trace.
+#endif
 
     // Clamp to the caller's authority (the builder power override, or Config::TURN_CRUISE_PWM). A
     // clamped P term already IS the deceleration ramp — there is no separate slow zone.
@@ -1307,6 +1426,11 @@ void DriveClass::_updateTurnProfile()
     const TurnWheels wheels =
         turnWheelPattern(_turnDeltaSign, (int16_t) lroundf(cmd), _turnMotorMode);
     MiniR4.DriveDC.Move(wheels.left, wheels.right);
+
+#ifdef TURN_TRACE
+    ttRecord(nowMs, (float) curYaw, errProg, dtSec, cmdRaw, cmd, wheels.left, wheels.right,
+             _turnBrokeAway, _turnInBandCount);
+#endif
 }
 
 // -----------------------------------------------------------------------------------------

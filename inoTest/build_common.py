@@ -77,6 +77,17 @@ def parse_args(sketch_name: str) -> argparse.Namespace:
         default=DEFAULT_FQBN,
         help=f"Arduino board FQBN (default: {DEFAULT_FQBN})",
     )
+    parser.add_argument(
+        "--define",
+        action="append",
+        default=[],
+        metavar="NAME[=VALUE]",
+        help=(
+            "extra preprocessor define passed to the compile, repeatable "
+            "(e.g. --define TURN_TRACE). Lets a bench run toggle a compile-time "
+            "diagnostic without editing firmware source."
+        ),
+    )
     args = parser.parse_args()
     if args.baud <= 0:
         parser.error("--baud must be greater than zero")
@@ -277,11 +288,16 @@ def _compile_command(
     upload_port: str | None,
     sketch_name: str,
     source_domains: Sequence[str],
+    defines: Sequence[str] = (),
 ) -> list[str]:
     """Build the single Arduino CLI compile command with all legacy-library roots.
 
     ``--library WRO2026`` reaches only the firmware root (``Config.h``, ``Tasks.cpp``);
     each ``src/<domain>`` the sketch pulls in needs its own ``--library`` flag on top.
+
+    ``defines`` are emitted as ONE ``compiler.cpp.extra_flags`` build property: Arduino
+    CLI keeps only the last value for a repeated property key, so passing them separately
+    would silently drop all but the final define.
     """
     repo_root = Path(__file__).resolve().parents[1]
     sketch = repo_root / "inoTest" / sketch_name
@@ -292,6 +308,9 @@ def _compile_command(
     command.extend((str(sketch), "--library", str(firmware)))
     for domain in source_domains:
         command.extend(("--library", str(firmware / "src" / domain)))
+    if defines:
+        flags = " ".join(f"-D{define}" for define in defines)
+        command.extend(("--build-property", f"compiler.cpp.extra_flags={flags}"))
     return command
 
 
@@ -309,7 +328,7 @@ def main(sketch_name: str, source_domains: Sequence[str]) -> int:
 
     if args.build_only:
         return subprocess.run(
-            _compile_command(cli, args.fqbn, None, sketch_name, source_domains),
+            _compile_command(cli, args.fqbn, None, sketch_name, source_domains, args.define),
             check=False,
         ).returncode
 
@@ -326,7 +345,9 @@ def main(sketch_name: str, source_domains: Sequence[str]) -> int:
     print(f"Uploading to {board.address}...")
     _close_existing_monitors(cli)
     result = subprocess.run(
-        _compile_command(cli, args.fqbn, board.address, sketch_name, source_domains),
+        _compile_command(
+            cli, args.fqbn, board.address, sketch_name, source_domains, args.define
+        ),
         check=False,
     )
     if result.returncode != 0:

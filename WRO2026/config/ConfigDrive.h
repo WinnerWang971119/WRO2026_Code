@@ -563,7 +563,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 1.5f
+#define TURN_KP_DEFAULT 2.0f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -586,7 +586,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 0.1f
+#define TURN_KD_DEFAULT 0.03f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -643,7 +643,7 @@ namespace Config
      *       break away on the first ticks.
      */
 #ifndef TURN_BREAKAWAY_PWM_DEFAULT
-#define TURN_BREAKAWAY_PWM_DEFAULT 46
+#define TURN_BREAKAWAY_PWM_DEFAULT 50
 #endif
     constexpr int16_t TURN_BREAKAWAY_PWM = TURN_BREAKAWAY_PWM_DEFAULT;
 
@@ -677,7 +677,7 @@ namespace Config
      * @note TODO: bench-tune (T11) — down-tune until the initial kick no longer slips on Lofaix.
      */
 #ifndef TURN_SLEW_PWM_PER_TICK_DEFAULT
-#define TURN_SLEW_PWM_PER_TICK_DEFAULT 10
+#define TURN_SLEW_PWM_PER_TICK_DEFAULT 20
 #endif
     constexpr int16_t TURN_SLEW_PWM_PER_TICK = TURN_SLEW_PWM_PER_TICK_DEFAULT;
 
@@ -685,16 +685,27 @@ namespace Config
      * @brief Consecutive in-band samples required to exit the turn PD's settle debounce
      *        (ADR-068, `TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      *
-     * A single out-of-band sample resets the count to 0. Set to 2 (operator decision) rather
-     * than the mentor's 3, so the debounce stays satisfiable at the bench-measured
-     * `TURN_MIN_RESOLVABLE_DEG` step size and the widened `TURN_TOLERANCE_DEG` below — see the
-     * debounce-coupling `static_assert` in `ConfigChecks.h`, which turns a future desync of any
-     * of the three into a build failure instead of every turn silently hunting to timeout.
+     * A single out-of-band sample resets the count to 0. Set to 1 to match the mentor's
+     * `M_Turn_angle`, which exits on the FIRST in-band sample (`repeat until |error_new| < 1`)
+     * with no debounce at all — verified against his source screenshots, 2026-07-20. An earlier
+     * comment here claimed he used 3; that is not what his code does.
      *
-     * @note TODO: bench-tune (T11).
+     * Why this matters: the creep floor means the chassis never comes to rest, so the turn
+     * converges to a limit cycle rather than to zero. Requiring N consecutive in-band samples
+     * means the robot must STAY inside the band for N ticks; at 2 samples that needs
+     * `omega < 2*TURN_TOLERANCE_DEG / (2*tick)` — half the angular rate a single-sample exit
+     * tolerates. Above that rate the turn damps into a steady buzz around the target that the
+     * debounce can never latch, and every turn silently hunts to `TURN_TIMEOUT_MS`.
+     *
+     * Coupled to `TURN_TOLERANCE_DEG` and `TURN_MIN_RESOLVABLE_DEG` — see the debounce-coupling
+     * `static_assert` in `ConfigChecks.h`, which turns a future desync of any of the three into
+     * a build failure instead of every turn silently hunting to timeout.
+     *
+     * @note TODO: bench-tune (T11). Raise back toward 2 only if a noisy gyro read starts
+     *       producing false single-sample exits.
      */
 #ifndef TURN_SETTLE_SAMPLES_DEFAULT
-#define TURN_SETTLE_SAMPLES_DEFAULT 2
+#define TURN_SETTLE_SAMPLES_DEFAULT 1
 #endif
     constexpr uint8_t TURN_SETTLE_SAMPLES = TURN_SETTLE_SAMPLES_DEFAULT;
 
@@ -732,26 +743,34 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.8f;
+    constexpr float TURN_TOLERANCE_DEG = 1.0f;
 
     /**
      * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
      *        degrees (ADR-068).
      *
-     * Bench-measured (T1, Lofaix, 2026-07-16): `omega_at_creep * measured_tick_period` =
-     * 19.52 deg/s * ~22.66 ms = 0.4423 — the angular rate sustained at `TURN_CREEP_PWM` times the
-     * measured ~22.66 ms TURN tick (T1 phase b: the tick a real PD turn actually runs at, higher
-     * than the ~8 ms idle tick because a turn adds a live yaw read plus a Move write per tick).
-     * NOT a placeholder: T1's bench run is the source of truth this value is pinned to. Consumed
-     * only by the `static_assert`s in `ConfigChecks.h` (never read at runtime) — it exists so a
-     * future retune of `TURN_TOLERANCE_DEG` / `TURN_SETTLE_SAMPLES` / `TURN_CREEP_PWM` cannot
-     * silently desync from the physical floor.
+     * Two independent limits apply, and the binding one is whichever is LARGER:
      *
-     * @note TODO: re-measure (T11) if `TURN_CREEP_PWM` is retuned — this value is derived from
-     *       it and goes stale if the creep floor moves without a re-bench.
+     *   1. MOTION per tick — `omega_at_creep * tick`. Bench-measured (T1, Lofaix, 2026-07-16):
+     *      19.52 deg/s * ~22.66 ms = 0.4423 (that sweep ran at a creep of 38, not today's 20).
+     *   2. SENSOR quantum — the external gyro's wire format is `(G*256 + R) - 32768` in units of
+     *      DEGREES, i.e. one raw count per degree (`inoTest/gyro_calib`: "10 turns -> 3600 raw
+     *      counts"), so the smallest heading change the firmware can OBSERVE is one count times
+     *      `Config::GYRO_SCALE` = 0.9945 deg. Motion finer than this is invisible.
+     *
+     * The sensor quantum dominates, so that is the value pinned here. Using the motion-only
+     * 0.4423 understated the step by 2.25x and inflated the `ConfigChecks.h` debounce margin
+     * from a real 1.005x to an apparent 2.26x — which is precisely how a `TURN_SETTLE_SAMPLES`
+     * of 2 passed the tripwire while making every turn hunt to `TURN_TIMEOUT_MS` on hardware
+     * (2026-07-20). Consumed only by the `static_assert`s in `ConfigChecks.h` (never read at
+     * runtime) — it exists so a future retune of `TURN_TOLERANCE_DEG` / `TURN_SETTLE_SAMPLES` /
+     * `TURN_CREEP_PWM` cannot silently desync from the physical floor.
+     *
+     * @note Re-measure if the gyro board is swapped (changes limit 2) or if `TURN_CREEP_PWM` is
+     *       raised far enough that `omega_at_creep * tick` overtakes the sensor quantum.
      */
 #ifndef TURN_MIN_RESOLVABLE_DEG_DEFAULT
-#define TURN_MIN_RESOLVABLE_DEG_DEFAULT 0.4423f
+#define TURN_MIN_RESOLVABLE_DEG_DEFAULT 0.9945f
 #endif
     constexpr float TURN_MIN_RESOLVABLE_DEG = TURN_MIN_RESOLVABLE_DEG_DEFAULT;
 
