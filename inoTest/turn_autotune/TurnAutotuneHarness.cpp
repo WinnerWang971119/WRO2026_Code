@@ -1,46 +1,48 @@
 /**
  * @file TurnAutotuneHarness.cpp
- * @brief On-robot Twiddle auto-tuner for the turn PD gains (plan T13).
+ * @brief On-robot Twiddle auto-tuner for the turn profile knobs
+ *        (docs/plans/2026-07-21-turn-profile-controller.md, T5).
  * @author WRO 2026
  *
  * @details
- * The third and last of the turn-PD bench sketches. `turn_probe` measures the open-loop plant
- * constants; `turn_tune` reports how accurately the REAL `Drive.turnDeg()` lands at a fixed gain
- * set; this sketch SEARCHES the gain set automatically, on the robot, with no laptop in the loop.
+ * The third and last of the turn bench sketches. `turn_probe` measures the open-loop plant
+ * constants; `turn_tune` reports how accurately the REAL `Drive.turnDeg()` lands at a fixed knob
+ * set; this sketch SEARCHES the knob set automatically, on the robot, with no laptop in the loop.
  *
  * ## Zero production weight — how
  *
- * The PD decision math already lives in header-only, parameter-driven policy functions
- * (`TurnPDPolicy.h`: `turnPdStepRaw`, `turnSlewLimit`, `turnCreepFloor`, `turnSettleStep`,
- * `turnSettled`, `turnWrap180`; `TurnSignPolicy.h`: `turnWheelPattern`) precisely so they can be
- * host-unit-tested with every tunable injected. That same property lets THIS sketch call the exact
- * same functions with the gains held in RUNTIME variables. `runOneTurn` below is a faithful,
- * line-for-line mirror of `Drive::_updateTurnProfile` (and its `_execTurnDeg` dispatch seeding),
- * with `Config::TURN_*` swapped for a `TurnGains` struct and `MiniR4.DriveDC.Move` driven directly
- * — the same raw vendor call the real executor issues. `Drive.cpp` is not touched: the executor
- * stays compile-time `constexpr` (ADR-068), and the search's winning vector is printed for the
- * operator to paste into `ConfigDrive.h` as the new default.
+ * The profile decision math already lives in header-only, parameter-driven policy functions
+ * (`TurnProfilePolicy.h`: `turnPhaseFor`, `turnProfileSpeed`, `turnSettleNudge`; `TurnPDPolicy.h`:
+ * `turnWrap180`, `turnSettleStep`, `turnSettled`; `TurnSignPolicy.h`: `turnWheelPattern`) precisely
+ * so they can be host-unit-tested with every tunable injected. That same property lets THIS sketch
+ * call the exact same functions with the knobs held in RUNTIME variables. `runOneTurn` below is a
+ * faithful, line-for-line mirror of `Drive::_updateTurnProfile` (and its `_execTurnDeg` dispatch
+ * seeding), with `Config::TURN_*` swapped for a `TurnGains` struct and `MiniR4.DriveDC.Move` driven
+ * directly — the same raw vendor call the real executor issues. `Drive.cpp` is not touched: the
+ * executor stays compile-time `constexpr` (ADR-078), and the search's winning vector is printed
+ * for the operator to paste into `ConfigDrive.h` as the new default.
  *
- * ## Fidelity — why the tuned gains transfer
+ * ## Fidelity — why the tuned knobs transfer
  *
  * A replica is only useful if its optimum is production's optimum. Two things buy that:
  *   1. The LOAD-BEARING math is shared, not re-derived — `runOneTurn` calls the same policy
- *      symbols `_updateTurnProfile` calls, in the same operator order (pdStepRaw -> clamp -> slew ->
- *      creep -> wheelPattern), with the same two-level breakaway floor and the same absolute-error
- *      settle debounce.
- *   2. The tick PERIOD matches. `Kd` is now the mentor's RAW per-iteration gain (ADR-077), NOT
- *      loop-rate independent: it differences the per-tick error, whose size depends directly on
- *      how often the loop corrects, so matching the tick period is what makes the searched `Kd`
- *      transfer to production at all. Each replica iteration pumps the full `cooperativeTick()` (Drive
- *      idle) THEN does the turn work, which sums to the same per-tick cost a real nav turn pays
- *      (in production the turn work runs INSIDE `Drive.update()` in place of that idle). The tick
- *      is the bench-measured ~22.66 ms either way.
+ *      symbols `_updateTurnProfile` calls, in the same operator order (phase-latch -> settle-exit
+ *      -> timeout -> breakaway hand-off -> per-phase copysign command -> wheelPattern), with the
+ *      same monotonic phase latch and the same absolute-error settle debounce.
+ *   2. The tick PERIOD is still matched, even though the profile itself carries no derivative term
+ *      and is immune to loop-rate by design (ADR-078): a slow or jittery tick still changes how
+ *      many ticks a fixed-speed CREEP/SETTLE command gets to act before the next phase check,
+ *      which shapes settle time and how often a candidate runs to `TURN_TIMEOUT_MS` — both scored
+ *      terms. Each replica iteration pumps the full `cooperativeTick()` (Drive idle) THEN does the
+ *      turn work, which sums to the same per-tick cost a real nav turn pays (in production the
+ *      turn work runs INSIDE `Drive.update()` in place of that idle). The tick is the
+ *      bench-measured ~22.66 ms either way.
  * The residual risk is closed by the operator's final step: flash `inoTest/turn_tune` with the
- * winning gains and confirm the REAL `Drive.turnDeg()` residual matches what this search reported.
+ * winning knobs and confirm the REAL `Drive.turnDeg()` residual matches what this search reported.
  *
  * ## Safety
  *
- * Every searched gain is bounded (`SPECS` below); the search never leaves the safe box, so a
+ * Every searched knob is bounded (`SPECS` below); the search never leaves the safe box, so a
  * candidate can only ever turn the chassis in place slowly-to-briskly, never drive it off the mat.
  * `BTN_DOWN` aborts between turns and between candidates (polled each tick, not interrupt-driven).
  * Iterations are capped, and every exit path stops the motors and brakes.
@@ -59,7 +61,8 @@
 
 #include "Config.h"
 #include "EventTrace.h"
-#include "TurnPDPolicy.h"
+#include "TurnProfilePolicy.h"    // Pulls TurnPDPolicy.h transitively (turnWrap180, turnSettleStep,
+                                  // turnSettled) -- same include the production Drive.cpp relies on.
 #include "TurnSignPolicy.h"
 #include "YawSource.h"
 
@@ -103,7 +106,7 @@ namespace
 
     // ---- The searched parameters --------------------------------------------------------------
 
-    /// @brief One searched gain: its label, Twiddle seed + initial step, safe bounds, and whether
+    /// @brief One searched knob: its label, Twiddle seed + initial step, safe bounds, and whether
     /// it is quantised to an integer PWM before use.
     struct ParamSpec
     {
@@ -117,24 +120,27 @@ namespace
 
     enum ParamId
     {
-        P_KP = 0,
-        P_KD,
-        P_SLEW,
+        P_CREEP_WINDOW = 0,
+        P_CREEP_PWM,
+        P_SETTLE_KP,
         PARAM_COUNT
     };
 
-    // Seeds are the gains in force (the mentor's Kp/Kd starting points, ADR-068). Bounds keep the
-    // search safe and the coupling constraints intact:
-    //   - SLEW lo is the ConfigChecks (g) floor `TURN_CREEP_THRESH_PWM - TURN_CREEP_PWM`, below
-    //     which the creep-floor ramp locks; computed, not hand-typed, so it tracks the config.
-    //   - creep / breakaway are NOT searched here: `turn_probe` MEASURED them, so they are grounded
-    //     truth, not guesses. Add them to this table (and mind the breakaway>creep coupling) only if
-    //     the closed-loop optimum is suspected to differ from the open-loop floor.
+    // Seeds are the knobs shipped in ConfigDrive.h (ADR-078). Bounds keep the search safe:
+    //   - CREEP_WINDOW must sit strictly above `TURN_TOLERANCE_DEG` for a CREEP zone to exist at
+    //     all (ConfigChecks enforces this on the production default; the search bound below is a
+    //     looser sanity box, not a re-derivation of that assert).
+    //   - CREEP_PWM's search floor sits above the kinetic sustain floor `turn_probe` measures — a
+    //     candidate that drifts below the true floor simply hunts to timeout and disqualifies
+    //     itself via the timeout penalty rather than being excluded here.
+    //   - breakaway (`TURN_BREAKAWAY_PWM`) and cruise (`TURN_CRUISE_PWM`) are NOT searched here:
+    //     `turn_probe` MEASURED the breakaway floor and cruise is the builder's own authority
+    //     knob — both are grounded truth, not guesses. Add either to this table only if the
+    //     closed-loop optimum is suspected to differ from that open-loop grounding.
     const ParamSpec SPECS[PARAM_COUNT] = {
-        {"KP", (float) Config::TURN_KP, 0.20f, 0.30f, 3.00f, false},
-        {"KD", (float) Config::TURN_KD, 2.00f, 0.000f, 30.00f, false},
-        {"SLEW", (float) Config::TURN_SLEW_PWM_PER_TICK, 3.0f,
-         (float) (Config::TURN_CREEP_THRESH_PWM - Config::TURN_CREEP_PWM), 40.0f, true},
+        {"CREEP_WINDOW", (float) Config::TURN_CREEP_WINDOW_DEG, 2.0f, 10.0f, 40.0f, false},
+        {"CREEP_PWM", (float) Config::TURN_CREEP_PWM, 3.0f, 30.0f, 60.0f, true},
+        {"SETTLE_KP", (float) Config::TURN_SETTLE_KP, 0.5f, 1.0f, 10.0f, false},
     };
 
     static_assert(AUTOTUNE_TURNS_PER_CANDIDATE % 2 == 0 && AUTOTUNE_TURNS_PER_CANDIDATE >= 2,
@@ -142,16 +148,14 @@ namespace
     static_assert(AUTOTUNE_MAGNITUDE_DEG > 0 && AUTOTUNE_MAGNITUDE_DEG <= 180,
                   "AUTOTUNE_MAGNITUDE_DEG must be in (0, 180]; a single turn never wraps.");
 
-    /// @brief The full gain set for one turn: the searched params plus the fixed Config values the
+    /// @brief The full knob set for one turn: the searched params plus the fixed Config values the
     /// executor also reads. Mirrors every `Config::TURN_*` `_updateTurnProfile` touches.
     struct TurnGains
     {
-        float    kp;
-        float    kd;
-        int16_t  slewPwmPerTick;
-        int16_t  breakawayPwm;
-        int16_t  creepThreshPwm;
+        float    creepWindowDeg;
         int16_t  creepPwm;
+        float    settleKp;
+        int16_t  breakawayPwm;
         float    breakawayMotionDeg;
         int16_t  cruisePwm;
         float    toleranceDeg;
@@ -165,12 +169,10 @@ namespace
     TurnGains gainsFromParams(const float p[PARAM_COUNT])
     {
         TurnGains g;
-        g.kp                 = p[P_KP];
-        g.kd                 = p[P_KD];
-        g.slewPwmPerTick     = (int16_t) lroundf(p[P_SLEW]);
+        g.creepWindowDeg     = p[P_CREEP_WINDOW];
+        g.creepPwm           = (int16_t) lroundf(p[P_CREEP_PWM]);
+        g.settleKp           = p[P_SETTLE_KP];
         g.breakawayPwm       = Config::TURN_BREAKAWAY_PWM;
-        g.creepThreshPwm     = Config::TURN_CREEP_THRESH_PWM;
-        g.creepPwm           = Config::TURN_CREEP_PWM;
         g.breakawayMotionDeg = (float) Config::TURN_BREAKAWAY_MOTION_DEG;
         g.cruisePwm          = Config::TURN_CRUISE_PWM;
         g.toleranceDeg       = (float) Config::TURN_TOLERANCE_DEG;
@@ -248,15 +250,15 @@ namespace
         bool     timedOut         = false;
     };
 
-    /// @brief Run ONE in-place turn of @p deltaDeg through a runtime-gain replica of
+    /// @brief Run ONE in-place turn of @p deltaDeg through a runtime-knob replica of
     /// `Drive::_updateTurnProfile`, then read the settled rotation. Drives `MiniR4.DriveDC.Move`
     /// directly; `Drive` is not involved.
     ///
     /// Line-for-line faithful to the production executor — see the field-by-field seeding in
     /// `Drive.cpp::_execTurnDeg` and the per-tick loop in `_updateTurnProfile`. The ONLY departures
-    /// are: gains come from @p g not `Config`, and the tick is pumped explicitly at the top of each
-    /// iteration (in production the loop body IS `Drive.update()`, called once per tick by the
-    /// cooperative scheduler).
+    /// are: the searched knobs come from @p g not `Config`, and the tick is pumped explicitly at
+    /// the top of each iteration (in production the loop body IS `Drive.update()`, called once per
+    /// tick by the cooperative scheduler).
     TurnMetrics runOneTurn(const TurnGains& g, int16_t deltaDeg, void (*tickCb)())
     {
         TurnMetrics m;
@@ -281,8 +283,7 @@ namespace
         }
 
         const int8_t sign        = (deltaNorm > 0.0f) ? (int8_t) +1 : (int8_t) -1;
-        float        errOld      = fabsf(deltaNorm);            // -> D term ~= 0 on tick 1
-        float        prevSpeed   = (float) g.breakawayPwm;      // ramp starts at the breakaway floor
+        TurnPhase    phase       = TurnPhase::CRUISE;    // monotonic phase latch starts wide.
         uint8_t      inBandCount = 0;
         bool         brokeAway   = false;
         const float  startYaw    = yawBefore;
@@ -314,20 +315,32 @@ namespace
                 continue;
             }
             const float yaw     = (float) y;
-            const float err     = turnWrap180(target - yaw);
-            const float errProg = (float) sign * err;
+            const float errProg = (float) sign * turnWrap180(target - yaw);
+            const float absErr  = fabsf(errProg);
             if (errProg < minErrProg)
             {
                 minErrProg = errProg;
             }
 
-            inBandCount = turnSettleStep(fabsf(errProg), g.toleranceDeg, inBandCount);
-            if (turnSettled(inBandCount, g.settleSamples))
+            // Monotonic phase latch (ADR-078): the FSM only ever advances CRUISE -> CREEP ->
+            // SETTLE; a later read whose absErr swings back above the window cannot regress it.
+            const TurnPhase natural = turnPhaseFor(absErr, g.creepWindowDeg, g.toleranceDeg);
+            if (natural > phase)
             {
-                autotuneStop();
-                m.durMs    = millis() - startMs;
-                m.timedOut = false;
-                break;
+                phase = natural;
+            }
+
+            // Settle exit — only inside the latched SETTLE phase, same debounce production uses.
+            if (phase == TurnPhase::SETTLE)
+            {
+                inBandCount = turnSettleStep(absErr, g.toleranceDeg, inBandCount);
+                if (turnSettled(inBandCount, g.settleSamples))
+                {
+                    autotuneStop();
+                    m.durMs    = millis() - startMs;
+                    m.timedOut = false;
+                    break;
+                }
             }
 
             if ((uint32_t) (millis() - startMs) >= g.timeoutMs)
@@ -344,26 +357,23 @@ namespace
                 brokeAway = true;
             }
 
-            float cmd = turnPdStepRaw(errProg, errOld, g.kp, g.kd);
-
-            const float power = (float) g.cruisePwm;
-            if (cmd > power)
+            // Per-phase command — ALWAYS copysignf(speed, errProg), matching _updateTurnProfile:
+            //   - not yet broken away -> the static breakaway kick;
+            //   - SETTLE              -> the terminal P-nudge (already signed + gated + clamped);
+            //   - CRUISE / CREEP      -> the fixed profile magnitude, signed here by copysignf.
+            float cmd;
+            if (!brokeAway)
             {
-                cmd = power;
+                cmd = copysignf((float) g.breakawayPwm, errProg);
             }
-            else if (cmd < -power)
+            else if (phase == TurnPhase::SETTLE)
             {
-                cmd = -power;
+                cmd = turnSettleNudge(errProg, g.toleranceDeg, g.settleKp, g.creepPwm);
             }
-
-            cmd = turnSlewLimit(cmd, prevSpeed, (float) g.slewPwmPerTick);
-
-            const int16_t floorThresh = brokeAway ? g.creepThreshPwm : g.breakawayPwm;
-            const int16_t floorPwm    = brokeAway ? g.creepPwm : g.breakawayPwm;
-            cmd                       = turnCreepFloor(cmd, floorThresh, floorPwm);
-
-            prevSpeed = cmd;
-            errOld    = errProg;
+            else
+            {
+                cmd = copysignf((float) turnProfileSpeed(phase, g.cruisePwm, g.creepPwm), errProg);
+            }
 
             const TurnWheels wheels = turnWheelPattern(sign, (int16_t) lroundf(cmd), g.motorMode);
             MiniR4.DriveDC.Move(wheels.left, wheels.right);
@@ -464,7 +474,7 @@ void runTurnAutotune(void (*tickCb)())
 
     Serial.println(F("\n############################################################"));
     Serial.println(F("#  WRO2026 turn autotune (inoTest/turn_autotune)           #"));
-    Serial.println(F("#  On-robot Twiddle search for the turn PD gains (T13)      #"));
+    Serial.println(F("#  On-robot Twiddle search for the turn profile knobs (T5) #"));
     Serial.println(F("############################################################"));
     Serial.print(F("[TA] searching "));
     Serial.print((int) PARAM_COUNT);
@@ -472,7 +482,7 @@ void runTurnAutotune(void (*tickCb)())
     Serial.print(AUTOTUNE_TURNS_PER_CANDIDATE);
     Serial.print(F(" turns/candidate, magnitude "));
     Serial.print(AUTOTUNE_MAGNITUDE_DEG);
-    Serial.println(F(" deg. creep/breakaway held at bench-measured values."));
+    Serial.println(F(" deg. breakaway/cruise held at bench-measured/builder values."));
 
     autotuneWaitForBtnUp(
         tickCb, F("[TA] place the chassis in a CLEAR CIRCLE (it spins in place both ways)."));
@@ -557,23 +567,23 @@ void runTurnAutotune(void (*tickCb)())
     Serial.println(F("\n[TA] ================= RESULT ================="));
     if (g_aborted)
     {
-        Serial.println(F("[TA] ABORTED by BTN_DOWN -- best gains found SO FAR:"));
+        Serial.println(F("[TA] ABORTED by BTN_DOWN -- best knobs found SO FAR:"));
     }
     else
     {
-        Serial.println(F("[TA] search finished -- best gains:"));
+        Serial.println(F("[TA] search finished -- best knobs:"));
     }
     Serial.print(F("[TA]   final cost="));
     Serial.println(bestCost, 3);
     Serial.println(F("[TA] paste these into WRO2026/config/ConfigDrive.h (the searched knobs):"));
-    Serial.print(F("[TA]   TURN_KP   = "));
-    Serial.print(p[P_KP], 4);
+    Serial.print(F("[TA]   TURN_CREEP_WINDOW_DEG = "));
+    Serial.print(p[P_CREEP_WINDOW], 4);
     Serial.println(F("f"));
-    Serial.print(F("[TA]   TURN_KD   = "));
-    Serial.print(p[P_KD], 4);
+    Serial.print(F("[TA]   TURN_CREEP_PWM        = "));
+    Serial.println((int16_t) lroundf(p[P_CREEP_PWM]));
+    Serial.print(F("[TA]   TURN_SETTLE_KP        = "));
+    Serial.print(p[P_SETTLE_KP], 4);
     Serial.println(F("f"));
-    Serial.print(F("[TA]   TURN_SLEW_PWM_PER_TICK = "));
-    Serial.println((int16_t) lroundf(p[P_SLEW]));
     Serial.println(F("[TA] then VALIDATE on the real Drive.turnDeg() path: flash inoTest/turn_tune"));
     Serial.println(F("[TA] with these values and confirm its residual matches this search."));
     Serial.println(F("[TA] press RESET to run again."));

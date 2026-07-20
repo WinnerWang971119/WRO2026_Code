@@ -1,6 +1,7 @@
 /**
  * @file TurnAutotuneHarness.h
- * @brief Declares the on-robot Twiddle auto-tuner for the turn PD gains (plan T13).
+ * @brief Declares the on-robot Twiddle auto-tuner for the turn profile knobs
+ *        (docs/plans/2026-07-21-turn-profile-controller.md, T5).
  * @author WRO 2026
  *
  * @details
@@ -13,23 +14,24 @@
 #define TURN_AUTOTUNE_HARNESS_H
 
 /**
- * @brief Run the on-robot PD gain search once, blocking until it converges, hits the iteration
- *        cap, or the operator aborts with BTN_DOWN.
+ * @brief Run the on-robot turn-profile knob search once, blocking until it converges, hits the
+ *        iteration cap, or the operator aborts with BTN_DOWN.
  *
  * Gated behind a single `BTN_UP` prompt so the operator can place the chassis in a clear circle.
- * Runs a Twiddle (coordinate-ascent) search over the turn PD gains: each candidate gain vector is
- * scored by running N alternating +/- turns through a faithful RUNTIME-gain replica of
- * `Drive::_updateTurnProfile` (the same `TurnPDPolicy.h` / `TurnSignPolicy.h` decision math
- * production uses, driving `MiniR4.DriveDC.Move` directly), and the search keeps the vector that
- * minimises a weighted cost of residual + overshoot + settle-time + timeout penalty. `Drive.cpp`
- * is never modified — the winning gains are printed for the operator to paste into
+ * Runs a Twiddle (coordinate-ascent) search over the turn profile knobs (`TURN_CREEP_WINDOW_DEG`,
+ * `TURN_CREEP_PWM`, `TURN_SETTLE_KP`): each candidate knob vector is scored by running N
+ * alternating +/- turns through a faithful RUNTIME-knob replica of `Drive::_updateTurnProfile`
+ * (the same `TurnProfilePolicy.h` / `TurnPDPolicy.h` / `TurnSignPolicy.h` decision math production
+ * uses, driving `MiniR4.DriveDC.Move` directly), and the search keeps the vector that minimises a
+ * weighted cost of residual + overshoot + settle-time + timeout penalty. `Drive.cpp` is never
+ * modified — the winning knobs are printed for the operator to paste into
  * `WRO2026/config/ConfigDrive.h`, then validated on the real `Drive.turnDeg()` path with
  * `inoTest/turn_tune`.
  *
  * @param tickCb Cooperative-tick function pumped once per replica turn-loop iteration (and during
  *               every blocking wait). Pass `cooperativeTick` from `turn_autotune.ino`: pumping the
  *               full module set each iteration makes the replica's tick period match a real nav
- *               turn's, so the time-normalized `Kd` (and thus the tuned gains) transfer. It MUST
+ *               turn's, so the settle/timeout timing (and thus the tuned knobs) transfer. It MUST
  *               be the sketch's real `cooperativeTick()`, not a partial substitute.
  */
 void runTurnAutotune(void (*tickCb)());
