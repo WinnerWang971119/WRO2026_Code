@@ -384,12 +384,12 @@ private:
     bool _waitForBelt(uint32_t timeoutMs, const char* label);
 
     /**
-     * @brief One planned stop: how many tiles of one colour to collect there.
+     * @brief One planned tile: which wall colour to take it from, and where it goes.
      */
     struct MosaicPick
     {
-        Config::Color color;   ///< Wall colour station to stop at.
-        uint8_t       count;   ///< Tiles to take at that stop (always >= 1).
+        Config::Color color;   ///< Wall colour station to take this tile from.
+        uint8_t       cell;    ///< Mosaic cell it fills; its row selects the sorter bin.
     };
 
     /**
@@ -402,22 +402,27 @@ private:
      * it, so a colour buried under a station the sweep has already passed is only reachable on
      * the next sweep.
      *
-     * This walks that sweep order repeatedly and records a stop only when the station's colour
-     * is actually live, which is what makes the route short: stations with nothing to collect
+     * This walks that sweep order repeatedly and emits tiles only for the station colours that
+     * are actually live, which is what makes the route short: stations with nothing to collect
      * are skipped entirely.
      *
-     * @param picks    Receives one entry per stop, in visiting order. Must hold at least
-     *                 @p maxStops entries.
-     * @param maxStops Capacity of @p picks. `Config::VISION_CELL_COUNT` is always enough — a
-     *                 stop clears at least one cell, so a route can never be longer than the
-     *                 pattern.
-     * @return Number of stops written to @p picks. `0` when the pattern holds no station
+     * Output is one entry per TILE, in collection order. A run of consecutive entries sharing
+     * a colour is one stop at that colour's wall station, so `mosaic()` can walk the list
+     * straight through. Each entry also carries the mosaic cell the tile fills, whose row is
+     * the sorter bin it must be dropped into — the sorter holds one bin per mosaic row so the
+     * dumped rows come out identical to the pattern that was read.
+     *
+     * @param picks    Receives one entry per tile, in collection order. Must hold at least
+     *                 @p maxPicks entries.
+     * @param maxPicks Capacity of @p picks. `Config::VISION_CELL_COUNT` is always enough —
+     *                 one entry per cell of the pattern.
+     * @return Number of tiles written to @p picks. `0` when the pattern holds no station
      *         colour at all — including the case where no successful `Vision::readMosaic()`
      *         has happened, since every cell then reads `Config::Color::UNKNOWN`.
      * @note Reads the `Vision` latch only; it does NOT trigger a camera read. Run the
      *       `readMosaic` task first.
      */
-    uint8_t _mosaicAlgo(MosaicPick picks[], uint8_t maxStops) const;
+    uint8_t _mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const;
 
     /**
      * @brief Choose which of a colour's two wall rows to take the next tile from.

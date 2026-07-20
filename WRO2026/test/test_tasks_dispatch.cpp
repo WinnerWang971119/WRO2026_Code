@@ -44,6 +44,11 @@
 #include "../TasksTypes.h"
 
 #include <cstring>
+#include <string>
+
+// The task-body Vision mock (force-included ahead of the production header) exposes
+// `_setInjectedColors`, which is how the mosaic cases feed a pattern in.
+#include "../src/perception/Vision.h"
 
 static uint32_t g_idleWaitTickCalls = 0;
 
@@ -51,6 +56,139 @@ static void idleWaitTick()
 {
     g_idleWaitTickCalls++;
     mockAdvanceMillis(1);
+}
+
+
+// ---------------------------------------------------------------------------
+// mosaic planning. The task prints its whole plan (one `<tag>->bin<n>` per tile,
+// in collection order) through the capturing Serial, so the byte-identical
+// contract is assertable end to end without reaching into private state:
+// bin `c`'s k-th tile MUST be the colour of pattern cell `k * 4 + c`, and every
+// bin must end up exactly `rows` deep.
+// ---------------------------------------------------------------------------
+
+// `WHITE` is a macro in any TU that reaches <MatrixMiniR4.h>; the mocks do not,
+// but keep the guard so this file survives a future mock that does.
+#pragma push_macro("WHITE")
+#undef WHITE
+
+static char mosaicTagOf(Config::Color c)
+{
+    switch (c)
+    {
+    case Config::Color::YELLOW: return 'Y';
+    case Config::Color::BLUE:   return 'B';
+    case Config::Color::GREEN:  return 'G';
+    case Config::Color::WHITE:  return 'W';
+    default:                    return '?';
+    }
+}
+
+// Diego's reference pattern (4 columns x 3 rows, row-major), used for the
+// happy-path case. Y=3, B=5, G=2, W=2 — all within the wall's 6-per-colour stock.
+static const Config::Color kMosaicRefPattern[Config::VISION_CELL_COUNT] = {
+    Config::Color::YELLOW, Config::Color::BLUE,   Config::Color::GREEN,  Config::Color::BLUE,
+    Config::Color::WHITE,  Config::Color::YELLOW, Config::Color::GREEN,  Config::Color::WHITE,
+    Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::YELLOW, Config::Color::BLUE,
+};
+#pragma pop_macro("WHITE")
+
+// Pull the `<tag>->bin<n>` pairs back out of the captured plan line, in order.
+static size_t mosaicParsePlan(const std::string& capture, char tags[], uint8_t bins[], size_t cap)
+{
+    const std::string head = "[Tasks] mosaic plan:";
+    const size_t      at   = capture.find(head);
+    if (at == std::string::npos)
+    {
+        return 0;
+    }
+    const std::string line = capture.substr(at, capture.find('\n', at) - at);
+
+    size_t n   = 0;
+    size_t pos = 0;
+    while (n < cap && (pos = line.find("->bin", pos)) != std::string::npos)
+    {
+        tags[n] = line[pos - 1];
+        bins[n] = (uint8_t)(line[pos + 5] - '0');
+        ++n;
+        pos += 5;
+    }
+    return n;
+}
+
+static void test_mosaic_fills_bins_in_row_order()
+{
+    TEST_SCOPE("mosaic: every bin loads its column top row down, so the dump mirrors the read");
+    Tasks.begin();
+    Serial.clearCapture();
+    Vision._setInjectedColors(kMosaicRefPattern);
+
+    TaskArgs args{};
+    ASSERT_TRUE(Tasks.runTask("mosaic", args));
+
+    char    tags[Config::VISION_CELL_COUNT];
+    uint8_t bins[Config::VISION_CELL_COUNT];
+    const size_t n = mosaicParsePlan(Serial.captured(), tags, bins, Config::VISION_CELL_COUNT);
+
+    // Every cell of the pattern is collected exactly once.
+    ASSERT_EQ((int)Config::VISION_CELL_COUNT, (int)n);
+
+    // Walk the plan in order; bin c's k-th tile must match pattern cell k*4 + c.
+    uint8_t depth[4] = { 0, 0, 0, 0 };
+    for (size_t i = 0; i < n; ++i)
+    {
+        ASSERT_TRUE(bins[i] < 4);
+        if (bins[i] >= 4)
+        {
+            continue;
+        }
+        const uint8_t cell = (uint8_t)(depth[bins[i]] * 4 + bins[i]);
+        ASSERT_EQ((int)mosaicTagOf(kMosaicRefPattern[cell]), (int)tags[i]);
+        ++depth[bins[i]];
+    }
+
+    for (uint8_t bin = 0; bin < 4; ++bin)
+    {
+        ASSERT_EQ(3, (int)depth[bin]);
+    }
+}
+
+static void test_mosaic_rejects_uncoloured_cell()
+{
+    TEST_SCOPE("mosaic: a cell no station supplies aborts the task instead of planning partially");
+    Tasks.begin();
+    Serial.clearCapture();
+
+    Config::Color pattern[Config::VISION_CELL_COUNT];
+    for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
+    {
+        pattern[i] = kMosaicRefPattern[i];
+    }
+    pattern[5] = Config::Color::UNKNOWN;
+    Vision._setInjectedColors(pattern);
+
+    TaskArgs args{};
+    ASSERT_FALSE(Tasks.runTask("mosaic", args));
+    ASSERT_TRUE(Serial.captured().find("has no station colour") != std::string::npos);
+}
+
+static void test_mosaic_rejects_pattern_beyond_wall_stock()
+{
+    TEST_SCOPE("mosaic: a colour needed more times than the wall holds aborts the task");
+    Tasks.begin();
+    Serial.clearCapture();
+
+    // Seven BLUE against a wall that stocks six of each colour.
+    Config::Color pattern[Config::VISION_CELL_COUNT];
+    for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
+    {
+        pattern[i] = (i < 7) ? Config::Color::BLUE : Config::Color::GREEN;
+    }
+    Vision._setInjectedColors(pattern);
+
+    TaskArgs args{};
+    ASSERT_FALSE(Tasks.runTask("mosaic", args));
+    ASSERT_TRUE(Serial.captured().find("wall holds") != std::string::npos);
 }
 
 // ===========================================================================
@@ -246,6 +384,9 @@ int main()
     test_run_task_debug_yield();
     test_run_task_idle_wait();
     test_run_task_idle_wait_rejects_motion();
+    test_mosaic_fills_bins_in_row_order();
+    test_mosaic_rejects_uncoloured_cell();
+    test_mosaic_rejects_pattern_beyond_wall_stock();
 
     TEST_REPORT();
 }
