@@ -858,6 +858,18 @@ namespace
     };
 
     /**
+     * @brief Sorter bin that receives the tile for mosaic column @p column.
+     *
+     * The carrier faces the mosaic as it dumps, so its bins run opposite to the pattern's
+     * columns — pattern column 0 lands in the LAST bin. Mirroring here keeps the planner
+     * working in pattern coordinates and confines the flip to one place.
+     */
+    uint8_t mosaicBinForColumn(uint8_t column)
+    {
+        return (uint8_t)(kMosaicCols - 1 - column);
+    }
+
+    /**
      * @brief Station index of @p color.
      * @return Index in `[0, kMosaicColorCount)`, or `0xFF` for a colour with no station
      *         (`UNKNOWN` / `RED`).
@@ -902,12 +914,22 @@ namespace
     constexpr uint8_t kMosaicStationHalf[kMosaicColorCount] = { 13, 9, 5, 1 };   // Y B G W
 
     /**
-     * @brief Row node the robot reaches the wall at, coming in from node `M`.
+     * @brief Reset node the robot enters the wall through.
      *
-     * `M` sits at y = 69.45, nearest `MBU` (y = 67.8) of the eight wall nodes, so the route
-     * cost of the FIRST station is measured from there rather than from an arbitrary end.
+     * A direct drive from the field to a wall row node cuts across the mosaic. `MR` sits
+     * clear of it at y = 20 and is a `NodeType::RESET` node, so simply arriving there makes
+     * PathTracker square up, press the rear into the wall and re-anchor `Localization`
+     * (`_maybeEnterReset`) — no explicit reset call needed.
      */
-    constexpr uint8_t kMosaicEntryChainPos = 4;   // MBU
+    constexpr const char* kMosaicResetNode = "MR";
+
+    /**
+     * @brief Wall-chain position the robot starts from, having come in through `MR`.
+     *
+     * `MR` edges to `MYD` (the bottom of the chain), so the FIRST station's route cost is
+     * measured from there rather than from an arbitrary end.
+     */
+    constexpr uint8_t kMosaicEntryChainPos = 7;   // MYD — the node MR opens onto
 
     /** @brief Fill depth of bin @p bin in packed @p state. */
     uint8_t mosaicDepth(uint8_t state, uint8_t bin)
@@ -1024,7 +1046,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         Serial.print(F(" "));
         Serial.print(kMosaicColorTag[mosaicColorIndex(picks[i].color)]);
         Serial.print(F("->bin"));
-        Serial.print((uint8_t)(picks[i].cell % kMosaicCols));
+        Serial.print(mosaicBinForColumn((uint8_t)(picks[i].cell % kMosaicCols)));
     }
     Serial.println();
 
@@ -1042,10 +1064,16 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     uint8_t parkedRow   = 0xFF;
     uint8_t chainPos    = kMosaicEntryChainPos;
 
+    // Enter the wall through the reset node — a direct run at a row node crosses the mosaic.
+    // `MR` is a NodeType::RESET node, so arriving squares up, presses the rear into the wall
+    // and re-anchors Localization on its own.
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    PathTracker.goTo(kMosaicResetNode);
+
     for (uint8_t i = 0; i < tiles; ++i)
     {
         const uint8_t station = mosaicColorIndex(picks[i].color);
-        const uint8_t bin     = (uint8_t)(picks[i].cell % kMosaicCols);
+        const uint8_t bin     = mosaicBinForColumn((uint8_t)(picks[i].cell % kMosaicCols));
 
         const uint8_t row =
             _mosaicPickRow(stock[station], station, parkedColor, parkedRow, chainPos);

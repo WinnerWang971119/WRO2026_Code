@@ -63,8 +63,9 @@ static void idleWaitTick()
 // mosaic planning. The task prints its whole plan (one `<tag>->bin<n>` per tile,
 // in collection order) through the capturing Serial, so the byte-identical
 // contract is assertable end to end without reaching into private state:
-// bin `c`'s k-th tile MUST be the colour of pattern cell `k * 4 + c`, and every
-// bin must end up exactly `rows` deep.
+// bin `b`'s k-th tile MUST be the colour of pattern cell `k * 4 + (3 - b)` — the
+// carrier is mirrored against the pattern — and every bin ends up exactly `rows`
+// deep, which is what makes the dump reproduce the read.
 // ---------------------------------------------------------------------------
 
 // `WHITE` is a macro in any TU that reaches <MatrixMiniR4.h>; the mocks do not,
@@ -133,7 +134,8 @@ static void test_mosaic_fills_bins_in_row_order()
     // Every cell of the pattern is collected exactly once.
     ASSERT_EQ((int)Config::VISION_CELL_COUNT, (int)n);
 
-    // Walk the plan in order; bin c's k-th tile must match pattern cell k*4 + c.
+    // Walk the plan in order. The carrier is MIRRORED against the pattern, so bin b holds
+    // pattern column 3 - b; bin b's k-th tile must match pattern cell k*4 + (3 - b).
     uint8_t depth[4] = { 0, 0, 0, 0 };
     for (size_t i = 0; i < n; ++i)
     {
@@ -142,7 +144,8 @@ static void test_mosaic_fills_bins_in_row_order()
         {
             continue;
         }
-        const uint8_t cell = (uint8_t)(depth[bins[i]] * 4 + bins[i]);
+        const uint8_t column = (uint8_t)(3 - bins[i]);
+        const uint8_t cell   = (uint8_t)(depth[bins[i]] * 4 + column);
         ASSERT_EQ((int)mosaicTagOf(kMosaicRefPattern[cell]), (int)tags[i]);
         ++depth[bins[i]];
     }
