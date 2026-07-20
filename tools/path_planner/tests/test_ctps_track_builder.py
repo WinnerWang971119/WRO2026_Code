@@ -149,10 +149,12 @@ from tools.path_planner.planner import (
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
+    NAV_TURN_TOLERANCE_DEG,
     OffMapFaultError,
     OffMapGate,
     PathTrackerSim,
     RETURN_DISTANCE_CAP_CM,
+    wrap_pm180,
 )
 from tools.path_planner.tests.fixtures import pivot_field_data, toy_field_data
 
@@ -2656,3 +2658,126 @@ def test_tc13_biased_leg_renders_lateral_nudge_parity_safe():
         "the lateral hug-side render must NOT perturb the LocalizationSim pose "
         "(keyframes must be byte-identical with and without follow_offset)"
     )
+
+
+# ===========================================================================
+# TC18 (wall-square split) — a wall reset SQUARES in place, THEN presses
+# ---------------------------------------------------------------------------
+# The firmware's wall interlude is square-THEN-push: `Drive.wallStop(dist)
+# .setReverse(true).setMode(RAW).setHeading(facing)` first turns in place to the
+# wall normal (its internal SQUARE phase) and only then presses the rear
+# straight into the wall (`PathTracker::_beginWallStop`). The sim collapses both
+# halves into ONE `ACT_WALL_STOP` record — `_wall_reset_interlude` phase 1
+# mutates the chassis heading AND its on-axis coordinate before its single yield
+# — so the track builder must split the record back apart. Without the split the
+# whole rotation is handed to `_densify_drive`, which lerps heading by
+# traveled-distance fraction, and the player renders the robot pirouetting WHILE
+# it crosses the standoff: a maneuver the robot never performs.
+#
+# `_wall_depart_field_data` above cannot catch this: it is axis-aligned (the
+# approach heading and `facing` are both 0), so its square is a zero-magnitude
+# no-op. `_wall_square_field_data` moves the reset node OFF the start node's
+# axis, so the approach lands at ~18.4 deg and squaring to `facing = 0` is a
+# genuine turn — the same shape the real field's `MR` node produces.
+# ===========================================================================
+
+
+def _wall_square_field_data() -> SimpleNamespace:
+    """A BLIND(start) -> RESET field whose wall approach is NOT axis-aligned.
+
+    Identical to :func:`_wall_depart_field_data` except the reset node ``R``
+    sits off the start node's axis, so the interlude's square is a real
+    (above-tolerance) in-place turn rather than a no-op.
+
+    :return: a validator-clean :class:`SimpleNamespace` field-data object.
+    """
+    return SimpleNamespace(
+        FIELD_MM=(3000.0, 2000.0),
+        MAP_PNG="maps/map.png",
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        NODES={"S": (0.0, 0.0), "R": (180.0, 60.0)},
+        NODE_TYPES={"S": "blind", "R": "reset"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[("S", "R")],
+        OBSTACLES=[],
+        PIVOT_TURNS=[],
+        RESET_NODES={"R": {"axis": "x", "wall_coord": 120.0, "facing": 0.0}},
+        EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        PIPELINE_SPEED=SpeedTier.FAST,
+    )
+
+
+def test_tc18_wall_reset_squares_in_place_before_pressing():
+    """TC18: no rendered keyframe span both translates AND rotates.
+
+    Builds a single ``goto R`` onto an off-axis reset node and asserts:
+
+    1. **No combined span anywhere in the track.** Every consecutive keyframe
+       pair either holds its heading (a pure advance) or holds its position (a
+       pure in-place turn). A span doing both is exactly the pirouette-while-
+       driving artefact: the player lerps ``x``/``y``/``h`` together, so a
+       combined span IS what the operator sees on screen.
+    2. **The square precedes the press.** The interlude's rotation to ``facing``
+       completes at the node pose, and only the FOLLOWING spans carry the
+       chassis to the wall coordinate — the firmware's square-then-push order,
+       not push-then-square or the two smeared together.
+    """
+    trace = Trace(
+        schema_version=1,
+        start_node="S",
+        start_heading_deg=0.0,
+        build_error=False,
+        commands=[Command(seq=0, op="goto", target="R")],
+    )
+    track = _build_quiet(trace, _wall_square_field_data())
+    kfs = track.keyframes
+
+    # (1) No span may translate and rotate at once.
+    combined = [
+        (a, b)
+        for a, b in zip(kfs, kfs[1:])
+        if hypot(b["x"] - a["x"], b["y"] - a["y"]) > 1e-6
+        and abs(wrap_pm180(b["h"] - a["h"])) > NAV_TURN_TOLERANCE_DEG
+    ]
+    assert combined == [], (
+        "keyframe spans translate AND rotate simultaneously — the player will "
+        f"render the robot driving while it pirouettes: {combined}"
+    )
+
+    # (2) The square must be a real turn (guard the fixture itself: an
+    # axis-aligned approach would make assertion (1) vacuous here).
+    node_x, node_y = 180.0, 60.0
+    at_node = [i for i, k in enumerate(kfs) if hypot(k["x"] - node_x, k["y"] - node_y) <= 1e-6]
+    assert at_node, "the goto never landed on the reset node R"
+    # The FIRST contiguous block sitting on the node is the arrival + the square;
+    # the node pose recurs at the end of the track (WALL_DEPART lands back on it),
+    # so `at_node[-1]` would span the whole interlude.
+    square_start = at_node[0]
+    square_end = square_start
+    while square_end + 1 in at_node:
+        square_end += 1
+    square_deg = abs(wrap_pm180(kfs[square_end]["h"] - kfs[square_start]["h"]))
+    assert square_deg > NAV_TURN_TOLERANCE_DEG, (
+        "fixture regression: the wall approach is axis-aligned, so the square "
+        "is a no-op and this test proves nothing"
+    )
+
+    # (3) The square finishes on `facing` (0 deg) BEFORE any press motion, and
+    # every keyframe from there to the wall holds that heading.
+    assert abs(wrap_pm180(kfs[square_end]["h"] - 0.0)) <= NAV_TURN_TOLERANCE_DEG
+    wall_idx = next(
+        (i for i in range(square_end, len(kfs)) if abs(kfs[i]["x"] - 120.0) <= 1e-6),
+        None,
+    )
+    assert wall_idx is not None, "the press never reached the wall coordinate after the square"
+    assert all(
+        abs(wrap_pm180(k["h"] - 0.0)) <= NAV_TURN_TOLERANCE_DEG
+        for k in kfs[square_end : wall_idx + 1]
+    ), "the heading moved during the wall press — the square leaked into the push"

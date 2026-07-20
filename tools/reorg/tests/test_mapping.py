@@ -50,8 +50,8 @@ def test_root_stay_set_matches_spec() -> None:
         assert not mapping.is_mover(name)
 
 
-def test_config_subheaders_are_a_disjoint_set_of_8() -> None:
-    assert len(mapping.CONFIG_SUBHEADERS) == 8
+def test_config_subheaders_are_a_disjoint_set_of_9() -> None:
+    assert len(mapping.CONFIG_SUBHEADERS) == 9
     assert mapping.CONFIG_SUBHEADERS.isdisjoint(mapping.MAPPING)
     for name in mapping.CONFIG_SUBHEADERS:
         assert mapping.is_config_subheader(name)

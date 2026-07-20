@@ -2978,3 +2978,33 @@ add_test(NAME approach_ramp_freshness
             -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/approach_ramp_goldens.fresh.json
             -P ${APPROACH_RAMP_DUMP_DIR}/approach_ramp_freshness.cmake
 )
+
+# =========================================================================================
+# Test executable — operator-diagnostics console core, real-linked, zero mocks (T9, TC1-TC28).
+#
+# Links the REAL `src/operator/OperatorConsole.cpp` directly against `test_operator_console.cpp`
+# (T8). The core is `<stdint.h>`-only — it includes only `ConsoleTypes.h`, `config/ConfigUi.h`,
+# and `config/ConfigGlobal.h`, never `<Arduino.h>` / `<MatrixMiniR4.h>` — so it needs NO
+# force-includes, NO `MOCK_SOURCES`, and NO mock include directory: just `${SKETCH_DIR}`.
+#
+# Other targets are also mock-free (the `*_dump` pair and the `*_policy` tests), but those are
+# single-TU: header-only policies or self-contained dumps. This is the only target that links a
+# production `.cpp` out of `src/` with ZERO mock indirection — which is what makes the absence
+# load-bearing here. It is the assertion: if the core ever grows an Arduino dependency, this is
+# the target that stops compiling and catches it. So do NOT "fix" a future failure here by
+# adding `add_mock_force_includes` / `HAL_MOCKS_DIR` / `PATH_MOCKS_DIR`; that would delete the
+# only structural guard on the core's purity.
+#
+# Self-asserting, like the `*_policy` tests and unlike the `*_dump` targets: the suite's
+# `check()` failures set the process exit code via `g_failures`, so ctest sees them.
+#
+# Warning flags come from the directory-level `add_compile_options` above (which adds
+# `-Wno-narrowing` and friends to `-Wall -Wextra`) — that block is the authority, not any
+# hand-run recipe.
+# =========================================================================================
+add_executable(test_operator_console
+    ${TEST_DIR}/test_operator_console.cpp
+    ${SKETCH_DIR}/src/operator/OperatorConsole.cpp
+)
+target_include_directories(test_operator_console PRIVATE ${SKETCH_DIR})
+add_test(NAME operator_console COMMAND test_operator_console)

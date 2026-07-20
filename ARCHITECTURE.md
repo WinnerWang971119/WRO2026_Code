@@ -51,6 +51,11 @@ WRO2026_Code/
 │   │   │   ├── ManipServo.h          # servo actuator class behind Manipulator
 │   │   │   └── ManipBelt.h           # belt actuator class behind Manipulator
 │   │   │
+│   │   ├── operator/                 # top-layer peer of mission/ (ADR-076)
+│   │   │   ├── ConsoleTypes.h        # console PODs (Item/State/ActionRequest/DiagSample/ConsoleFrame)
+│   │   │   ├── OperatorConsole.h / .cpp # OLED-free core: item table, scroll FSM, views, SELF TEST; host-tested
+│   │   │   └── OperatorPanel.h / .cpp   # Arduino adapter: samples hardware, renders OLED, executes ActionRequests
+│   │   │
 │   │   └── util/
 │   │       ├── EncoderSource.h / .cpp # sole owner of lower-MCU encoder + drive task-done I/O (ADR-066)
 │   │       ├── EventTrace.h / .cpp   # OLED ring buffer + 500 ms Serial heartbeat
@@ -114,6 +119,15 @@ WRO2026.ino
                     (last-good) / resetCache / isPrevTaskDone; read by Drive — profile / seek /
                     wall-push / calibration / getEncL/R / task-done — and ManipBelt — belt
                     position; LineFollower reaches it through Drive.getEncL/getEncR; ADR-066)
+  OperatorPanel ── (top-layer peer of Mission, driven from WRO2026.ino's loop() — NOT
+                    cooperativeTick(), so the adapter never re-enters mid-dispatch; adapter
+                    for the OLED-free OperatorConsole core (ADR-076); PUSHES cached
+                    DiagSample state read from YawSource, WROLineArray and MiniR4.PWR on a
+                    cadence, and PULLS WROLineArray.readBoard/probeBoard + Vision.readMosaic
+                    only on the core's ActionRequest; CAL_LINE / CAL_MOTOR / GYRO_ZERO
+                    actions dispatch WROLineArray.calibrate(), Drive.calibrateMotorBias()
+                    and YawSource.zeroHardware() respectively; takes exclusive OLED
+                    ownership while open via EventTrace.setRenderEnabled(false))
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
@@ -157,7 +171,9 @@ writer module does not.
 | `Tasks` | composite multi-step routines + name-string registry | `runTask(name, args)`, `findTask(name)`, `abort()`, `isAborted()`, `inTask()`, registry table in `Tasks.cpp` |
 | `Manipulator` | 3 RC servos (grabber, sorter, dumper) + 1 belt DC motor | coordinated verbs `grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()` (blocking-by-default builders with `.async()`); actuator primitives `grabber/sorter/dumper.setAngle()/open()/close()/home()`, `belt.toStation()/beltTo()/runFor()/home()`; `begin()`, `update()`, `isDone()`, `setTickCallback(...)` |
 | `Vision` | HUE12 mosaic read over `Serial1`; bounded-resync UART parser; capture-once 12-cell latch; on-R4 hue classification via `Config::HUE_BANDS` | `readMosaic() → bool`, `getColor(cell) → Config::Color`, `begin()`, `setTickCallback(...)` |
-| `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()` — polled in `update()` |
+| `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()`, `setRenderEnabled(bool)` (suppresses only the OLED render; polling + heartbeat continue, ADR-076) — polled in `update()` |
+| `OperatorConsole` | OLED-free diagnostics-console core: item table, scroll/confirm FSM, live views, SELF TEST sequencer (ADR-076) | `begin()`, `open()`, `update(ConsoleInput, ConsoleFrame&)`, `notifyActionDone(...)`, `notifyReadDone(...)`, `notifyFrameRendered()`, `notifySignalDone()`, `isOpen()`, `wantsLineData()`, `state()` |
+| `OperatorPanel` | Arduino adapter: samples hardware into `DiagSample`, renders `ConsoleFrame` to the OLED, executes `ActionRequest`s, drives LEDs/buzzer (ADR-076) | `begin()`, `open()`, `update()`, `isOpen()`, `wantsLineData()`, `setBootReport(...)`, `setMissionArmed(bool)` |
 | `WROMath` | unit conversions | `cmToEncDeg`, `encDegToCm`, `presetToPwm`, `deadbandSnap` |
 | `StateMachine<State>` | generic FSM helper (header-only template, unused) | `enter(s)`, `current()`, `elapsed()`, `changed()`, `ack()` |
 
@@ -173,7 +189,7 @@ writer module does not.
 
 Every module that performs ongoing work exposes a non-blocking `update()` method. The main loop's `cooperativeTick()` calls each one in turn. If you need to "wait 100 ms," store a `millis()` timestamp and check elapsed time on each `update()` call.
 
-The only `delay()` / blocking sites permitted in the codebase are command-time orchestration — `Drive::_drainBlocking()` (sync-default builders), `Drive::calibrateMotorBias()`, `WROLineArray::calibrate()`, and `Vision::readMosaic()`. These run from `setup()` or top-level operator actions (i.e., task bodies after `Drive.isIdle()`), never from a cooperative tick. Each blocking site spins the registered tick callback so OLED/heartbeat/sensors keep running during the wait.
+The only `delay()` / blocking sites permitted in the codebase are command-time orchestration — `Drive::_drainBlocking()` (sync-default builders), `Drive::calibrateMotorBias()`, `WROLineArray::calibrate()`, and `Vision::readMosaic()`. These run from `setup()` or top-level operator actions (i.e., task bodies after `Drive.isIdle()`), never from a cooperative tick. `Drive::_drainBlocking()` and `Vision::readMosaic()` spin the registered tick callback, so OLED/heartbeat/sensors keep running during their wait. `WROLineArray::calibrate()` and `Drive::calibrateMotorBias()` do **not** — `WROLineArray` exposes no `_tickCallback` member and no `setTickCallback()` at all, and `calibrateMotorBias()` is a bare `delay(durationMs)` — so both freeze the whole cooperative loop for their duration. That is permitted only because both are bounded, operator-triggered, and pre-arm (the calibration menu / diagnostics console `CAL LINE` / `CAL MOTOR` entries).
 
 ### Rule 2 — Global singletons via `extern`
 

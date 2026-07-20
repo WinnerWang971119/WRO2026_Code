@@ -488,6 +488,40 @@ namespace Config
                   "drain budget on a multi-hop goal and indicates a config typo rather than an "
                   "intentional value. See config/ConfigNav.h.");
 
+    // -----------------------------------------------------------------------------------------
+    // Operator diagnostics console checks (ConfigUi.h)
+    //
+    // These four asserts pin the timing relationships the console's SELF TEST sequencer and OLED
+    // repaint cadence depend on. Config-only: this section must never reference `Console::` nor
+    // include any `src/` header — Config sits architecturally below `src/`, and `Config.h` is
+    // transitively included by every module.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(UI_REPAINT_INTERVAL_MS >= 100,
+                  "Config::UI_REPAINT_INTERVAL_MS must be >= 100 ms -- the OLED shares Wire1 "
+                  "with the line array and external gyro, so repainting faster than this would "
+                  "starve those reads of bus time while the diagnostics console is open.");
+
+    static_assert(UI_VISION_SAMPLE_MS > UI_VIEW_SAMPLE_MS,
+                  "Config::UI_VISION_SAMPLE_MS must exceed UI_VIEW_SAMPLE_MS -- readMosaic() "
+                  "blocks for up to ~240 ms, far longer than the PUSHED-group sample cadence, so "
+                  "vision reads must be throttled to their own slower cadence or a new "
+                  "READ_MOSAIC could be dispatched while the previous one is still in flight.");
+
+    static_assert(UI_SELFTEST_CHECK_TIMEOUT_MS > UI_SELFTEST_STEP_MS,
+                  "Config::UI_SELFTEST_CHECK_TIMEOUT_MS must exceed UI_SELFTEST_STEP_MS -- the "
+                  "per-check freshness deadline must outlast the minimum post-verdict dwell, or "
+                  "a check that just reached a verdict could time out before its own dwell "
+                  "finishes displaying it.");
+
+    static_assert(UI_SELFTEST_CHECK_TIMEOUT_MS >
+                      UI_BATT_RETRY_MS * UI_BATT_RETRY_ATTEMPTS + 2 * UI_VIEW_SAMPLE_MS,
+                  "Config::UI_SELFTEST_CHECK_TIMEOUT_MS must exceed "
+                  "UI_BATT_RETRY_MS * UI_BATT_RETRY_ATTEMPTS + 2 * UI_VIEW_SAMPLE_MS -- the "
+                  "per-check timeout must comfortably outlast a full battery-read retry cycle "
+                  "plus two view-sample periods, or a healthy-but-slow read would FAIL "
+                  "spuriously instead of the check ever settling.");
+
 }    // namespace Config
 
 #endif    // CONFIG_CHECKS_H

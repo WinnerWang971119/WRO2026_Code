@@ -32,7 +32,7 @@ from tools.path_planner.graph_builder import (
     EDGE_LINE,
     build_graph,
 )
-from tools.path_planner.pipeline_config import BlindMode, DirectionMode
+from tools.path_planner.pipeline_config import BlindMode, DirectionMode, PipelineConfig
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_REVERSE,
@@ -221,6 +221,88 @@ def test_final_heading_after_forward_hop_returns_edge_heading() -> None:
     prims = compile_path(["A", "B"], start_heading, g, None)
     replayed = _replay_primitives(prims, start_heading)
     assert replayed[-1] == pytest.approx(end, abs=1e-9)
+
+
+def test_final_heading_after_pipeline_direction_default_matches_compile_path() -> None:
+    """TC1 (#148): a field-sourced ``PIPELINE_DIRECTION_MODE: FORCE_REVERSE`` default
+    resolves REAR on ``final_heading_after`` exactly as it does on ``compile_path``.
+
+    One precedence rung below
+    ``test_final_heading_after_rear_final_hop_matches_compile_path``: that test
+    forces REAR via a per-edge ``direction_override``; this one forces it via
+    the field-wide pipeline default with NO per-edge override at all -- the
+    exact class of disagreement issue #148 found. Before the fix,
+    ``final_heading_after`` ignored ``field_data`` entirely and always read the
+    module-level ``PIPELINE_CONFIG`` singleton (``DirectionMode.DEFAULT``,
+    which resolves FRONT here via the auto algorithm), while ``compile_path``
+    already read the field-sourced ``cfg.direction`` and drove REAR -- a
+    silent 180 deg disagreement. Both must now agree when given the SAME
+    ``field_data``.
+    """
+    edge_heading = 90.0
+    field = SimpleNamespace(PIPELINE_DIRECTION_MODE="FORCE_REVERSE")
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=40.0, heading_deg=edge_heading)
+    g.add_edge(
+        "B", "A",
+        type=EDGE_BLIND,
+        distance_cm=40.0,
+        heading_deg=(edge_heading + 180.0) % 360.0,
+    )
+
+    start_heading = 0.0
+
+    # Control: WITHOUT field_data the pipeline default is the singleton's
+    # DirectionMode.DEFAULT, so the auto rung decides and resolves FRONT. This
+    # pins the two rungs RELATIVE to each other on the same graph, so the test
+    # stays discriminating even if BIDIRECTIONAL_TURN_THRESHOLD_DEG is retuned:
+    # today's FRONT here rests on `abs(90 - 0) > 90.0` being false, a threshold
+    # boundary. Were the auto rung ever to resolve REAR on its own, this
+    # assertion fails loudly instead of the #148 guard below going silently
+    # non-discriminating (still green, but no longer testing rung 2 vs rung 5).
+    assert final_heading_after(["A", "B"], start_heading, g) == pytest.approx(
+        edge_heading, abs=1e-9
+    )
+
+    end = final_heading_after(["A", "B"], start_heading, g, field_data=field)
+
+    # The field-wide FORCE_REVERSE default resolves REAR: body heading is the
+    # forward edge heading rotated 180 deg, same shape as a per-edge override.
+    assert end == pytest.approx((edge_heading + 180.0) % 360.0, abs=1e-9)
+
+    # ...and it matches the end heading compile_path leaves the chassis on,
+    # for the SAME field_data -- the guarantee only holds when both share it.
+    prims = compile_path(["A", "B"], start_heading, g, field)
+    replayed = _replay_primitives(prims, start_heading)
+    assert replayed[-1] == pytest.approx(end, abs=1e-9)
+
+
+def test_final_heading_after_no_field_data_stays_front_resolved() -> None:
+    """TC2 (#148 control): omitted / ``None`` ``field_data`` keeps today's behavior.
+
+    The SAME edge that resolves REAR under a field-sourced
+    ``PIPELINE_DIRECTION_MODE: FORCE_REVERSE`` default (previous test)
+    resolves FRONT here, because with no ``field_data``
+    :meth:`PipelineConfig.from_field_data` falls back to the
+    ``PIPELINE_CONFIG`` singleton's ``DirectionMode.DEFAULT`` -- proving the
+    fix changed nothing for every pre-#148 caller. Omitting the argument and
+    passing an explicit ``None`` must agree (the keyword default IS ``None``).
+    """
+    edge_heading = 90.0
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=40.0, heading_deg=edge_heading)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=40.0, heading_deg=270.0)
+
+    start_heading = 0.0
+    end_omitted = final_heading_after(["A", "B"], start_heading, g)
+    end_none = final_heading_after(["A", "B"], start_heading, g, field_data=None)
+
+    assert end_omitted == pytest.approx(end_none, abs=1e-12)
+    assert end_omitted == pytest.approx(edge_heading, abs=1e-9)
 
 
 # -- compile_path: LINE into a projection node (TC6) --------------------------
@@ -418,6 +500,7 @@ def _walk_expected_headings(
     path: List[str],
     start_heading: float,
     graph: nx.DiGraph,
+    field_data=None,
 ) -> List[float]:
     """Return the expected chassis body heading at each motion primitive.
 
@@ -429,11 +512,25 @@ def _walk_expected_headings(
     later seeded a per-edge ``direction_override`` would cause non-deterministic
     parity failures because the mirror silently ignored Step 1.
 
+    ``pipeline_default`` is field-sourced via
+    :meth:`PipelineConfig.from_field_data` -- the SAME resolution
+    ``compile_path`` and (post-#148) ``final_heading_after`` use -- rather
+    than read off the ``PIPELINE_CONFIG`` singleton directly. A previous
+    version read ``_runtime._pipeline_config.PIPELINE_CONFIG.direction``
+    unconditionally, which is exactly the class of bug #148 fixed: this
+    helper would have silently kept mirroring the old singleton-only
+    behavior even after ``compile_path`` and ``final_heading_after`` both
+    moved to field-sourced resolution, so a random graph exercised with a
+    non-default ``field_data`` could pass this parity check for the wrong
+    reason. ``field_data=None`` (the default) resolves to the singleton,
+    matching every existing caller of this helper unchanged.
+
     Module-level constants ``BIDIRECTIONAL_AUTO_ENABLED`` / ``LINE_BOARD_COUNT``
     are read off the live ``_runtime`` module at call time so a
     ``monkeypatch.setattr(_runtime, ...)`` propagates to this helper the
     same way it propagates to ``compile_path``'s lazy reads.
     """
+    cfg = PipelineConfig.from_field_data(field_data)
     headings: List[float] = []
     current = start_heading
     last_idx = len(path) - 1
@@ -442,7 +539,7 @@ def _walk_expected_headings(
         edge_heading = float(edge["heading_deg"])
         direction = resolve_direction(
             edge_dir_override=_runtime._read_edge_dir_override(edge),
-            pipeline_default=_runtime._pipeline_config.PIPELINE_CONFIG.direction,
+            pipeline_default=cfg.direction,
             builder_arrival=Direction.AUTO,
             builder_route=Direction.AUTO,
             current_heading=current,
@@ -533,6 +630,11 @@ def test_property_random_paths() -> None:
         # logical-heading walk; replaying the emitted turns alone can no longer
         # reconstruct the (silently-advanced) logical heading, so the parity is
         # checked at the turn-emission level instead.
+        # `fake_field` authors no PIPELINE_* key, so omitting field_data here is
+        # equivalent to threading it. If it ever grows one, thread it BOTH here
+        # and into the final_heading_after call below -- otherwise the mirror
+        # resolves FRONT while compile_path (which does get fake_field) resolves
+        # REAR, and the turn comparison reddens as a phantom "compiler broke".
         expected_headings = _walk_expected_headings(path, start_heading, graph)
         expected_turns: List[float] = []
         prev = start_heading

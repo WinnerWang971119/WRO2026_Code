@@ -25,6 +25,7 @@
 #include "config/ConfigMission.h"
 #include "config/ConfigManipulator.h"
 #include "config/ConfigVision.h"
+#include "config/ConfigUi.h"
 #include "config/ConfigChecks.h"   // MUST be last
 
 #endif    // CONFIG_H

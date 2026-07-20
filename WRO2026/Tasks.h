@@ -303,6 +303,56 @@ private:
     bool readMosaic(const TaskArgs& args);
 
     /**
+     * @brief Get and put the rectangle shovel
+     * @param args  Ignored.
+     * @return true when finish. 
+     */
+    bool rectangleShovel(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the triangle shovel
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool triangleShovel(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the pot
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool pot(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the mosiac
+     * @param args  Ignored.
+     * @return true when finish.
+     * @note Need the helper _mosiacAlgo to get the mosiac fastest
+     */
+    bool mosaic(const TaskArgs& args);
+
+    /**
+     * @brief Get and put the debries
+     * @param args  Ignored.
+     * @return true when finish.
+     */
+    bool debries(const TaskArgs& args);
+
+    /**
+     * @brief Unload the carrier onto the mosaic build area, one chassis stop per row.
+     *
+     * The sorter holds one bin per mosaic COLUMN, each `kMosaicRows` tiles deep, loaded top
+     * row first by `mosaic()`. Dumping walks the three row nodes (`dump1` / `dump2` / `dump3`)
+     * and at each stop discharges every bin's next tile, so the built grid comes out identical
+     * to the pattern read at `CY3`.
+     *
+     * @param args  Ignored.
+     * @return true when finish.
+     * @note Run `mosaic` first — this body only unloads what the carrier is already holding.
+     */
+    bool dumpMosaic(const TaskArgs& args);
+
+    /**
      * @brief Stationary cooperative delay helper for task bodies.
      *
      * @param ms    Timeout in milliseconds.
@@ -346,6 +396,69 @@ private:
      * @return ``true`` once the belt reports done; ``false`` on timeout.
      */
     bool _waitForBelt(uint32_t timeoutMs, const char* label);
+
+    /**
+     * @brief One planned tile: which wall colour to take it from, and where it goes.
+     */
+    struct MosaicPick
+    {
+        Config::Color color;   ///< Wall colour station to take this tile from.
+        uint8_t       cell;    ///< Mosaic cell it fills; its row selects the sorter bin.
+    };
+
+    /**
+     * @brief Plan the shortest station route that satisfies the read mosaic pattern.
+     *
+     * The pattern is a 4-column x 3-row grid; each column is built top row down, so only the
+     * next uncleared cell of each column is "live". The robot sweeps the M wall past the four
+     * colour stations in a fixed physical order (up, down, up), and at each station it can
+     * satisfy every live cell of that colour at once. Satisfying a cell exposes the one below
+     * it, so a colour buried under a station the sweep has already passed is only reachable on
+     * the next sweep.
+     *
+     * This walks that sweep order repeatedly and emits tiles only for the station colours that
+     * are actually live, which is what makes the route short: stations with nothing to collect
+     * are skipped entirely.
+     *
+     * Output is one entry per TILE, in collection order. A run of consecutive entries sharing
+     * a colour is one stop at that colour's wall station, so `mosaic()` can walk the list
+     * straight through. Each entry also carries the mosaic cell the tile fills, whose row is
+     * the sorter bin it must be dropped into — the sorter holds one bin per mosaic row so the
+     * dumped rows come out identical to the pattern that was read.
+     *
+     * @param picks    Receives one entry per tile, in collection order. Must hold at least
+     *                 @p maxPicks entries.
+     * @param maxPicks Capacity of @p picks. `Config::VISION_CELL_COUNT` is always enough —
+     *                 one entry per cell of the pattern.
+     * @return Number of tiles written to @p picks. `0` when the pattern holds no station
+     *         colour at all — including the case where no successful `Vision::readMosaic()`
+     *         has happened, since every cell then reads `Config::Color::UNKNOWN`.
+     * @note Reads the `Vision` latch only; it does NOT trigger a camera read. Run the
+     *       `readMosaic` task first.
+     */
+    uint8_t _mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const;
+
+    /**
+     * @brief Choose which of a colour's two wall rows to take the next tile from.
+     *
+     * Prefers staying on the row the chassis is already parked at so the belt can reach the
+     * next tile without a drive; when that row is empty (or the robot is at another colour)
+     * it enters at whichever remaining row is nearer along the wall chain.
+     *
+     * @param stock       Tiles left on this colour's two rows, indexed lower / upper.
+     * @param colorIdx    Colour index in `[0, 4)` — also the sorter bin index.
+     * @param parkedColor Colour index the chassis is parked at, or `0xFF` before the first drive.
+     * @param parkedRow   Row index the chassis is parked at, or `0xFF` before the first drive.
+     * @param chainPos    Wall-chain position of the chassis (`MWU` = 0 at the top, `MYD` = 7).
+     * @return `0` for the lower row (`MxD`), `1` for the upper row (`MxU`), or `0xFF` when
+     *         this colour has no tiles left anywhere on the wall.
+     */
+    uint8_t _mosaicPickRow(
+        const uint8_t stock[2],
+        uint8_t       colorIdx,
+        uint8_t       parkedColor,
+        uint8_t       parkedRow,
+        uint8_t       chainPos) const;
 
     bool _inTask  = false;
     bool _aborted = false;

@@ -11,6 +11,11 @@
       "issue": null
     },
     {
+      "file": "OperatorPanel.cpp",
+      "reason": "OLED-owning console adapter, excluded from the harness for the same MiniR4OLED.h WHITE-macro reason as EventTrace.cpp (ADR-076); the OLED-free OperatorConsole core carries the coverage",
+      "issue": null
+    },
+    {
       "file": "WROLineArray.cpp",
       "reason": "hardware I2C line-array leaf, replaced by a test-controlled mock",
       "issue": null

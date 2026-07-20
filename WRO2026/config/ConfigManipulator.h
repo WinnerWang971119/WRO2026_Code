@@ -241,17 +241,26 @@ namespace Config
      *       the encoder); `MID` is the operating rest position; `FAR_END` is the opposite
      *       hard stop. `LEFT` is named for its physical side — it sits at the belt's HOME
      *       end, so its row drives toward HOME (`-BELT_STALL_SPEED`).
+     * @note `GRAB_RIGHT` / `GRAB_MID` / `GRAB_LEFT` are the three reach positions that let
+     *       the manipulator take each of the three tiles in one M-wall row without driving
+     *       (see the `mosaic` task). `GRAB_MID` is also the mandatory travel pose: the belt
+     *       must be returned to it before ANY chassis move, or the extended manipulator
+     *       throws the centre of mass too far off.
      */
-    enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4};  // TODO finalize
+    enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4,
+                                       GRAB_RIGHT = 5, GRAB_MID = 6, GRAB_LEFT = 7 };  // TODO finalize
     /** @brief Number of belt stations (length of `BELT_STATIONS`). */
-    constexpr uint8_t BELT_STATION_COUNT = 5;
+    constexpr uint8_t BELT_STATION_COUNT = 8;
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
-        { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); 
+        { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos); 
+        { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
         { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION,    340,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
+        { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
+        { BeltMode::POSITION,    940,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
     };
 }    // namespace Config
 

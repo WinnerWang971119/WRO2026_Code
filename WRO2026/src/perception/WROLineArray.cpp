@@ -308,6 +308,40 @@ bool WROLineArrayClass::readBoard(uint8_t boardIdx, uint8_t out[8])
     return _readBoardInternal(boardIdx, out);
 }
 
+bool WROLineArrayClass::probeBoard(uint8_t boardIdx)
+{
+    // Same hard bounds as readBoard(): storage cap first, then configured-board cap.
+    if (boardIdx >= 2 || boardIdx >= Config::LINE_BOARD_COUNT)
+    {
+        return false;
+    }
+
+    TwoWire* const pWire = _boards[boardIdx]._pWire;
+    const uint8_t  ch    = _boards[boardIdx]._ch;
+
+    // -------------------------------------------------------------------------------------
+    // Mirrors MatrixColor::i2cMUXSelect() (MiniR4ColorSensorExt.cpp ~line 189), which is
+    // PRIVATE to MatrixColor and therefore not callable from here: select the board's
+    // PCA9548A mux channel, then hold the vendor's own 300 us settle before touching the
+    // device address. This writes to the MUX, not to the MXColor board being probed —
+    // no device register on the board itself is touched by this step.
+    // -------------------------------------------------------------------------------------
+    pWire->beginTransmission(ADDR_PCA954X);
+    pWire->write((1 << ch));
+    pWire->endTransmission(1);
+    delayMicroseconds(300);
+
+    // -------------------------------------------------------------------------------------
+    // Value-blind liveness probe: a bare address ACK, nothing more. No register write,
+    // no setLight(...), no MatrixColor::begin() (which would reset Device_CONFIG and
+    // destroy the Layer-1 firmware illumination calibration begin() latched — see the
+    // two-layer calibration contract in the file-level doxygen). `_lastChannels`,
+    // `_lastOnline`, and `_activeBoard` are all left untouched by this method.
+    // -------------------------------------------------------------------------------------
+    pWire->beginTransmission(MatrixColor_ADDR);
+    return pWire->endTransmission() == 0;
+}
+
 // =========================================================================================
 // Operator-driven Layer-2 calibration sweep (~5 s × N boards, sequential, sync-blocking)
 // =========================================================================================
