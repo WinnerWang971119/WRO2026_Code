@@ -366,3 +366,35 @@ Parallel: T1, T2 and T5 are independent and start together. T3 unblocks on T1+T2
 - **Rollback:** additive apart from T7 and T10. Reverting T7 restores the old menu; the `src/operator/` files, `probeBoard()` and the test target are inert without it.
 - **Corrections carried forward from review:** (1) the earlier claim that `readBoard()`'s boolean is an authoritative board-answered signal is **withdrawn** — verified false at `WROLineArray.cpp:659-665`. (2) `ARCHITECTURE.md:176`'s blanket tick-spin claim is false for both calibration routines (T10 fixes it). (3) The boot health count is 12 `begin()` results plus `battOk`, not 13 `begin()` calls.
 - **Fallback if bring-up invalidates `probeBoard()`:** if the address ACK proves unreliable through the PCA9548 mux on real hardware, downgrade AC13 to report-only (`LINE: ?`, not a FAIL) and drop LINE from the halt chain. Do **not** substitute an all-zero or two-read-differ heuristic — both false-fail on legitimate darkness, the exact failure the user's constraint exists to prevent.
+
+## Known test gaps (from mutation analysis, recorded 2026-07-20)
+
+The host suite was mutation-tested during execution: 45 mutants against `OperatorConsole.cpp`,
+26 killed. The gate-worthy misses were fixed. **These survived and are NOT defended by any
+test** — they are live follow-up work, not hypotheticals. Each line is a mutation that changes
+real behaviour while the suite stays green.
+
+| Mutation | What ships broken if it regresses |
+|---|---|
+| `notifyActionDone` accepts reads / a mismatched action; `notifyReadDone` ignores `which` | The whole callback-validation contract (three `@note`s in the header) is untested |
+| Pull-cadence throttle removed; view entry no longer disarms it | `UI_VIEW_SAMPLE_MS` / `UI_VISION_SAMPLE_MS` never exercised — **no test completes a read inside a live view**, so the cadence path is dead to the suite |
+| `_rowAppend` bound `TEXT_COLS` → `FRAME_COLS` (real overflow) | The bounded formatters' truncation is untested. TC20 exercises `_renderBootFailures`' own limit arithmetic instead, not `_rowAppend` |
+| `judgeBattery` drops the `< BATT_MIN_VOLTAGE_V` compare | A low-but-nonzero pack PASSes. TC15 only ever uses `0.0f` |
+| `_enterState` no longer releases a read the departed view owned | One dropped `notifyReadDone()` poisons the single read slot for the rest of the session — the failure the largest comment block in the core exists to prevent |
+| `_consumeOpenLatch` no longer re-homes the cursor | Re-open after `EXIT` from item 8 lands on `EXIT`. TC21's cursor-reset leg is vacuous (`begin()` already zeroes it) |
+| `_close()` no longer clears `_openLatch` | Console re-opens itself the tick after `missionArmed` drops, contradicting `open()`'s `@note` |
+| BTN_UP also exits a live view | No test presses BTN_UP inside a view |
+| `_enterState(SELF_TEST)` no longer re-homes `_check` | A re-entered SELF TEST resumes mid-sequence |
+| SELF TEST **PASS** route drops `_clearVisionPending` | A latched vision fault is handed to the mission after a *passing* self test. TC16 covers only the exit and abort routes |
+
+**Also known, deliberately deferred (documented in `OperatorPanel.h`):** a second verdict of the
+same `Signal` kind arriving while the first pattern is still playing is absorbed and acked
+without playing — one missing confirmation chirp. The fix is a monotonic signal counter written
+by the core on every `_signal` write, which ripples through `ConsoleTypes.h`, the core, the
+adapter and the tests.
+
+**`BootReport` flag count is not compile-time tied to `_renderBootFailures`.** The renderer
+hand-maintains a 13-entry table; a 14th flag compiles cleanly and that module silently never
+appears in the failure list. `sizeof(BootReport) == 20` does NOT catch this (13/14/15/16-bool
+variants all measure 20 bytes). The real fix is a `Console::BOOT_FLAG_COUNT` in `ConsoleTypes.h`
+that the renderer sizes its arrays from and the test asserts against.
