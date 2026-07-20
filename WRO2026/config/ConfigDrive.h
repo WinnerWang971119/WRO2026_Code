@@ -80,12 +80,12 @@ namespace Config
      *        off target. Re-run the direction check after ANY motor re-wire or chassis swap.
      *  @warning (true, false) = Lofaix/EV3 mounting (matches vendor `setupLEGOMotors()`).
      *           The TT test rover uses (false, true). */
-    constexpr bool MOTOR_LEFT_REVERSE = true;
+    constexpr bool MOTOR_LEFT_REVERSE = false;
 
     /** @brief Reverse the right motor's positive-power direction at the driver level.
      *  @note See `MOTOR_LEFT_REVERSE` — the two flags describe one mounting and change
      *        together as a pair. */
-    constexpr bool MOTOR_RIGHT_REVERSE = false;
+    constexpr bool MOTOR_RIGHT_REVERSE = true;
 
     // ---------------------------------------------------------------------------------------
     // Motor profile + PID gains (selected via ActiveMotor)
@@ -803,7 +803,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KP_DEFAULT
-#define GYRO_HOLD_KP_DEFAULT 1.4f
+#define GYRO_HOLD_KP_DEFAULT 1.6f
 #endif
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 

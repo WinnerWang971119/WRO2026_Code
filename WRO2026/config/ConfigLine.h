@@ -20,11 +20,11 @@
 namespace Config
 {
     /** @brief Line-follower outer-loop Kp (FRONT board / forward follow). @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 5.6f;
+    constexpr float LINE_KP = 6.0f;
     /** @brief Line-follower outer-loop Ki. @note Unused by the P+D law (kept for future I-term). */
     constexpr float LINE_KI = 0.0f;
     /** @brief Line-follower outer-loop Kd (FRONT board / forward follow). @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 1.4f;
+    constexpr float LINE_KD = 2.6f;
 
     // ---------------------------------------------------------------------------------------
     // Rear-board (reverse follow) gains — ADR-070.
@@ -43,9 +43,9 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KP_REAR = LINE_KP;
+    constexpr float LINE_KP_REAR = 5.0;
     /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KD_REAR = LINE_KD;
+    constexpr float LINE_KD_REAR = 1.2;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
