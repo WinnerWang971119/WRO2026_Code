@@ -29,15 +29,16 @@ namespace Console
         BATT        = 1,  ///< Shows pack voltage, percentage and the boot health summary.
         LINE_VIEW   = 2,  ///< Live per-board raw channel view.
         VISION_VIEW = 3,  ///< Live 12-cell mosaic colour view.
-        GYRO_VIEW   = 4,  ///< Live yaw, health, and drift-since-entry view.
-        GYRO_ZERO   = 5,  ///< Dispatches YawSource.zeroHardware().
-        CAL_LINE    = 6,  ///< Dispatches WROLineArray::calibrate() (blocking).
-        CAL_MOTOR   = 7,  ///< Dispatches Drive::calibrateMotorBias() (blocking).
-        EXIT        = 8,  ///< Closes the console back to State::CLOSED.
+        VISION_TEST = 4,  ///< Reads the mosaic once and grades it against the expected colour code.
+        GYRO_VIEW   = 5,  ///< Live yaw, health, and drift-since-entry view.
+        GYRO_ZERO   = 6,  ///< Dispatches YawSource.zeroHardware().
+        CAL_LINE    = 7,  ///< Dispatches WROLineArray::calibrate() (blocking).
+        CAL_MOTOR   = 8,  ///< Dispatches Drive::calibrateMotorBias() (blocking).
+        EXIT        = 9,  ///< Closes the console back to State::CLOSED.
     };
 
     /** @brief Number of entries in `Item` — the item table's fixed length. */
-    constexpr uint8_t ITEM_COUNT = 9;
+    constexpr uint8_t ITEM_COUNT = 10;
 
     /**
      * @brief Console FSM states.
@@ -52,6 +53,7 @@ namespace Console
         VIEW_BATT    = 5,  ///< `Item::BATT` screen.
         SELF_TEST    = 6,  ///< `Item::SELF_TEST` sequencer running.
         WAIT_RELEASE = 7,  ///< Awaiting button release, or a dispatched action's completion.
+        VISION_TEST  = 8,  ///< `Item::VISION_TEST` grade-against-expected screen.
     };
 
     /**

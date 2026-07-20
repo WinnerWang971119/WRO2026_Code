@@ -158,6 +158,23 @@ public:
      */
     bool readMosaic();
 
+    /**
+     * @brief DIAGNOSTIC read: latch every cell's classification, never failing on UNKNOWN cells.
+     *
+     * Same blocking UART read as `readMosaic()`, but with NO strict guard and NO mask cap — every
+     * cell is classified and latched, an unreadable cell simply latching as `Config::Color::UNKNOWN`
+     * (reported truthfully by `getColor()`). It fails ONLY on a transport fault (READ_TIMEOUT /
+     * BAD_CHECKSUM), never `BAD_CELL`. This is what the operator console's VISION VIEW / VISION TEST
+     * screens use so they can SHOW which cells read UNKNOWN — the strict `readMosaic()` throws the
+     * whole frame away on the first UNKNOWN and never latches per-cell colours (ADR-037), which is
+     * correct for the mission but useless for a diagnostic that must display the bad cell.
+     *
+     * @return `true` on a valid latched frame (even with UNKNOWN cells); `false` on a transport
+     *         fault, with the matching `Fault` recorded. Same idle-chassis / blocking-call notes as
+     *         `readMosaic()` apply.
+     */
+    bool readMosaicRaw();
+
     // -----------------------------------------------------------------------------------------
     // Getters (pure, safe-sentinel)
     // -----------------------------------------------------------------------------------------
@@ -297,8 +314,13 @@ private:
      * @param outHue       Receives the per-cell raw hues (only fully written on `true`).
      * @param firstBadCell Set to the first offending CELL index on `false`; untouched on `true`.
      * @param badRaw       Set to the offending mapped-slot raw hue on `false`; untouched on `true`.
-     * @return `true` if every active cell classified to a known colour; `false` on the first
-     *         UNKNOWN cell (the strict-guard / `BAD_CELL` path).
+     * @param tolerant     When `false`, the strict guard applies (first UNKNOWN aborts). When
+     *                     `true`, UNKNOWN cells are latched honestly as UNKNOWN and the scan only
+     *                     fails if MORE than @p maxUnknown cells are UNKNOWN.
+     * @param maxUnknown   Maximum UNKNOWN cells tolerated in the tolerant path (ignored when
+     *                     `tolerant` is `false`).
+     * @return `true` if the frame classified within budget; `false` on the strict-guard first
+     *         UNKNOWN, or on the tolerant path when the UNKNOWN count exceeds @p maxUnknown.
      * @note Pure with respect to member state — writes only the out-parameters, never the latch.
      */
     bool _classifyCandidate(
@@ -306,7 +328,18 @@ private:
         Config::Color  outColors[Config::VISION_CELL_COUNT],
         uint8_t        outHue[Config::VISION_CELL_COUNT],
         uint8_t&       firstBadCell,
-        uint8_t&       badRaw) const;
+        uint8_t&       badRaw,
+        bool           tolerant,
+        uint8_t        maxUnknown) const;
+
+    /**
+     * @brief Shared read loop behind `readMosaic()` (strict/mask) and `readMosaicRaw()` (diagnostic).
+     * @param diagnostic `true` for `readMosaicRaw()` — always tolerant, no UNKNOWN cap. `false` for
+     *                   `readMosaic()` — tolerance follows `Config::VISION_MASK_UNKNOWN_ENABLED` and
+     *                   the `Config::VISION_MASK_MAX_UNKNOWN_CELLS` cap.
+     * @return As the public wrappers document.
+     */
+    bool _readMosaic(bool diagnostic);
 
     Config::Color _colors[Config::VISION_CELL_COUNT];   ///< Per-cell colour latch. Zeroed by ctor; updated only on a successful read.
     uint8_t       _rawHue[Config::VISION_CELL_COUNT];   ///< Per-cell raw hue latch. Zeroed by ctor; updated only on a successful read.

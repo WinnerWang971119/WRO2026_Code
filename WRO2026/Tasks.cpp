@@ -1184,22 +1184,52 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
     // ---- Read the pattern as station indices -------------------------------------------
     uint8_t cellIndex[Config::VISION_CELL_COUNT];
     uint8_t needed[kMosaicColorCount] = { 0, 0, 0, 0 };
+    uint8_t maskedCells               = 0;   // cells substituted with the fallback (masking ON)
 
     for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
     {
-        const uint8_t station = mosaicColorIndex(Vision.getColor(cell));
+        uint8_t station = mosaicColorIndex(Vision.getColor(cell));
         if (station >= kMosaicColorCount)
         {
-            // UNKNOWN (no successful read yet, or an uncalibrated hue) or RED — no station
-            // supplies it, so the mosaic cannot be built. Name the cell rather than
+            // UNKNOWN (uncalibrated / surprise hue, or no successful read) or RED — no wall station
+            // supplies it. With masking ON (Config::VISION_MASK_UNKNOWN_ENABLED) substitute the
+            // fallback station so the tile is still placed (scores 5 pts) rather than aborting the
+            // whole build. With masking OFF it is a genuine failure — name the cell rather than
             // silently planning a partial route.
+            if (!Config::VISION_MASK_UNKNOWN_ENABLED)
+            {
+                Serial.print(F("[Tasks] mosaic: cell "));
+                Serial.print(cell);
+                Serial.println(F(" has no station colour"));
+                return 0;
+            }
+            // Count the substitution and enforce the cap HERE, at the point of use — do NOT trust
+            // that the read already bounded it. The diagnostic `Vision::readMosaicRaw()` (VISION
+            // VIEW / VISION TEST) writes the same latch with NO cap, and a failed mission
+            // `readMosaic()` leaves whatever the latch already held in place, so the frame reaching
+            // this line is not guaranteed to have passed Config::VISION_MASK_MAX_UNKNOWN_CELLS. The
+            // over-cap check below bounds the number of fabricated tiles regardless of provenance.
+            station = mosaicColorIndex(Config::VISION_MASK_FALLBACK_COLOR);
+            ++maskedCells;
             Serial.print(F("[Tasks] mosaic: cell "));
             Serial.print(cell);
-            Serial.println(F(" has no station colour"));
-            return 0;
+            Serial.print(F(" UNKNOWN -> masked to "));
+            Serial.println(kMosaicColorTag[station]);
         }
         cellIndex[cell] = station;
         ++needed[station];
+    }
+
+    if (maskedCells > Config::VISION_MASK_MAX_UNKNOWN_CELLS)
+    {
+        // Over the mask budget: the latch is not a clean capped read (a stale diagnostic read, or a
+        // failed mission read that left an old frame behind). Abort rather than build a mostly
+        // invented mosaic — this is the point-of-use half of the cap the read enforces on its side.
+        Serial.print(F("[Tasks] mosaic: "));
+        Serial.print(maskedCells);
+        Serial.print(F(" masked cells over cap "));
+        Serial.println(Config::VISION_MASK_MAX_UNKNOWN_CELLS);
+        return 0;
     }
 
     for (uint8_t station = 0; station < kMosaicColorCount; ++station)

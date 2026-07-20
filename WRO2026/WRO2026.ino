@@ -575,6 +575,13 @@ void loop()
         {
             _missionArmed = true;
             EventTrace.pushEvent("NAV ZERO");
+            // Clear the vision latch as part of committing to a fresh run. A pre-arm diagnostics
+            // read (VISION VIEW / VISION TEST via `Vision::readMosaicRaw()`) latches UNKNOWN cells
+            // with no mask cap, and nothing else on the arm path resets it; without this a mission
+            // `readMosaic()` that fails would leave that stale, uncapped frame visible to the
+            // `mosaic` task. begin() re-seeds the safe all-UNKNOWN pre-read state (and re-kicks the
+            // camera), so a failed read falls back to all-UNKNOWN, which the mosaic cap rejects.
+            Vision.begin();
             buildMission();
         }
     }
