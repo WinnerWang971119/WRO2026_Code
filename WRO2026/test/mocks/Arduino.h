@@ -495,6 +495,13 @@ private:
 
 extern MockHardwareSerial Serial1;
 
+// The firmware selects the HUE12 camera UART through `Config::VISION_SERIAL`, which resolves
+// to `Serial2` on the UNO R4 WiFi (the D0/D1 header socket — see ConfigVision.h). On host there
+// is exactly one mock UART, so alias `Serial2` onto it: an object-like macro rewriting `Serial2`
+// -> `Serial1` at every use site, so `Vision.cpp` reads the very stream the tests feed through
+// `mockSerial1Feed`. Nothing else on host references `Serial2`, so the rewrite is inert elsewhere.
+#define Serial2 Serial1
+
 // ---------------------------------------------------------------------------
 // Mock "tick" counter — increments once per `delay()` call (each mock tick).
 //

@@ -27,15 +27,16 @@
  * The vendor `MiniR4SmartCamReader` / `MiniR4.Vision` are deliberately NOT used (its parser
  * runs off the end of a non-void function on a misaligned start, overruns a fixed stack buffer
  * on a corrupt length byte, and false-syncs on a `0xAA`-as-data byte — see the plan). We talk
- * to `Serial1` directly. `MiniR4.Uart` ≡ `Serial1` if a physical-socket debug is ever needed,
- * but we do NOT `#include <MatrixMiniR4.h>` from here.
+ * to the camera UART directly via `Config::VISION_SERIAL` (see ConfigVision.h — it resolves
+ * to `Serial2` on the R4 WiFi, the D0/D1 header socket; `MiniR4.Uart` is the same port).
+ * We do NOT `#include <MatrixMiniR4.h>` from here.
  */
 
 #include "Vision.h"
 
 #include "VisionFrame.h"
 
-#include <Arduino.h>    // Serial1 (HUE12 UART RX), Serial (USB warning), millis(), delay()
+#include <Arduino.h>    // VISION_SERIAL (HUE12 UART RX), Serial (USB warning), millis(), delay()
 
 /// @brief Single global instance declared `extern` in Vision.h.
 VisionClass Vision;
@@ -105,7 +106,7 @@ VisionClass::VisionClass()
 {
     // Latch starts in the documented safe pre-read state: every cell UNKNOWN, every raw hue 0,
     // no successful read yet, no fault. Getters are therefore safe to call before begin() /
-    // before the first successful readMosaic(). No hardware work here — Serial1 is opened in
+    // before the first successful readMosaic(). No hardware work here — the UART is opened in
     // begin(), which must run after MiniR4.begin() has returned.
     for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
     {
@@ -126,7 +127,7 @@ VisionClass::VisionClass()
 bool VisionClass::begin()
 {
     // Open the HUE12 UART. Baud comes from Config (bench-verified at T8) — never hardcode 9600.
-    Serial1.begin(Config::VISION_UART_BAUD);
+    VISION_SERIAL.begin(Config::VISION_UART_BAUD);
 
     // Reset the latch to its safe pre-read state. Re-running begin() must not leave a stale read
     // visible, so we clear `_hasRead` and reset every cell exactly as the constructor does.
@@ -146,7 +147,7 @@ bool VisionClass::begin()
     // owns its own flush-and-discard sequence. See the @note on begin() in Vision.h.
 
     // Kick the HUE12 so a cold-booted camera begins emitting frames (vendor SmartCamReader
-    // contract). Done LAST so Serial1 is already open before the wake command is written.
+    // contract). Done LAST so the UART is already open before the wake command is written.
     start();
 
     // Always true on this platform; declared `bool` for parity with Drive/Manipulator begin() so
@@ -160,9 +161,9 @@ bool VisionClass::begin()
 
 void VisionClass::start()
 {
-    // Pure TX: write the wake command to the HUE12. `Serial1.print(const char*)` works on the real
-    // HardwareSerial and on the host mock (a no-op there). No read, flush, or latch mutation.
-    Serial1.print(Config::VISION_START_CMD);
+    // Pure TX: write the wake command to the HUE12. `VISION_SERIAL.print(const char*)` works on the
+    // real HardwareSerial and on the host mock (a no-op there). No read, flush, or latch mutation.
+    VISION_SERIAL.print(Config::VISION_START_CMD);
 }
 
 // -----------------------------------------------------------------------------------------
@@ -175,9 +176,9 @@ void VisionClass::_flushRx()
     // RX buffer holds frames captured WHILE MOVING. Draining them here guarantees the latched frame
     // begins after the flush, so it reflects the robot's current field position. (The caller must
     // additionally ensure Drive.isIdle() — that contract lives on Vision.h's @note.)
-    while (Serial1.available() > 0)
+    while (VISION_SERIAL.available() > 0)
     {
-        Serial1.read();
+        VISION_SERIAL.read();
     }
 }
 
@@ -311,7 +312,7 @@ bool VisionClass::readMosaic()
                 break;
             }
 
-            if (Serial1.available() > 0)
+            if (VISION_SERIAL.available() > 0)
             {
                 // Set when read() returns < 0 despite available() > 0 (the queue and the read
                 // disagree). We then fall through to the wait branch so a delay() (+ tick) runs
@@ -320,7 +321,7 @@ bool VisionClass::readMosaic()
 
                 // Drain everything currently readable into the buffer, compacting as needed so a
                 // never-ending stream cannot overflow `buf`.
-                while (Serial1.available() > 0)
+                while (VISION_SERIAL.available() > 0)
                 {
                     if (len >= kBufferCapacity)
                     {
@@ -337,7 +338,7 @@ bool VisionClass::readMosaic()
                         len = keep;
                     }
 
-                    const int b = Serial1.read();
+                    const int b = VISION_SERIAL.read();
                     if (b < 0)
                     {
                         // available() and read() disagreed (cannot happen on this mock/hardware,

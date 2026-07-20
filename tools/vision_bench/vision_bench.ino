@@ -60,9 +60,11 @@
  *     `sta=<rawSta>` of a desaturated/white tile (sta is a 4-bit value, 0..15).
  *
  * (d) IF YOU GET NO BYTES, SUSPECT THE WIRING BEFORE THE BAUD.
- *     On the MatrixMiniR4, `MiniR4.Uart` IS `Serial1` (MatrixMiniR4.h:114 —
- *     `UART Uart = UART(UART2_TX_PIN, UART2_RX_PIN)`). This sketch talks to
- *     `Serial1` directly. If `fps` stays 0 and no `slot` table ever prints,
+ *     On the MatrixMiniR4, `MiniR4.Uart` is `UART(UART2_TX_PIN, UART2_RX_PIN)`
+ *     (MatrixMiniR4.h:114) — the D0/D1 header socket, which on the UNO R4 WiFi is
+ *     `Serial2`, NOT `Serial1` (Serial1 there is pins 22/23, the on-board ESP32
+ *     link). This sketch talks to `Config::VISION_SERIAL` directly, exactly like
+ *     the firmware. If `fps` stays 0 and no `slot` table ever prints,
  *     check the physical D0/D1 socket and the TX<->RX cross-wiring (camera TX
  *     must reach R4 RX) BEFORE assuming a baud mismatch. A dead socket and a
  *     wrong baud look identical from the serial monitor. If the wiring and baud
@@ -111,13 +113,13 @@
  *       appears here.
  */
 
-// We talk to Serial1 directly and deliberately do NOT include <MatrixMiniR4.h>
-// — exactly like the firmware Vision.cpp (the reader uses the bare UART, not the
-// vendor MiniR4SmartCamReader). Skipping it also dodges a real macro clash: the
-// vendor's MiniR4OLED.h pulls in the Adafruit SSD1306 backwards-compat macro
+// We talk to the bare UART (Config::VISION_SERIAL) directly and deliberately do NOT
+// include <MatrixMiniR4.h> — exactly like the firmware Vision.cpp (the reader uses the
+// bare UART, not the vendor MiniR4SmartCamReader). Skipping it also dodges a real macro
+// clash: the vendor's MiniR4OLED.h pulls in the Adafruit SSD1306 backwards-compat macro
 // `#define WHITE 1`, which would mangle ConfigVision.h's `enum class Color { ...
 // WHITE }` into `enum class Color { ... 1 }` and fail to compile. The Renesas
-// core's <Arduino.h> already provides Serial / Serial1 / millis() / F().
+// core's <Arduino.h> already provides Serial / Serial1 / Serial2 / millis() / F().
 #include <Arduino.h>
 
 // Reached via the arduino-cli `-I<abs>/WRO2026` build flag (see HOW TO COMPILE
@@ -167,7 +169,7 @@ namespace
      */
     void pumpUartBytes()
     {
-        while (Serial1.available() > 0)
+        while (VISION_SERIAL.available() > 0)
         {
             if (_rxLen >= kRxCapacity)
             {
@@ -182,7 +184,7 @@ namespace
                 --_rxLen;
             }
 
-            const int b = Serial1.read();
+            const int b = VISION_SERIAL.read();
             if (b < 0)
             {
                 break;    // available() lied; nothing to read.
@@ -274,13 +276,14 @@ void setup()
     // USB diagnostic output to the serial monitor (host side).
     Serial.begin(kUsbBaud);
 
-    // HUE12 camera UART. Serial1 IS MiniR4.Uart (MatrixMiniR4.h:114). Use the
-    // Config baud so this bench and the firmware agree on one source of truth.
-    Serial1.begin(Config::VISION_UART_BAUD);
+    // HUE12 camera UART, selected through Config::VISION_SERIAL exactly like the firmware —
+    // Serial2 on the R4 WiFi (the D0/D1 socket), NOT Serial1 (pins 22/23, the on-board ESP32
+    // link). Use the Config baud so this bench and the firmware agree on one source of truth.
+    VISION_SERIAL.begin(Config::VISION_UART_BAUD);
 
     // Wake the camera (vendor SmartCamReader contract) — a cold-booted HUE12 may stay idle
     // until kicked with this command, so the bench sends it once like the firmware does.
-    Serial1.print(Config::VISION_START_CMD);
+    VISION_SERIAL.print(Config::VISION_START_CMD);
 
     _rxLen            = 0;
     _framesThisWindow = 0;
