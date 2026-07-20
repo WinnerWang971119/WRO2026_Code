@@ -115,9 +115,12 @@
  * Channel index convention: channel 0 is the LEFTMOST channel on the forward-facing chassis,
  * channel 7 is the rightmost. The same convention applies to the rear board — the rear
  * board's leftmost channel (ch0) is still on the chassis's *left* when reversing, so the
- * symmetric weights `{-3.5, -2.5, ..., +2.5, +3.5}` apply identically to both boards and the
- * controller does NOT need to negate `getError()` when the rear board is active. (See
- * `LineFollower.h` setReverse note for the kinematics derivation.)
+ * symmetric weights `{-3.5, -2.5, ..., +2.5, +3.5}` report the line's left/right position in
+ * the SAME chassis frame for both boards; `getError()` is NOT negated here — the sensor stays
+ * a pure chassis-frame reporter. The CONTROLLER, however, DOES negate its P+D correction in
+ * reverse (ADR-078): the rear board leads in reverse and sits behind the axle, so it responds
+ * to a steering command with the opposite lateral motion of the front board. That sign fix
+ * lives in `LineFollower::update()`, not here. (See `LineFollower.h` setReverse note.)
  *
  * @note See the file-level doxygen for the **two-layer calibration contract** (firmware
  *       `setLight()` in `begin()` + software `Config::LINE_CALIB_LOW/HIGH`). Both layers

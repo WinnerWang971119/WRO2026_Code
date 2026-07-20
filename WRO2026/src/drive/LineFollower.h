@@ -257,15 +257,17 @@ public:
     /**
      * @brief Override the line-follow direction as part of this transition.
      *
-     * @param reverse `true` to follow the line while driving BACKWARDS (cruise PWM negated;
-     *                P+D mix unchanged because the differential-drive geometry is symmetric
-     *                — a CW body rotation moves the front-mounted tracer the same direction
-     *                regardless of motion direction). `false` for the default forward case.
+     * @param reverse `true` to follow the line while driving BACKWARDS. Cruise PWM is negated
+     *                AND the P+D correction sign is flipped (ADR-078): in a 2-board config the
+     *                rear board leads in reverse and sits behind the axle, so it sweeps the
+     *                opposite lateral way from the front board under the same steering command
+     *                — without the flip the loop is positive feedback and diverges instead of
+     *                converging. `false` for the default forward case.
      * @return        `*this` for fluent chaining.
-     * @note Assumes the line tracer is FRONT-mounted on the chassis. The tracer itself is
-     *       not moved or re-bound — only the sign of cruise flips. The line-error sign
-     *       does NOT need to flip for differential drive, see DECISIONS.md for the
-     *       kinematics derivation.
+     * @note On a 2-board chassis the active board flips to the rear (`setReverseActive`); the
+     *       controller negates its correction so reverse follow stays negative feedback. The
+     *       raw `getError()` / `getRawError()` centroid is unchanged (chassis-frame). See
+     *       ADR-078.
      * @note If this method is NOT called on the builder, the owner's current direction is
      *       left unchanged — re-enabling the controller does not silently reset direction.
      * @note On 2-board configurations (`Config::LINE_BOARD_COUNT == 2`), this flips
@@ -559,7 +561,9 @@ public:
      * @brief Direct (non-fluent) reverse-direction setter.
      *
      * @param reverse `true` to follow the line backwards; `false` for forward (default).
-     * @note Takes effect on the next `update()` tick. Assumes a front-mounted tracer.
+     * @note Takes effect on the next `update()` tick. Reverse negates cruise AND flips the
+     *       P+D correction sign so the rear (behind-axle) board stays negative feedback —
+     *       see the fluent `LineFollowerEnableBuilder::setReverse` note and ADR-078.
      * @note On 2-board configurations (`Config::LINE_BOARD_COUNT == 2`), this flips
      *       `WROLineArrayClass`'s active board to the rear — see
      *       `WROLineArray.h::setReverseActive()` and DECISIONS.md. The actual wiring will

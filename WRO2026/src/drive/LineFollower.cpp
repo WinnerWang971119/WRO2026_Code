@@ -238,10 +238,11 @@ void LineFollowerClass::update()
 
     // Resolve cruise from the active preset. Reading once at the top of the tick keeps the
     // L/R mix symmetric and avoids any chance of preset mid-tick flip-flopping. When
-    // `_reverse` is set, negate cruise so the chassis drives backward — the P+D mix below
-    // works unchanged because differential-drive geometry is direction-symmetric: a CW body
-    // rotation moves the front-mounted tracer the same way regardless of whether the body
-    // is travelling forward or backward. See DECISIONS.md "Reverse line-following".
+    // `_reverse` is set, negate cruise so the chassis drives backward. Reverse follow ALSO
+    // flips the sign of the P+D correction in the online path below (ADR-078): in a 2-board
+    // config the rear board leads in reverse, and it sits on the far side of the axle from
+    // the front board, so the same correction that steers the front board onto the line
+    // steers the rear board off it. See the `if (_reverse) corr = -corr;` block below.
     int16_t cruise = presetToPwm(_preset);
     if (_reverse)
     {
@@ -663,6 +664,21 @@ void LineFollowerClass::update()
             // and no extra dropout guard is needed. The board-selected gains (ADR-070) apply to
             // both the P and D terms.
             float corr = (kp * (err - _lineFollowOffset)) + (kd * dErr);
+
+            // Reverse (rear board leading) flips the correction sign. The FRONT board sits
+            // AHEAD of the axle; the REAR board — active in reverse — sits BEHIND it, so for a
+            // given body rotation the two sweep in OPPOSITE lateral directions. The P+D law is
+            // tuned so the FRONT board chases the line; applied unchanged to the rear board it
+            // steers AWAY from the line — positive feedback that hunts and diverges instead of
+            // converging. Negating the whole term (P AND D together) restores negative feedback
+            // while PRESERVING the equilibrium `err == _lineFollowOffset`, so ADR-069's
+            // travel-relative offset (PathTracker already flips its sign for reverse) and
+            // ADR-070's rear gains both compose unchanged — only the feedback polarity flips.
+            // `_lastErr` stays the raw centroid, so `getRawError()` is untouched. See ADR-078.
+            if (_reverse)
+            {
+                corr = -corr;
+            }
 
             // Clamp the correction to the configured maximum.
             if (corr > Config::LINE_MAX_CORR)

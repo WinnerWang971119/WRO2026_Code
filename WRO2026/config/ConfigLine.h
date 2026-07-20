@@ -230,7 +230,7 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_LEFT_HI_DEFAULT
-#define LINE_JUNCTION_LEFT_HI_DEFAULT 5
+#define LINE_JUNCTION_LEFT_HI_DEFAULT 6
 #endif
     constexpr uint8_t LINE_JUNCTION_LEFT_HI = LINE_JUNCTION_LEFT_HI_DEFAULT;
 
@@ -248,7 +248,7 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT
-#define LINE_JUNCTION_RIGHT_LO_DEFAULT 2
+#define LINE_JUNCTION_RIGHT_LO_DEFAULT 1
 #endif
     constexpr uint8_t LINE_JUNCTION_RIGHT_LO = LINE_JUNCTION_RIGHT_LO_DEFAULT;
 
