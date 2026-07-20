@@ -88,6 +88,10 @@
       38.0,
       80.70000000000005
     ],
+    "MR": [
+      38.0,
+      20.0
+    ],
     "MW2": [
       50.4867,
       93.24941350784047
@@ -185,6 +189,7 @@
     "MG2": "line",
     "MGD": "blind",
     "MGU": "blind",
+    "MR": "reset",
     "MW2": "line",
     "MWD": "blind",
     "MWU": "blind",
@@ -367,6 +372,14 @@
     [
       "Start",
       "shovel2Put"
+    ],
+    [
+      "MR",
+      "i1"
+    ],
+    [
+      "MR",
+      "MYD"
     ]
   ],
   "pivot_turns": [
@@ -376,6 +389,13 @@
       "PotPut"
     ]
   ],
+  "RESET_NODES": {
+    "MR": {
+      "axis": "y",
+      "wall_coord": 0.0,
+      "facing": 90.0
+    }
+  },
   "blind_projection_auto_seek": false,
   "EDGES": [
     {
