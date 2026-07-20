@@ -330,7 +330,7 @@ namespace
         Serial.println(F(" deg  (large coast = raise brake authority / lower creep)"));
 
         Serial.println(F("[TT] tuning hints:"));
-        Serial.println(F("[TT]   overshoot mean > 0 and repeatable  -> lower TURN_CREEP_PWM or narrow TURN_CREEP_WINDOW_DEG"));
+        Serial.println(F("[TT]   overshoot mean > 0 and repeatable  -> lower TURN_CREEP_PWM or widen TURN_CREEP_WINDOW_DEG"));
         Serial.println(F("[TT]   overshoot mean < 0 (stops short)    -> raise TURN_CREEP_PWM"));
         Serial.println(F("[TT]   turn-time max >> mean (hunting)      -> raise TURN_CREEP_PWM, or widen TURN_CREEP_WINDOW_DEG"));
         Serial.println(F("[TT]   slow final approach into tolerance   -> raise TURN_SETTLE_KP"));

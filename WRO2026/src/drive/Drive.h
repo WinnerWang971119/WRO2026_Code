@@ -917,7 +917,7 @@ private:
     ///<        the spin breaks away from rest (even a small `|err| <= window` turn that would
     ///<        otherwise creep from a dead stop and stall); once true, the command is phase-driven
     ///<        (CRUISE=`_turnCruisePwm`, CREEP=kinetic `Config::TURN_CREEP_PWM`, SETTLE=nudge). The
-    ///<        static breakaway floor is higher than the kinetic creep (bench: 46 vs 38 — a spin
+    ///<        static breakaway floor is higher than the kinetic creep (measured 44 vs 38 — a spin
     ///<        scrubs the tires, so starting costs more torque than sustaining).
 
     float _turnStartYaw = 0.0f;

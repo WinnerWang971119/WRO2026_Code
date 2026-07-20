@@ -695,8 +695,8 @@ namespace Config
      * @brief SETTLE-phase P gain for the turn profile's terminal nudge, in PWM per degree
      *        (ADR-078, `TurnProfilePolicy.h::turnSettleNudge`).
      *
-     * Once the turn profile latches SETTLE (`|err| <= TURN_CREEP_WINDOW_DEG` down to
-     * `TURN_TOLERANCE_DEG`), any residual `|errProg| >= TURN_TOLERANCE_DEG` is nudged toward the
+     * Once the turn profile latches SETTLE (`|err| <= TURN_TOLERANCE_DEG`), any residual
+     * `|errProg| >= TURN_TOLERANCE_DEG` is nudged toward the
      * target with `clamp(TURN_SETTLE_KP * errProg, ±TURN_CREEP_PWM)` instead of the fixed CREEP
      * floor — a light proportional correction sized to settle the last fraction of a degree
      * without re-entering CREEP's fixed speed. Clamped to `TURN_CREEP_PWM` so the nudge can never

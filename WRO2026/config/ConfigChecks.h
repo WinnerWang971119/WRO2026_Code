@@ -133,7 +133,7 @@ namespace Config
 
     // (i) The static breakaway floor must sit AT OR ABOVE the kinetic creep floor — starting an
     // in-place spin from rest breaks more (scrub) friction than sustaining one, so a breakaway
-    // below the creep would defeat its own purpose (bench: 46 vs 38 on Lofaix).
+    // below the creep would defeat its own purpose (measured 44 vs 38 on Lofaix).
     static_assert(TURN_BREAKAWAY_PWM >= TURN_CREEP_PWM,
                   "Config::TURN_BREAKAWAY_PWM must be >= TURN_CREEP_PWM — the from-rest static "
                   "breakaway floor is at or above the kinetic floor that sustains an already-"

@@ -303,7 +303,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // `power` is honored as the PD authority-clamp magnitude override: callers can chain
+    // `power` is honored as the CRUISE-magnitude override (profile authority): callers can chain
     // `Drive.turnDeg(deg).setPower(80)` for a faster turn. Non-positive overrides fall back to the
     // Config default to keep `_turnDeltaSign` as the sole source of rotation sign.
     //
@@ -322,7 +322,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     const float  deltaNorm = turnWrap180(target - (float) curYaw);
 
     // Short-circuit on no-op turns. When the folded delta is already within the heading tolerance,
-    // arming the PD would issue one spurious tick before it settles. Just mark the turn done and
+    // arming the profile would issue one spurious tick before it settles. Just mark the turn done and
     // keep _heldYaw at the target so subsequent yaw-locked moves stay aligned. `wallStop`'s
     // already-squared SQUARE phase relies on this short-circuit (AC9).
     if (fabsf(deltaNorm) <= (float) Config::TURN_TOLERANCE_DEG)
@@ -350,7 +350,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnProfileBrakeOnDone = brake;
     _turnProfileState       = TurnProfileState::ACTIVE;
     _turnDone               = false;
-    // `_heldYaw` is the coarse int16_t GYRO-mode heading member (ADR-045). The FLOAT PD target
+    // `_heldYaw` is the coarse int16_t GYRO-mode heading member (ADR-045). The FLOAT profile target
     // lives in `_turnTargetYaw`; storing a rounded heading here is not a control-error truncation.
     _heldYaw                = _normalizeYaw((int32_t) target);
 
@@ -364,7 +364,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnLastGoodReadMs = nowMs;    // persistent-IMU-fault watchdog seed.
 
     // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing extra
-    // here. We always return 0x00 — the PD controller cannot fail at dispatch (no lower-MCU round
+    // here. We always return 0x00 — the turn profile cannot fail at dispatch (no lower-MCU round
     // trip), so there is no rc to surface.
     (void) blocking;
     return 0x00;
@@ -378,8 +378,8 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // `power` is honored as the PD authority-clamp magnitude override; see _execTurnDeg for the
-    // full rationale. Non-positive overrides fall back to the Config default.
+    // `power` is honored as the CRUISE-magnitude override (profile authority); see _execTurnDeg for
+    // the full rationale. Non-positive overrides fall back to the Config default.
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
@@ -391,7 +391,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     const float  deltaNorm = turnWrap180(target - (float) curYaw);
 
     // Short-circuit on no-op turns. When the folded delta is already within the heading tolerance,
-    // arming the PD would issue one spurious tick before it settles. Just mark the turn done and
+    // arming the profile would issue one spurious tick before it settles. Just mark the turn done and
     // keep _heldYaw at the target so subsequent yaw-locked moves stay aligned. `wallStop`'s
     // already-squared SQUARE phase relies on this short-circuit (AC9).
     if (fabsf(deltaNorm) <= (float) Config::TURN_TOLERANCE_DEG)
@@ -418,8 +418,8 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     _turnProfileBrakeOnDone = brake;
     _turnProfileState       = TurnProfileState::ACTIVE;
     _turnDone               = false;
-    // `_heldYaw` is the coarse int16_t GYRO-hold heading (separate member, ADR-045); the FLOAT PD
-    // target lives in `_turnTargetYaw`.
+    // `_heldYaw` is the coarse int16_t GYRO-hold heading (separate member, ADR-045); the FLOAT
+    // profile target lives in `_turnTargetYaw`.
     _heldYaw                = _normalizeYaw((int32_t) target);
 
     // Seed the turn profile state (ADR-078); see _execTurnDeg for the field-by-field rationale.
