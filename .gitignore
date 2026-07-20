@@ -19,7 +19,7 @@ build/
 *.pdb
 
 # Claude Code local state — scheduler lock, git worktrees, per-machine settings.
-.claude/``
+.claude/
 
 # Playwright MCP debug artifacts (console logs / page snapshots) — per-machine
 # tooling output from local browser checks, not source.
