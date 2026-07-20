@@ -249,8 +249,10 @@ private:
      * report. A silent drop would wedge the console there for the rest of the power cycle, with
      * the mission unarmable behind it. Side effects therefore report
      * `notifyActionDone(action, false)` (raising a visible `Console::Signal::FAIL`); the two reads
-     * report `notifyReadDone(action)` for symmetry — their absence would merely time out
-     * fail-closed in the SELF TEST freshness gate, but silence is the wrong shape. Also pushes
+     * POISON the PULLED sample and bump `DiagSample::seq` BEFORE reporting `notifyReadDone(action)`
+     * — that call's precondition is a refreshed sample, and the SELF TEST freshness gate stops
+     * waiting the moment the ack lands, so a bare ack would hand the judge the stale (at boot,
+     * all-zero and PASSing) sample. Poisoning it makes a refused read fail closed instead. Also pushes
      * `"REFUSED"` to `EventTrace` alongside the `Serial.print` (same reasoning as the `"ST PASS"` /
      * `"ST FAIL"` pushes: the event ring is what the operator reads when something has gone wrong,
      * and a refusal driving the FAIL LEDs/tone with no matching ring entry reads as an

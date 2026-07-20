@@ -72,6 +72,19 @@ static_assert(
     static_cast<uint8_t>(VisionClass::Fault::BAD_CELL) == 3,
     "VisionClass::Fault::BAD_CELL must stay 3 — mirrored as kVisionFaultBadCell");
 
+namespace
+{
+    /**
+     * @brief `DiagSample::visionFaultKind` poison written when a `READ_MOSAIC` is REFUSED.
+     *
+     * Deliberately outside the mirrored `VisionClass::Fault` contract pinned above. The core's
+     * `judgeVision()` is an ALLOW-LIST (only `NONE` and `BAD_CELL` PASS; every unrecognised code
+     * FAILs), so this value makes a refused read fail closed instead of leaving the previous —
+     * at boot, all-zero and therefore PASSing — sample in place. See `_refuseRequest()`.
+     */
+    constexpr uint8_t kVisionFaultRefused = 0xFF;
+}
+
 // -----------------------------------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------------------------------
@@ -395,7 +408,13 @@ void OperatorPanelClass::_serviceRequestCompletion()
                 break;
             }
             EventTrace.pushEvent("CAL MOTOR");
-            const uint8_t result = Drive.calibrateMotorBias();
+            // The 70 is deliberate, and is NOT `Config::MOTOR_BIAS_CALIB_POWER` (50, the
+            // parameter's default). Motor bias is PWM-dependent, so calibrating at a different
+            // power samples a different operating point; the pre-console calibration menu this
+            // dispatch replaced called `calibrateMotorBias(70)`. Passing it explicitly keeps
+            // this a pure relocation of that behaviour — moving the operating point is a tuning
+            // decision, not a side effect of the console rewrite.
+            const uint8_t result = Drive.calibrateMotorBias(int16_t(70));
             OperatorConsole.notifyActionDone(action, result == 0x00);
             break;
         }
@@ -537,12 +556,33 @@ void OperatorPanelClass::_refuseRequest(Console::ActionRequest action, const cha
     // Report a FAILED completion instead: the wait unwinds and a Signal::FAIL surfaces on the
     // LEDs/buzzer where the operator can actually see the refusal.
     //
-    // The two reads are reported for symmetry. They are safe by accident today (the SELF TEST
-    // freshness gate times out fail-closed on a read that never completes), but a request that
-    // vanishes without a trace is the wrong shape regardless of who happens to survive it.
-    if (action == Console::ActionRequest::READ_MOSAIC ||
-        action == Console::ActionRequest::READ_LINE_BOARDS)
+    // The two reads are reported too — but POISON FIRST, THEN ACK. A bare `notifyReadDone()`
+    // would be fail-OPEN: its documented precondition is that the adapter has already refreshed
+    // the PULLED fields and bumped `seq`, and the SELF TEST freshness gate stops waiting the
+    // instant the ack lands (it does NOT run out its timeout). Acking without a refresh therefore
+    // hands the judge the PREVIOUS sample, which at boot is the all-zero one — where
+    // `visionFaultKind == NONE` is a VISION *PASS* and `lineBoardCount == 0` makes the LINE
+    // verdict vacuously true. Writing PULLED values no healthy read can produce makes the refusal
+    // fail closed on the very next judge, like every other path in this sequencer.
+    if (action == Console::ActionRequest::READ_MOSAIC)
     {
+        _sample.visionFaultKind = kVisionFaultRefused;
+        _bumpSeq();
+        OperatorConsole.notifyReadDone(action);
+    }
+    else if (action == Console::ActionRequest::READ_LINE_BOARDS)
+    {
+        // `judgeLineBoards()` iterates `lineBoardCount` boards and FAILs on the first that did
+        // not answer, so the count must be the REAL configured one — a zeroed count would leave
+        // it nothing to inspect and PASS vacuously. `lineBoardOk` follows `lineBoardPresent`
+        // down so LINE VIEW cannot keep presenting the stale channel values as valid.
+        _sample.lineBoardCount = Config::LINE_BOARD_COUNT;
+        for (uint8_t b = 0; b < 2; ++b)
+        {
+            _sample.lineBoardPresent[b] = false;
+            _sample.lineBoardOk[b]      = false;
+        }
+        _bumpSeq();
         OperatorConsole.notifyReadDone(action);
     }
     else

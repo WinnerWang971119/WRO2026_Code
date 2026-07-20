@@ -1580,6 +1580,17 @@ void OperatorConsoleClass::_renderWaitRelease(Console::ConsoleFrame& out) const
     {
         _rowSet(out.rows[1], "WORKING...");
         _rowSet(out.rows[2], actionName(_actionInFlight));
+
+        // CAL MOTOR only. `Drive::calibrateMotorBias()` derives each wheel's bias from a
+        // DIFFERENTIAL comparison of the two encoders, and on this chassis the M2/M3 encoder
+        // cables are crossed — so it attributes each wheel's result to the other one. The entry
+        // is kept (an operator may still want the raw numbers), but nobody should paste them
+        // into Config.h believing they are trustworthy, and this is the one screen guaranteed to
+        // be in front of them while it runs. Not shown for the other actions, which are sound.
+        if (_actionInFlight == Console::ActionRequest::CAL_MOTOR)
+        {
+            _rowSet(out.rows[3], "! ENC CABLES XED");
+        }
         return;
     }
     _rowSet(out.rows[1], "RELEASE BUTTONS");
