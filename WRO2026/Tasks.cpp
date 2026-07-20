@@ -469,6 +469,12 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
 bool TasksClass::beltTest(const TaskArgs& /*args*/)
 {
     Manipulator.belt.home();
+    _waitMs(1000);
+    Manipulator.belt.toStation(Config::BeltStation::LEFT);
+    _waitMs(1000);
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    _waitMs(1000);
+    Manipulator.belt.home();
 
     return true;
 }
@@ -788,7 +794,8 @@ bool TasksClass::pot(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("PotGet").setArrivalDirection(Direction::REAR);
     Manipulator.boxClose();
-    PathTracker.goTo("PotPut").setArrivalDirection(Direction::REAR);
+    PathTracker.goTo("shovel2Get").setArrivalDirection(Direction::REAR);
+    PathTracker.goTo("PotPut") ;
     Manipulator.boxOpen();
     return true;
 }
@@ -796,12 +803,23 @@ bool TasksClass::pot(const TaskArgs& /*args*/)
 bool TasksClass::mosaic(const TaskArgs& /*args*/)
 {
     Vision.getColor(0);
-    if (Vision.getColor(0) == Config::Color::BLUE)
+    
     return true;
 }
 
 bool TasksClass::debries(const TaskArgs& /*args*/)
 {
+    PathTracker.goTo("CG1").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    PathTracker.goTo("CG2").setArrivalDirection(Direction::FRONT);
+    Drive.turnToYaw(0);
+    PathTracker.goTo("CG3").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
+
+    PathTracker.goTo("CY1").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
     return true;
 }
 
