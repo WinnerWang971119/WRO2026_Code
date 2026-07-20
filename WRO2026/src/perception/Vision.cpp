@@ -224,6 +224,17 @@ bool VisionClass::_classifyCandidate(
     // Classify into CELL-indexed local buffers, applying the strict guard, so the caller touches
     // the latch ONLY after every active cell validates. This is what makes AC4's "no overwrite on
     // failure" hold (the caller commits the latch only on a true return).
+    //
+    // UNKNOWN-cell masking (Config::VISION_MASK_UNKNOWN_ENABLED): when enabled, an UNKNOWN cell no
+    // longer aborts the read — it is LATCHED honestly as UNKNOWN and counted, so a frame with a few
+    // unreadable / surprise-colour cells is still usable (the mosaic planner injects a fallback for
+    // them; see Config::VISION_MASK_FALLBACK_COLOR). Only when the UNKNOWN count exceeds
+    // Config::VISION_MASK_MAX_UNKNOWN_CELLS is the frame treated as a genuine failure. Vision itself
+    // never fakes a colour here — getColor() keeps reporting UNKNOWN, so hue tuning stays truthful.
+    uint8_t unknownCount     = 0;
+    uint8_t firstUnknownCell = 0xFF;
+    uint8_t firstUnknownRaw  = 0;
+
     for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
     {
         // DIRECTION MATTERS (TC19): the unpacked arrays are indexed BY SLOT, the result is stored
@@ -234,19 +245,40 @@ bool VisionClass::_classifyCandidate(
 
         if (col == Config::Color::UNKNOWN)
         {
-            // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
-            // Record the first offending CELL index and the raw hue of its mapped slot. The caller
-            // does NOT write the latch on a false return.
-            firstBadCell = c;
-            badRaw       = hue[slot];
-            return false;
+            if (!Config::VISION_MASK_UNKNOWN_ENABLED)
+            {
+                // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
+                // Record the first offending CELL index and the raw hue of its mapped slot. The
+                // caller does NOT write the latch on a false return.
+                firstBadCell = c;
+                badRaw       = hue[slot];
+                return false;
+            }
+
+            // Mask mode: latch the cell honestly as UNKNOWN and keep going.
+            if (firstUnknownCell == 0xFF)
+            {
+                firstUnknownCell = c;
+                firstUnknownRaw  = hue[slot];
+            }
+            ++unknownCount;
         }
 
-        outColors[c] = col;
+        outColors[c] = col;    // `col` here is UNKNOWN in the masked case — reported truthfully.
         outHue[c]    = hue[slot];
     }
 
-    // Every active cell validated.
+    // Mask mode over-budget: too many UNKNOWN cells is a genuine failure (bad camera / lighting),
+    // so surface it exactly like the strict guard would — the caller must NOT latch this frame.
+    if (Config::VISION_MASK_UNKNOWN_ENABLED &&
+        unknownCount > Config::VISION_MASK_MAX_UNKNOWN_CELLS)
+    {
+        firstBadCell = firstUnknownCell;
+        badRaw       = firstUnknownRaw;
+        return false;
+    }
+
+    // Every active cell validated, or the UNKNOWN cells were within the mask budget.
     return true;
 }
 

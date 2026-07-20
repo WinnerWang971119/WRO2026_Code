@@ -196,10 +196,48 @@ namespace Config
     //       on the real tiles at bench T8. Until then a red reading falls in no
     //       band and classifies as `Color::UNKNOWN` (same as any other gap).
     constexpr HueBand HUE_BANDS[] = {
-        {  20,  45, Color::YELLOW },   // placeholder — calibrate at T8
-        {  80, 140, Color::GREEN  },   // placeholder — calibrate at T8
-        { 141, 200, Color::BLUE   },   // placeholder — calibrate at T8
+        {  20,  50, Color::YELLOW },   // bench-tuned
+        {  70, 140, Color::GREEN  },   // bench-tuned (green dips to ~79; lo lowered off 80)
+        { 141, 200, Color::BLUE   },   // placeholder — calibrate
     };
+
+    // -----------------------------------------------------------------------------------------
+    // UNKNOWN-cell masking (mosaic robustness)
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * @brief When true, a mosaic read TOLERATES a few UNKNOWN cells instead of failing outright,
+     *        and the mosaic planner injects `VISION_MASK_FALLBACK_COLOR` for each UNKNOWN cell.
+     *
+     * Scoring rationale: a tile placed in ANY bin scores (5 pts) versus 0 for an un-built cell, so
+     * masking a handful of unreadable / surprise-colour cells and placing a fallback tile is a net
+     * gain. Vision still REPORTS the cell as `UNKNOWN` (`getColor()` / VISION VIEW stay honest, so
+     * hue tuning is not hidden); only the mosaic sort substitutes the fallback. Leave `false` for
+     * the strict default contract — any UNKNOWN cell => `Fault::BAD_CELL` (ADR-037).
+     *
+     * @note Uses the `_DEFAULT` override idiom (like `VISION_CELL_TO_SLOT`) so a host-test target
+     *       or a bench build can force it on with `-DVISION_MASK_UNKNOWN_ENABLED_DEFAULT=true`
+     *       without editing this file.
+     */
+#ifndef VISION_MASK_UNKNOWN_ENABLED_DEFAULT
+#define VISION_MASK_UNKNOWN_ENABLED_DEFAULT false
+#endif
+    constexpr bool VISION_MASK_UNKNOWN_ENABLED = VISION_MASK_UNKNOWN_ENABLED_DEFAULT;
+
+    /**
+     * @brief Colour the mosaic planner substitutes for an UNKNOWN cell while masking is on.
+     *
+     * MUST be one of the four wall-supplied station colours (YELLOW / BLUE / GREEN / WHITE) so a
+     * real tile can actually be fetched for it — enforced in `ConfigChecks.h`.
+     */
+    constexpr Color VISION_MASK_FALLBACK_COLOR = Color::WHITE;   // must be a wall station colour
+
+    /**
+     * @brief Maximum UNKNOWN cells a masked read tolerates. Above this the frame is a genuine
+     *        failure (`Fault::BAD_CELL`), not masked — a mostly-unknown board means the camera or
+     *        lighting is wrong, not that one or two tiles are surprises.
+     */
+    constexpr uint8_t VISION_MASK_MAX_UNKNOWN_CELLS = 2;   // above this => real failure
 
     // -----------------------------------------------------------------------------------------
     // Mosaic cell-to-slot mapping

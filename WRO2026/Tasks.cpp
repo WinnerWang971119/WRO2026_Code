@@ -1187,16 +1187,27 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
 
     for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
     {
-        const uint8_t station = mosaicColorIndex(Vision.getColor(cell));
+        uint8_t station = mosaicColorIndex(Vision.getColor(cell));
         if (station >= kMosaicColorCount)
         {
-            // UNKNOWN (no successful read yet, or an uncalibrated hue) or RED — no station
-            // supplies it, so the mosaic cannot be built. Name the cell rather than
-            // silently planning a partial route.
+            // UNKNOWN (uncalibrated / surprise hue, or no successful read) or RED — no wall station
+            // supplies it. With masking ON (Config::VISION_MASK_UNKNOWN_ENABLED) substitute the
+            // fallback station so the tile is still placed (scores 5 pts) rather than aborting the
+            // whole build; `Vision::readMosaic()` has already capped how many cells can reach here
+            // (Config::VISION_MASK_MAX_UNKNOWN_CELLS). With masking OFF it is a genuine failure —
+            // name the cell rather than silently planning a partial route.
+            if (!Config::VISION_MASK_UNKNOWN_ENABLED)
+            {
+                Serial.print(F("[Tasks] mosaic: cell "));
+                Serial.print(cell);
+                Serial.println(F(" has no station colour"));
+                return 0;
+            }
+            station = mosaicColorIndex(Config::VISION_MASK_FALLBACK_COLOR);
             Serial.print(F("[Tasks] mosaic: cell "));
             Serial.print(cell);
-            Serial.println(F(" has no station colour"));
-            return 0;
+            Serial.print(F(" UNKNOWN -> masked to "));
+            Serial.println(kMosaicColorTag[station]);
         }
         cellIndex[cell] = station;
         ++needed[station];
