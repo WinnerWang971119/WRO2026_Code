@@ -16,6 +16,7 @@ void buildMission()
         .task("rectangleShovel")
         .task("pot")
         .task("debries")
-        .task("mosaic");
+        .task("mosaic")
+        .task("dumpMosaic");
     Mission.start();
 }

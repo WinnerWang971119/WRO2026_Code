@@ -49,6 +49,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "pot", &TasksClass::pot },
     { "mosaic", &TasksClass::mosaic },
     { "debries", &TasksClass::debries },
+    { "dumpMosaic", &TasksClass::dumpMosaic },
     //Add new tasks here
 };
 
@@ -1121,6 +1122,20 @@ bool TasksClass::debries(const TaskArgs& /*args*/)
     Manipulator.boxClose();
     PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
     Manipulator.boxOpen();
+    return true;
+}
+
+bool TasksClass::dumpMosaic(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
+    Manipulator.dump();
+    Manipulator.dumpReset();
+    PathTracker.goTo("dump2").setArrivalDirection(Direction::REAR);
+    Manipulator.dump();
+    Manipulator.dumpReset();
+    PathTracker.goTo("dump3").setArrivalDirection(Direction::REAR);
+    Manipulator.dump();
+    Manipulator.dumpReset();
     return true;
 }
 

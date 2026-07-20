@@ -339,6 +339,20 @@ private:
     bool debries(const TaskArgs& args);
 
     /**
+     * @brief Unload the carrier onto the mosaic build area, one chassis stop per row.
+     *
+     * The sorter holds one bin per mosaic COLUMN, each `kMosaicRows` tiles deep, loaded top
+     * row first by `mosaic()`. Dumping walks the three row nodes (`dump1` / `dump2` / `dump3`)
+     * and at each stop discharges every bin's next tile, so the built grid comes out identical
+     * to the pattern read at `CY3`.
+     *
+     * @param args  Ignored.
+     * @return true when finish.
+     * @note Run `mosaic` first — this body only unloads what the carrier is already holding.
+     */
+    bool dumpMosaic(const TaskArgs& args);
+
+    /**
      * @brief Stationary cooperative delay helper for task bodies.
      *
      * @param ms    Timeout in milliseconds.
