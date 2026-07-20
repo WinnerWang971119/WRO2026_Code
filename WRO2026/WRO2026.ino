@@ -13,16 +13,19 @@
  *      chirps 3x and the RGB LEDs turn green; on failure it emits one long low
  *      tone and the LEDs turn red.
  *   2. Place chassis on `Routes::START_NODE` (`A`) facing `START_HEADING_DEG`.
- *   2a. Optional pre-mission calibration: hold BTN_DOWN for >= 2 s to
- *       open the OLED CALIBRATION menu. BTN_DOWN short-presses cycle
- *       the cursor (LINE -> MOTOR -> EXIT). BTN_UP confirms the selection:
- *         - LINE:  runs LineArray.calibrate() (sequential per-board
- *                  sweep with BTN_UP gate between phases).
- *         - MOTOR: runs Drive.calibrateMotorBias() (~2 s wheels-up spin;
- *                  LIFT THE CHASSIS before selecting this!).
- *         - EXIT:  returns to idle.
- *       After dispatch the menu closes; the operator can re-enter it
- *       any time before the mission is armed.
+ *   2a. Optional pre-mission diagnostics: hold BTN_DOWN for >=
+ *       `Config::UI_MENU_LONGPRESS_MS` to open the OLED `DIAGNOSTICS`
+ *       console (ADR-076). BTN_DOWN short-presses scroll the 9-entry
+ *       list, BTN_UP confirms the highlighted entry:
+ *         SELF TEST / BATT / LINE VIEW / VISION VIEW / GYRO VIEW /
+ *         GYRO ZERO / CAL LINE / CAL MOTOR / EXIT.
+ *       Every screen the console owns is per-tick and non-blocking (the
+ *       two dispatched calibration routines are the pre-existing
+ *       exceptions). The console owns the OLED exclusively while open and
+ *       hands it back to `EventTrace` on close. It is available any time
+ *       before the mission is armed — and, unlike the mission-arm path,
+ *       ALSO after a failed boot, which is exactly when the operator needs
+ *       the BATT screen's boot report.
  *   3. Press `BTN_UP` once — this zeros the IMU yaw offset, then calls
  *      `Mission.start()`. The mission runs asynchronously from `loop()`.
  *   4. Serial prints state-change events + periodic `HB t=... yaw=... node=...`
@@ -53,6 +56,7 @@
 #include "src/manip/Manipulator.h"
 #include "src/mission/Mission.h"
 #include "MissionScript.h"
+#include "src/operator/OperatorPanel.h"
 #include "src/mission/PathTracker.h"
 #include "Tasks.h"
 #include "src/perception/Vision.h"
@@ -61,85 +65,47 @@
 
 namespace
 {
-    /**
-     * @brief Calibration menu top-level state. IDLE = normal pre-mission flow;
-     *        OPEN = operator is currently navigating the on-OLED menu and the
-     *        BTN_UP mission-arm path is suppressed.
-     */
-    enum class CalMenuState : uint8_t
-    {
-        IDLE,
-        OPEN
-    };
+    /// Latched for the whole power cycle once `setup()`'s health checks fail. Nothing — no
+    /// console entry, no button — ever clears it, so `_missionArmed` can never become true
+    /// after a failed boot (AC23). It no longer short-circuits `loop()` wholesale: the
+    /// `DIAGNOSTICS` console stays reachable so the operator can read the boot report about
+    /// the very failure that just occurred.
+    bool _setupFailed = false;
 
-    /**
-     * @brief Calibration menu items, indexed contiguously so BTN_DOWN
-     *        short-presses can cycle by integer modulo.
-     */
-    enum class CalMenuItem : uint8_t
-    {
-        LINE  = 0,
-        MOTOR = 1,
-        EXIT  = 2
-    };
+    bool _missionArmed = false;
+    bool _btnUpPrev    = false;
 
-    constexpr uint8_t CAL_MENU_ITEM_COUNT = 3;
-
-    bool         _setupFailed         = false;
-    bool         _missionArmed        = false;
-    bool         _btnUpPrev           = false;
-    bool         _btnDownPrev         = false;
-    uint32_t     _btnDownPressStartMs = 0;   // 0 = not currently pressed; nonzero = press start timestamp
-    CalMenuState _calMenuState        = CalMenuState::IDLE;
-    CalMenuItem  _calMenuSel          = CalMenuItem::LINE;
+    /// 0 = BTN_DOWN not currently pressed; nonzero = the `millis()` stamp the press began, used
+    /// to time the `Config::UI_MENU_LONGPRESS_MS` console-entry hold.
+    uint32_t _btnDownPressStartMs = 0;
 }    // namespace
-
-/**
- * @brief Draw the CALIBRATION menu to the OLED.
- *
- * The 128x32 panel at text size 1 fits ~4 rows of 8 px text. We use row 0 as
- * the title and rows 1..3 for the three menu items. The cursor `> ` precedes
- * the currently-selected item; non-selected rows get two spaces so labels
- * align vertically.
- *
- * Called once on menu entry and once per BTN_DOWN cursor cycle. Other
- * modules' `cooperativeTick()` OLED writes may transiently overwrite the
- * menu; that is acceptable — the next cursor move repaints.
- */
-void renderCalMenu()
-{
-    MiniR4.OLED.clearDisplay();
-    MiniR4.OLED.setTextSize(1);
-    MiniR4.OLED.setTextColor(WHITE);
-    MiniR4.OLED.setCursor(0, 0);
-    MiniR4.OLED.println(F("CALIBRATION"));
-
-    static const char* labels[CAL_MENU_ITEM_COUNT] = { "LINE", "MOTOR", "EXIT" };
-    for (uint8_t i = 0; i < CAL_MENU_ITEM_COUNT; ++i)
-    {
-        MiniR4.OLED.setCursor(0, 8 + i * 8);
-        MiniR4.OLED.print((i == static_cast<uint8_t>(_calMenuSel)) ? F("> ") : F("  "));
-        MiniR4.OLED.println(labels[i]);
-    }
-    MiniR4.OLED.display();
-}
 
 /**
  * @brief Whether this tick must run the line-array perception updates.
  *
  * The three line consumers — `LineArray.update()`, `LineFollower.update()` and
- * `Intersection.update()` — only do useful work when the follower is engaged or
- * a `stopAtLine` seek is in flight. On a pure GYRO/RAW/SYNC move or at
- * pre-mission idle nothing reads the line cache, so the slow Wire1 I2C read is
- * wasted budget. `cooperativeTick()` gates those three calls on this predicate.
+ * `Intersection.update()` — only do useful work when the follower is engaged, a
+ * `stopAtLine` seek is in flight, or the diagnostics console is showing live line
+ * data. On a pure GYRO/RAW/SYNC move or at pre-mission idle nothing reads the line
+ * cache, so the slow Wire1 I2C read is wasted budget. `cooperativeTick()` gates
+ * those three calls on this predicate.
  *
- * @return `LineFollower.isEnabled() || Drive.isSeekingLine()` when the gate is
- *         enabled; always `true` when `Config::LINE_ARRAY_TICK_GATE_ENABLED` is
- *         `false` (the `constexpr` early-out folds the gate away, restoring the
- *         legacy unconditional three-update path).
+ * @return `LineFollower.isEnabled() || Drive.isSeekingLine() ||
+ *         OperatorPanel.wantsLineData()` when the gate is enabled; always `true`
+ *         when `Config::LINE_ARRAY_TICK_GATE_ENABLED` is `false` (the `constexpr`
+ *         early-out folds the gate away, restoring the legacy unconditional
+ *         three-update path).
  * @note Keys off the `stopAtLine` seek FSM via `Drive.isSeekingLine()`; a
  *       `wallStop` push does NOT open the gate — it uses the encoder stall
  *       watchdog, not the line sensor.
+ * @note The console term (AC5) is what makes LINE VIEW and the SELF TEST line
+ *       check live: the cached getters they read (`getJunctionType()`,
+ *       `isOnline()`, `getError()`) do NOT self-refresh while
+ *       `Config::LINE_ARRAY_TICK_CACHE_ENABLED` is on, so without forcing the
+ *       gate open they would serve whatever the last mission tick left behind.
+ *       `OperatorConsoleClass::wantsLineData()` is itself `false` whenever the
+ *       console is closed or `boot.lineArray == false` (AC25), so this term costs
+ *       one inlined state comparison per tick during a mission.
  */
 static bool lineArrayNeededThisTick()
 {
@@ -147,7 +113,7 @@ static bool lineArrayNeededThisTick()
     {
         return true;
     }
-    return LineFollower.isEnabled() || Drive.isSeekingLine();
+    return LineFollower.isEnabled() || Drive.isSeekingLine() || OperatorPanel.wantsLineData();
 }
 
 /**
@@ -296,7 +262,7 @@ void cooperativeTick()
     PathTracker.update();
 
     // Operator-offset integrator. MUST run unconditionally every tick (not behind
-    // the cal-menu guard below): Drive ticked above so its encoder reads are fresh,
+    // the console's OLED-ownership gating below): Drive ticked above so its encoder reads are fresh,
     // and PathTracker just pushed its nav-active flag (setNavActive) so the gate
     // resolves on this same tick. While the gate is closed it issues no IMU read; it
     // re-baselines once on the closed->open edge, so the operator's first hand-drive
@@ -319,15 +285,17 @@ void cooperativeTick()
         Serial.println(s_tickCount);
     }
 
-    // The calibration menu owns the OLED while open (FINDING #4): EventTrace's
-    // dirty-flag repaint would clearDisplay() and paint the event ring over the
-    // menu within ~one tick. Suppress its render while OPEN. The pending _dirty
-    // flag persists, so the first update() after the menu closes repaints the
-    // accumulated events.
-    if (_calMenuState != CalMenuState::OPEN)
-    {
-        EventTrace.update();
-    }
+    // The diagnostics console owns the OLED exclusively while open (AC17): EventTrace's
+    // dirty-flag repaint would clearDisplay() and paint the event ring over the console
+    // frame within ~one tick. Suppress ONLY the render — never the whole update(), which
+    // is what the pre-console menu did and which silently killed both the edge-triggered
+    // event polling and the 500 ms Serial heartbeat along with it. EventTrace keeps
+    // polling and heartbeating here while the console owns the display; its pending
+    // _dirty flag is left set, and setRenderEnabled() forces one repaint on the
+    // false->true edge, so the accumulated events come back in a single pass the first
+    // tick after the console closes — no bookkeeping owed here.
+    EventTrace.setRenderEnabled(!OperatorPanel.isOpen());
+    EventTrace.update();
 }
 
 void setup()
@@ -381,7 +349,43 @@ void setup()
     Tasks.setTickCallback(cooperativeTick);
     Vision.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(battOk && arrayOk && yawOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
+    // Boot health capture (AC10/AC23/AC24/AC25). These verdicts — the 12 module begin()
+    // results above plus the battOk VOLTAGE verdict (MiniR4.PWR itself comes up inside
+    // MiniR4.begin(), so `batt` is not an init result) — used to die here as setup()
+    // locals the instant this function returned. The BATT screen, the console's
+    // degraded-mode availability rules and the SELF TEST sequencer's per-subsystem skips
+    // all read them, so they are captured once into a BootReport the console owns for the
+    // rest of the power cycle. Value-initialised first so a field added to the struct
+    // later can never be read uninitialised if this list is not updated with it.
+    Console::BootReport bootReport{};
+    bootReport.batt         = battOk;
+    bootReport.lineArray    = arrayOk;
+    bootReport.yaw          = yawOk;
+    bootReport.drive        = driveOk;
+    bootReport.lineFollower = lineOk;
+    bootReport.intersection = intOk;
+    bootReport.manipulator  = manipOk;
+    bootReport.localization = locOk;
+    bootReport.pathTracker  = pathOk;
+    bootReport.mission      = missOk;
+    bootReport.tasks        = tasksOk;
+    bootReport.vision       = visionOk;
+    bootReport.trace        = traceOk;
+
+    // The measured voltage itself, not just the verdict — the BATT screen prints it as the
+    // pack reading at boot, which is what the operator compares a later live read against.
+    bootReport.battVoltageAtBoot = battVoltage;
+
+    // Order matters: setBootReport() BEFORE begin(), per OperatorPanel.h — and both AFTER
+    // every module the panel samples has had its own begin() called. OperatorPanel.begin()
+    // does no hardware I/O (it is pure state reset, and OperatorConsole.begin() likewise),
+    // so it cannot itself fail the boot and is deliberately absent from the verdict below.
+    OperatorPanel.setBootReport(bootReport);
+    OperatorPanel.begin();
+
+    // BootReport::clean() is the AND of the same 13 flags this line used to spell out by
+    // hand — one definition of "healthy boot", shared with the console.
+    _setupFailed = !bootReport.clean();
 
     if (_setupFailed)
     {
@@ -411,7 +415,9 @@ void setup()
 
         // Boot-fail signal: solid red on both on-board RGB LEDs + one long low
         // tone. Tone() is non-blocking; the tone plays out via the hardware timer
-        // while loop() idles in its _setupFailed early-return.
+        // while loop() keeps running the full cooperative tick — there is no
+        // _setupFailed early-return any more (AC23), so the diagnostics console
+        // stays reachable for inspecting exactly this failed boot.
         MiniR4.LED.setColor(1, 255, 0, 0);
         MiniR4.LED.setColor(2, 255, 0, 0);
         MiniR4.Buzzer.Tone(Config::BOOT_FAIL_BEEP_HZ, Config::BOOT_FAIL_BEEP_MS);
@@ -438,111 +444,75 @@ void loop()
 {
     cooperativeTick();
 
-    if (_setupFailed)
-    {
-        return;
-    }
-
     // -----------------------------------------------------------------------
-    // Calibration menu state machine. While OPEN: BTN_DOWN rising edge cycles
-    // the cursor, BTN_UP rising edge confirms the selection and closes the
-    // menu. The IDLE-state BTN_UP mission-arm path is suppressed for the rest
-    // of this loop pass via the early `return`.
+    // Diagnostics console entry: BTN_DOWN held >= Config::UI_MENU_LONGPRESS_MS.
+    //
+    // Deliberately NOT behind `_setupFailed` (AC23). The old unconditional
+    // `if (_setupFailed) return;` sat right above here and made the menu
+    // unreachable after exactly the boot the operator most needs to inspect —
+    // the console is read-only, its BATT screen carries the boot report, and
+    // every entry that writes hardware is already non-dispatchable while the
+    // report is unclean (AC24). The arm path below stays guarded instead.
+    //
+    // Still gated on `!_missionArmed` so we never intercept the BTN_DOWN
+    // fault-acknowledge path that activates after a Mission fault (AC18), and
+    // on `!OperatorPanel.isOpen()` so a held BTN_DOWN inside the console — the
+    // cursor-scroll button — cannot re-trigger entry underneath itself.
     // -----------------------------------------------------------------------
-    if (_calMenuState == CalMenuState::OPEN)
+    if (!_missionArmed && !OperatorPanel.isOpen())
     {
-        const bool btnDownNow = MiniR4.BTN_DOWN.getState();
-        const bool btnUpNow   = MiniR4.BTN_UP.getState();
-
-        // BTN_DOWN short-press rising edge → cycle cursor.
-        if (btnDownNow && !_btnDownPrev)
-        {
-            _calMenuSel = static_cast<CalMenuItem>(
-                (static_cast<uint8_t>(_calMenuSel) + 1) % CAL_MENU_ITEM_COUNT);
-            renderCalMenu();
-        }
-
-        // BTN_UP short-press rising edge → confirm + dispatch + exit menu.
-        if (btnUpNow && !_btnUpPrev)
-        {
-            switch (_calMenuSel)
-            {
-                case CalMenuItem::LINE:
-                    EventTrace.pushEvent("CAL LINE");
-                    Serial.println(F("[main] dispatching LineArray.calibrate()..."));
-                    LineArray.calibrate();
-                    break;
-                case CalMenuItem::MOTOR:
-                    EventTrace.pushEvent("CAL MOTOR");
-                    Serial.println(F("[main] dispatching Drive.calibrateMotorBias()..."));
-                    Drive.calibrateMotorBias(int16_t(70));
-                    break;
-                case CalMenuItem::EXIT:
-                    EventTrace.pushEvent("CAL EXIT");
-                    Serial.println(F("[main] menu exit."));
-                    break;
-            }
-            _calMenuState = CalMenuState::IDLE;
-
-            // Force a release-poll so the BTN_UP press that confirmed doesn't
-            // immediately re-trigger the mission-arm path in the same loop
-            // pass, and so a still-held BTN_DOWN doesn't cycle the cursor of
-            // a re-opened menu the next time we enter OPEN.
-            while (MiniR4.BTN_UP.getState() || MiniR4.BTN_DOWN.getState())
-            {
-                delay(20);
-            }
-            _btnDownPrev = false;
-            _btnUpPrev   = false;
-            return;
-        }
-
-        _btnDownPrev = btnDownNow;
-        _btnUpPrev   = btnUpNow;
-        return;   // skip IDLE-state BTN_UP arm logic while menu is open
-    }
-
-    // IDLE state: BTN_DOWN held >= 2 s opens the OLED calibration menu. Only
-    // available before the mission has been armed (so we don't intercept the
-    // BTN_DOWN fault-acknowledge path that activates after a Mission fault).
-    if (!_missionArmed)
-    {
-        const bool btnDownNow = MiniR4.BTN_DOWN.getState();
-        if (btnDownNow)
+        if (MiniR4.BTN_DOWN.getState())
         {
             if (_btnDownPressStartMs == 0)
             {
                 _btnDownPressStartMs = millis();
             }
-            else if ((millis() - _btnDownPressStartMs) >= 2000)
+            else if ((millis() - _btnDownPressStartMs) >= Config::UI_MENU_LONGPRESS_MS)
             {
-                EventTrace.pushEvent("CAL MENU");
-                Serial.println(F("[main] entering calibration menu (BTN_DOWN held >= 2s)"));
-                _calMenuState        = CalMenuState::OPEN;
-                _calMenuSel          = CalMenuItem::LINE;
-                _btnDownPressStartMs = 0;
-                renderCalMenu();
+                Serial.println(F("[main] opening DIAGNOSTICS console (BTN_DOWN long-press)"));
 
-                // Wait for BOTH buttons to release so neither a still-held
-                // BTN_DOWN counts as a short-press cursor cycle nor a still-held
-                // BTN_UP counts as a confirm rising edge on the very next loop
-                // tick (FINDING #5). Mirrors the confirm-exit release loop.
-                while (MiniR4.BTN_DOWN.getState() || MiniR4.BTN_UP.getState())
-                {
-                    delay(20);
-                }
-                _btnDownPrev = false;
-                _btnUpPrev   = false;
-                return;   // bail; next loop tick handles menu navigation
+                // Cleared BEFORE open() so the arm path's `_btnDownPressStartMs == 0`
+                // guard is satisfied again the moment the console closes, and so the
+                // hold does not keep accumulating toward a second trigger.
+                _btnDownPressStartMs = 0;
+
+                // OperatorPanel.open() pushes "DIAG MENU" to EventTrace itself, on the
+                // open transition only — do not duplicate the push here. There is no
+                // release-spin: the console's own WAIT_RELEASE state absorbs the still-
+                // held button on its opening tick, so the cooperative loop keeps running
+                // at full cadence while the operator's thumb is down (AC4).
+                OperatorPanel.open();
             }
         }
         else
         {
-            // Released before the 2 s threshold — reset start so a tap doesn't
+            // Released before the threshold — reset the stamp so a tap doesn't
             // accumulate toward an unintended trigger.
             _btnDownPressStartMs = 0;
         }
     }
+
+    // Push the armed flag down every pass (single source of truth stays here — no
+    // second global), then tick the console. `update()` is a single `isOpen()` call
+    // and an immediate return while the console is closed (AC21), so the mission's
+    // tick cadence is unchanged by its presence.
+    //
+    // In `loop()`, NOT in `cooperativeTick()`: that hook is re-entered from inside
+    // `Drive::_drainBlocking()` and `Vision::readMosaic()`, and ticking the panel
+    // there would re-enter the console in the middle of dispatching its own request.
+    OperatorPanel.setMissionArmed(_missionArmed);
+
+    // Sampled BEFORE the panel ticks — the sample point is load-bearing, do not move
+    // it below update(). Confirming EXIT inside update() calls _close() directly (it
+    // is the one confirm path that skips the WAIT_RELEASE leg), so a naive live
+    // isOpen() read in the arm condition below already sees CLOSED on the very pass —
+    // and the very BTN_UP press — that closed the console, and would arm the mission
+    // off the operator's "leave diagnostics" press. Holding the pre-update state for
+    // this pass means the closing press can never satisfy the arm guard; the still-
+    // held button then latches _btnUpPrev at the bottom of loop(), so arming next
+    // requires a genuine release followed by a fresh press.
+    const bool consoleWasOpen = OperatorPanel.isOpen();
+    OperatorPanel.update();
 
     // BTN_UP rising edge arms the mission. The press re-anchors the chassis to
     // `Routes::START_NODE` and captures the IMU yaw NOW (the operator has just
@@ -557,18 +527,45 @@ void loop()
     // BTN_UP press also re-fires once the mission has returned to idle — a
     // clean finish or a cleared fault, never mid-run (Mission.isIdle() is
     // false while RUNNING or faulting). `_missionArmed` stays latched, so the
-    // BTN_DOWN calibration-menu path stays suppressed after the first arm. The
+    // BTN_DOWN diagnostics-console path stays suppressed after the first arm. The
     // re-arm rebinds the frame from scratch via `Localization.begin()` below —
     // the previous run left `_currentNode` on ITS final node, and re-planning
     // from there is what made a re-armed route no-op or take a wrong path.
     //
-    // Guard: while BTN_DOWN is being held toward the 2-s menu-entry threshold,
+    // Guard: while BTN_DOWN is being held toward the console long-press threshold,
     // ignore BTN_UP so that accidental thumb-on-both-buttons cannot spuriously
-    // arm the mission when the operator believes they are entering the cal menu.
+    // arm the mission when the operator believes they are opening the console.
+    //
+    // `_setupFailed` guard: latched for the whole power cycle. After a failed boot
+    // this block still runs on every pass — it is the `!_setupFailed` term inside the
+    // condition that short-circuits it — so `_missionArmed` can never become true
+    // (AC23) while the console above stays reachable.
+    //
+    // Console guards: BTN_UP is the console's CONFIRM button, so arming must not
+    // shadow it. Two terms enforce that. `!consoleWasOpen` (sampled above, BEFORE
+    // OperatorPanel.update()) is the one that actually covers the EXIT confirm:
+    // _close() runs inside update(), so on that pass a live isOpen() read is already
+    // false again microseconds after the same physical press — the pre-update sample
+    // is the only state that still remembers the console owned that press.
+    // `!OperatorPanel.isOpen()` stays alongside it as the live check, so the guard
+    // holds even if a future panel path ever opens or closes the console outside
+    // update(). The exclusion is load-bearing beyond this file:
+    // `OperatorConsole::_close()` discards a pending CLEAR_VISION_FAULT without
+    // emitting it, which would strand a latched vision fault for the mission; that
+    // discard is harmless only because `missionArmed` provably cannot flip to true
+    // on any pass that saw the console open. Do not relax either term without
+    // revisiting that.
+    //
+    // The read and `_btnUpPrev` write below stay OUTSIDE both guards, on every pass:
+    // a level held across a guarded window must not surface as a phantom rising edge
+    // the moment the guard lifts (release the button inside the console, and the
+    // stale `_btnUpPrev == true` would otherwise arm on the next genuine press only
+    // — or worse, a still-held button would arm the instant the console closed).
     const bool btnUpNow = MiniR4.BTN_UP.getState();
     const bool armable =
         !_missionArmed || (Config::MISSION_ALLOW_REARM && Mission.isIdle());
-    if (btnUpNow && !_btnUpPrev && armable && _btnDownPressStartMs == 0)
+    if (btnUpNow && !_btnUpPrev && armable && _btnDownPressStartMs == 0 && !_setupFailed &&
+        !consoleWasOpen && !OperatorPanel.isOpen())
     {
         // Rebind the WHOLE world frame, not just heading. BTN_UP asserts "the chassis is
         // physically on `Routes::START_NODE` facing `START_HEADING_DEG`", and the NODE half of

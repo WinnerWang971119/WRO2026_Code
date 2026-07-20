@@ -23,9 +23,11 @@
  *                      junction crossings never reach the OLED ring. The navigation layer owns
  *                      the read-and-clear intersection API; surfacing it here is intentionally
  *                      out of scope.
- *  - **Dirty-flag rendering.** The OLED is repainted only when `_dirty == true`, i.e. when a
- *    new event has actually been pushed (or `clear()` was called). This avoids burning I2C
- *    bandwidth on every loop tick.
+ *  - **Dirty-flag rendering, gated by render ownership.** The OLED is repainted only when
+ *    `_dirty == true`, i.e. when a new event has actually been pushed (or `clear()` was called).
+ *    This avoids burning I2C bandwidth on every loop tick. The repaint is additionally gated on
+ *    `setRenderEnabled(true)` (the default), so another OLED owner can take exclusive ownership
+ *    of the display; re-enabling forces one repaint so the screen always returns to EventTrace.
  *  - **Non-blocking.** `update()` contains NO `delay()` and never spins on I/O — it is safe to
  *    call once per main-loop iteration after the source modules have already updated.
  *
@@ -81,7 +83,10 @@ public:
      * detected, then repaints the OLED if anything new arrived.
      *
      * @note Non-blocking. Polls LineFollower (level -> edge) and Drive (level -> edge).
-     *       Intersection is NOT polled — junctions are not traced. Renders only when `_dirty`.
+     *       Intersection is NOT polled — junctions are not traced. Renders only when `_dirty`
+     *       AND `setRenderEnabled(true)` (the default) is in effect — see that method's
+     *       docblock. Polling and the Serial heartbeat run every call regardless of the render
+     *       flag; only the OLED write is gated.
      * @note Must be called AFTER Drive/LineFollower `update()` have run for this tick, so the
      *       levels we sample are this tick's truth.
      */
@@ -118,6 +123,43 @@ public:
      *       heartbeat lines. Runtime-only, not persisted: a reset restores the default (enabled).
      */
     void setHeartbeatEnabled(bool enabled) { _heartbeatEnabled = enabled; }
+
+    /**
+     * @brief Enable or disable ONLY the OLED render performed by `update()`.
+     *
+     * @param enabled `true` (the default) repaints the OLED whenever `_dirty` is set, as before.
+     *        `false` suppresses ONLY the OLED render: `update()` still polls Drive/LineFollower
+     *        for transitions, still pushes edge-triggered events into the ring buffer, and still
+     *        emits the Serial heartbeat on its normal cadence — none of that depends on the OLED.
+     *        While disabled, a pending `_dirty` flag is left set rather than cleared, so the
+     *        first `update()` after render is re-enabled repaints the full accumulated ring in
+     *        one pass instead of dropping whatever arrived while suppressed.
+     * @note Re-enabling forces a repaint. The `false` -> `true` transition sets `_dirty`
+     *       unconditionally, so the first `update()` after the other owner releases the display
+     *       repaints the ring even when nothing was pushed while suppressed — the usual case on
+     *       an idle robot, where every `_dirty` producer is edge-triggered off a stable level and
+     *       so fires nothing. Without this the OLED would keep the other owner's last frame until
+     *       the next genuine event, which may never come. Setting the flag to the value it
+     *       already holds is a no-op and never forces a spurious repaint.
+     * @note Exists so another OLED owner (the operator diagnostics console, ADR-076) can take
+     *       exclusive display ownership without also silencing EventTrace. The earlier menu
+     *       prototype won OLED ownership by skipping `update()` wholesale, which silently killed
+     *       both the heartbeat and the polling along with the render — this API suppresses only
+     *       the render. Runtime-only, not persisted: a reset restores the default (enabled).
+     */
+    void setRenderEnabled(bool enabled)
+    {
+        // Edge-detect against the CURRENT value: only a genuine false -> true transition forces
+        // the handback repaint. Re-asserting the value already held changes nothing.
+        if (enabled && !_renderEnabled)
+        {
+            _dirty = true;
+        }
+        _renderEnabled = enabled;
+    }
+
+    /** @brief Current render-enabled state; see `setRenderEnabled()`. */
+    bool isRenderEnabled() const { return _renderEnabled; }
 
 private:
     /**
@@ -158,6 +200,9 @@ private:
 
     /** @brief When false, `_emitHeartbeat()` suppresses the periodic Serial line. Default true. */
     bool _heartbeatEnabled = true;
+
+    /** @brief When false, `update()` skips ONLY `_render()`, leaving `_dirty` set. Default true. */
+    bool _renderEnabled = true;
 
     /**
      * @brief Last offset magnitude (whole cm) pushed to the OLED ring, used for change-throttled

@@ -31,7 +31,7 @@ ROOT_STAY_FILES: FrozenSet[str] = frozenset({
     "TasksTypes.h",
 })
 
-#: The 8 ``config/`` sub-headers. They already live in their own ``WRO2026/config/``
+#: The 9 ``config/`` sub-headers. They already live in their own ``WRO2026/config/``
 #: subdirectory today and stay there untouched -- they are NOT part of the 45-file
 #: root classification below (that set is exactly the files sitting directly in the
 #: flat ``WRO2026/`` listing today; ``config/`` is a subdirectory, not a root file).
@@ -43,6 +43,7 @@ CONFIG_SUBHEADERS: FrozenSet[str] = frozenset({
     "ConfigManipulator.h",
     "ConfigMission.h",
     "ConfigNav.h",
+    "ConfigUi.h",
     "ConfigVision.h",
 })
 
