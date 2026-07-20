@@ -20,35 +20,43 @@
  * (`test_turn_pd_policy`) links the SAME symbols production uses, and every
  * tunable arrives as a parameter instead of a global constant.
  *
- * Six functions answer "how hard, which way, and are we done" for one PD
- * step of an in-place turn:
+ * Seven functions answer "how hard, which way, and are we done" for one PD
+ * step of an in-place turn (plus the shared kernel the straight-line hold
+ * reuses):
  *
  *   1. `turnWrap180(delta)` folds a raw heading delta into `(-180, +180]` so
  *      the shortest signed error is always used (float twin of
  *      `TurnSignPolicy.h::normalizeTurnDelta`, which is `int32_t`-only).
  *   2. `turnPdStep(errNew, errOld, dtSec, kp, kd)` computes one PD command
- *      with a TIME-NORMALIZED derivative. The tick this runs on is a
- *      MEASURED ~8 ms that jitters to ~11.5 ms, so `kd` must carry real
- *      units of PWM per (deg/s) — dividing by the measured `dtSec` — rather
- *      than the mentor's raw per-iteration gain, which would silently
- *      re-scale every time the tick jitters.
- *   3. `turnSlewLimit(cmd, prevCmd, slewPerTick)` bounds how fast the
+ *      with a TIME-NORMALIZED derivative (`kd * (errNew - errOld) / dtSec`).
+ *      This is NOT the in-place turn's law anymore — it is retained as the
+ *      kernel the straight-line heading hold reuses (`GyroHoldPolicy.h`,
+ *      ADR-075), where the caller synthesizes `errOld` so the derivative is a
+ *      pure measured yaw-rate on a clean (non-quantized) signal.
+ *   3. `turnPdStepRaw(errNew, errOld, kp, kd)` computes the in-place turn's PD
+ *      command with the mentor's RAW per-iteration derivative
+ *      (`kd * (errNew - errOld)`, no dt division) — `M_Turn_angle` parity
+ *      (ADR-077). The turn reads a whole-degree gyro on a jittery tick, where
+ *      dividing a quantization step by a small, varying dt injects a
+ *      timing-dependent D spike; the raw difference is deterministic per tick,
+ *      which is the model the mentor's proven gains were tuned under.
+ *   4. `turnSlewLimit(cmd, prevCmd, slewPerTick)` bounds how fast the
  *      command can GROW in the previous command's direction, so a heavy
  *      chassis cannot break traction on the initial kick.
- *   4. `turnCreepFloor(cmd, threshPwm, creepPwm)` snaps a small non-zero
+ *   5. `turnCreepFloor(cmd, threshPwm, creepPwm)` snaps a small non-zero
  *      command up to the KINETIC creep floor (the chassis is already
  *      rotating by the turn's tail, so the static breakaway floor no longer
  *      applies).
- *   5. `turnSettleStep(absErr, toleranceDeg, count)` advances the
+ *   6. `turnSettleStep(absErr, toleranceDeg, count)` advances the
  *      N-consecutive-in-band-samples exit debounce; a single out-of-band
  *      sample resets the count to 0.
- *   6. `turnSettled(count, samplesRequired)` is the exit predicate over that
+ *   7. `turnSettled(count, samplesRequired)` is the exit predicate over that
  *      count.
  *
  * ## Operator order (contract — apply identically in Drive.cpp and CTPS)
  *
  * ```
- * pdStep -> clamp to +/-power -> slewLimit -> creepFloor -> emit via turnWheelPattern
+ * pdStepRaw -> clamp to +/-power -> slewLimit -> creepFloor -> emit via turnWheelPattern
  * ```
  *
  * Clamp-then-slew bounds the ramp-up to the authority ceiling; slew-then-
@@ -128,16 +136,18 @@ inline float turnWrap180(float deltaDeg)
 }
 
 /**
- * @brief One PD step with a TIME-NORMALIZED derivative.
+ * @brief One PD step with a TIME-NORMALIZED derivative — the kernel the
+ *        STRAIGHT-LINE heading hold reuses (the in-place turn uses
+ *        `turnPdStepRaw`).
  *
  * Computes `kp*errNew + kd*rate`, where `rate = (errNew - errOld) / dtSec`
- * is the measured rate of change of the error in deg/s. The mentor's
- * verified source computes a raw per-ITERATION difference (`errNew -
- * errOld`) with no division, so his effective damping is implicitly `Kd *
- * omega * loop_period` — correct only at his fixed loop rate. Our tick is a
- * MEASURED ~8 ms that jitters to ~11.5 ms, so porting that raw gain would
- * silently re-scale with the tick. Dividing by the measured `dtSec` makes
- * `kd` carry real units of PWM per (deg/s), independent of loop rate.
+ * is the measured rate of change of the error in deg/s. This is the right
+ * model for a controller riding a CLEAN, continuous signal — the straight-
+ * line hold (`GyroHoldPolicy.h`, ADR-075) synthesizes `errOld` so `rate`
+ * becomes a pure measured yaw-rate. The in-place turn does NOT use it: it
+ * reads a whole-degree quantized gyro where dividing a quantization step by
+ * the jittery `dtSec` injects a timing-dependent D spike, so the turn uses
+ * `turnPdStepRaw` (the mentor's raw per-iteration difference, ADR-077).
  *
  * @param errNew Current tick's progress-frame error (deg).
  * @param errOld Previous tick's progress-frame error (deg).
@@ -157,6 +167,38 @@ inline float turnPdStep(float errNew, float errOld, float dtSec, float kp, float
         rate = (errNew - errOld) / dtSec;
     }
     return kp * errNew + kd * rate;
+}
+
+/**
+ * @brief One PD step with the mentor's RAW per-iteration derivative (no dt).
+ *
+ * Computes `kp*errNew + kd*(errNew - errOld)` — the derivative is the raw
+ * change in error between two consecutive PD ticks, exactly as the mentor's
+ * competition-verified `M_Turn_angle` computes it (`error = error_new -
+ * error_old; speed = Kp*error_new + Kd*error`), with NO division by elapsed
+ * time. This is the in-place turn's control law (ADR-077).
+ *
+ * The time-normalized `turnPdStep` above divides the same difference by the
+ * measured `dtSec`. That is correct for a controller riding a clean,
+ * continuous signal — but the in-place turn reads a WHOLE-DEGREE quantized
+ * gyro on a jittery ~8-11.5 ms cooperative tick, and dividing a 1-degree
+ * quantization step by a small, varying dt turns it into a timing-dependent D
+ * spike (a fixed physical event lands anywhere in a ~5..15 PWM range depending
+ * only on when the tick fired). The raw difference is deterministic per tick,
+ * which is why the mentor's proven turn gains (Kp=1.5, Kd=10) transfer only
+ * under THIS model. There is no `dtSec` argument by construction — a same-tick
+ * re-entry yields `errNew == errOld`, so the D term is exactly 0 with no guard.
+ *
+ * @param errNew Current tick's progress-frame error (deg).
+ * @param errOld Previous tick's progress-frame error (deg).
+ * @param kp     Proportional gain (PWM per deg).
+ * @param kd     RAW per-iteration derivative gain (PWM per deg of per-tick
+ *               error change) — the mentor's gain, NOT a PWM-per-(deg/s) rate.
+ * @return Unclamped PD command. The caller clamps to +/-power next.
+ */
+inline float turnPdStepRaw(float errNew, float errOld, float kp, float kd)
+{
+    return kp * errNew + kd * (errNew - errOld);
 }
 
 /**

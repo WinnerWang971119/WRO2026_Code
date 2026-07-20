@@ -11,7 +11,7 @@
  * ## Zero production weight — how
  *
  * The PD decision math already lives in header-only, parameter-driven policy functions
- * (`TurnPDPolicy.h`: `turnPdStep`, `turnSlewLimit`, `turnCreepFloor`, `turnSettleStep`,
+ * (`TurnPDPolicy.h`: `turnPdStepRaw`, `turnSlewLimit`, `turnCreepFloor`, `turnSettleStep`,
  * `turnSettled`, `turnWrap180`; `TurnSignPolicy.h`: `turnWheelPattern`) precisely so they can be
  * host-unit-tested with every tunable injected. That same property lets THIS sketch call the exact
  * same functions with the gains held in RUNTIME variables. `runOneTurn` below is a faithful,
@@ -25,12 +25,13 @@
  *
  * A replica is only useful if its optimum is production's optimum. Two things buy that:
  *   1. The LOAD-BEARING math is shared, not re-derived — `runOneTurn` calls the same policy
- *      symbols `_updateTurnProfile` calls, in the same operator order (pdStep -> clamp -> slew ->
+ *      symbols `_updateTurnProfile` calls, in the same operator order (pdStepRaw -> clamp -> slew ->
  *      creep -> wheelPattern), with the same two-level breakaway floor and the same absolute-error
  *      settle debounce.
- *   2. The tick PERIOD matches. `Kd` is time-normalized (PWM per deg/s), so it is loop-rate
- *      independent in principle, but the plant response and settle debounce still depend on how
- *      often the loop corrects. Each replica iteration pumps the full `cooperativeTick()` (Drive
+ *   2. The tick PERIOD matches. `Kd` is now the mentor's RAW per-iteration gain (ADR-077), NOT
+ *      loop-rate independent: it differences the per-tick error, whose size depends directly on
+ *      how often the loop corrects, so matching the tick period is what makes the searched `Kd`
+ *      transfer to production at all. Each replica iteration pumps the full `cooperativeTick()` (Drive
  *      idle) THEN does the turn work, which sums to the same per-tick cost a real nav turn pays
  *      (in production the turn work runs INSIDE `Drive.update()` in place of that idle). The tick
  *      is the bench-measured ~22.66 ms either way.
@@ -131,7 +132,7 @@ namespace
     //     the closed-loop optimum is suspected to differ from the open-loop floor.
     const ParamSpec SPECS[PARAM_COUNT] = {
         {"KP", (float) Config::TURN_KP, 0.20f, 0.30f, 3.00f, false},
-        {"KD", (float) Config::TURN_KD, 0.010f, 0.000f, 0.100f, false},
+        {"KD", (float) Config::TURN_KD, 2.00f, 0.000f, 30.00f, false},
         {"SLEW", (float) Config::TURN_SLEW_PWM_PER_TICK, 3.0f,
          (float) (Config::TURN_CREEP_THRESH_PWM - Config::TURN_CREEP_PWM), 40.0f, true},
     };
@@ -286,7 +287,6 @@ namespace
         bool         brokeAway   = false;
         const float  startYaw    = yawBefore;
         const uint32_t startMs   = millis();
-        uint32_t     lastStepMs  = startMs;
         float        minErrProg  = fabsf(deltaNorm);            // most-negative errProg -> overshoot
 
         // --- per-tick loop (mirror _updateTurnProfile) ---
@@ -344,11 +344,7 @@ namespace
                 brokeAway = true;
             }
 
-            const uint32_t nowMs = millis();
-            const float    dtSec = (float) (nowMs - lastStepMs) / 1000.0f;
-            lastStepMs           = nowMs;
-
-            float cmd = turnPdStep(errProg, errOld, dtSec, g.kp, g.kd);
+            float cmd = turnPdStepRaw(errProg, errOld, g.kp, g.kd);
 
             const float power = (float) g.cruisePwm;
             if (cmd > power)

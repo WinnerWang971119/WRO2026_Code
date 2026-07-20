@@ -552,41 +552,41 @@ namespace Config
     constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
     /**
-     * @brief Proportional gain for the per-tick turn PD controller (ADR-068), in PWM per degree.
+     * @brief Proportional gain for the per-tick turn PD controller (ADR-068, ADR-077), in PWM per
+     *        degree.
      *
-     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 2` (the 2026-07
-     * screenshot revision the mentor confirmed working on THIS chassis; an earlier revision used
-     * `Kp = 1`). Kp maps a degree error straight to a PWM, so it ports DIRECTLY — no loop-rate
-     * conversion, unlike TURN_KD below. `TurnPDPolicy.h::turnPdStep` computes `Kp * errNew` before
-     * the D term, clamp, slew, and creep floor.
+     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 1.5` (his newest 2026-07
+     * revision, which also matches his straight-drive `gyro_move` gain; the prior revision used
+     * `Kp = 2`, and one before that `Kp = 1`). Kp maps a degree error straight to a PWM.
+     * `TurnPDPolicy.h::turnPdStepRaw` computes `Kp * errNew` before the D term, clamp, slew, and
+     * creep floor.
      *
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 2.0f
+#define TURN_KP_DEFAULT 1.5f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
     /**
-     * @brief TIME-NORMALIZED derivative gain for the turn PD controller (ADR-068), in PWM per
-     *        (deg/s) — NOT the mentor's raw per-iteration gain.
+     * @brief RAW per-iteration derivative gain for the turn PD controller (ADR-077), in PWM per
+     *        degree of per-tick error change — the mentor's gain, applied WITHOUT dt division.
      *
-     * The mentor's `M_Turn_angle` computes a raw per-ITERATION difference (`errNew - errOld`,
-     * no division), so his continuous damping is `Kd_raw * loop_period` — correct only at his
-     * fixed ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters to ~11.5 ms
-     * (`inoTest/tick_bench`, 2026-07-16), so porting the raw gain verbatim would silently re-scale
-     * every time the tick jitters. `TurnPDPolicy.h::turnPdStep` instead divides by the MEASURED
-     * per-step `dtSec`, so this gain carries real units of PWM per (deg/s) and reproduces the
-     * mentor's CONTINUOUS damping at any loop rate: `TURN_KD = Kd_raw * mentor_loop_period`.
-     *
-     * The mentor's 2026-07 revision uses `Kd_raw = 10` (an earlier revision used 3), so
-     * `0.06 ~= 10 * 0.006 s`. Sanity check: at omega=90 deg/s our D term is `0.06 * 90 = 5.4`,
-     * matching his per-iteration `10 * (90 * 0.006) = 5.4`.
+     * The mentor's `M_Turn_angle` computes `error = error_new - error_old` (the raw change in error
+     * between two consecutive PD ticks) and `speed = Kp*error_new + Kd*error`, with NO division by
+     * elapsed time. `TurnPDPolicy.h::turnPdStepRaw` reproduces that exactly, so his proven
+     * `Kd_raw = 10` transfers verbatim. ADR-068 originally TIME-NORMALIZED this (dividing by the
+     * measured tick, `TURN_KD ~= Kd_raw * loop_period ~= 0.06`), but on our whole-degree gyro plus
+     * jittery ~8-11.5 ms tick that turned a single 1-degree quantization step into a
+     * timing-dependent D spike (~5..15 PWM for the same physical event) and left the turn
+     * under-damped, so the mentor's gains never settled; ADR-077 reverted to his raw model. The
+     * straight-line heading hold keeps the time-normalized `turnPdStep` (ADR-075) — it does not
+     * read a quantized signal near zero, so it is unaffected.
      *
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 0.06f
+#define TURN_KD_DEFAULT 10.0f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -732,7 +732,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.75f;
+    constexpr float TURN_TOLERANCE_DEG = 3.0f;
 
     /**
      * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in

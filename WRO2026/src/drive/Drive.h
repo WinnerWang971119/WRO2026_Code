@@ -884,17 +884,11 @@ private:
     ///<        `Fault::IMU_READ_FAILED` so a sustained read failure cannot spin unbounded.
 
     float _turnErrOld = 0.0f;
-    ///< @brief Previous tick's PROGRESS-frame error (deg), for the time-normalized discrete
-    ///<        derivative in `TurnPDPolicy.h::turnPdStep`. Seeded at dispatch to the initial error
-    ///<        magnitude (so the D term contributes ~0 on the first tick), refreshed on every PD
-    ///<        tick by `_updateTurnProfile()`.
-
-    uint32_t _turnLastStepMs = 0;
-    ///< @brief `millis()` of the previous PD step, for the MEASURED per-tick `dt` the derivative
-    ///<        is normalized by. The ~8 ms tick jitters to ~11.5 ms (and the new gyro may speed the
-    ///<        loop up), so `dt` must be measured, not assumed constant. Spans any skipped
-    ///<        (bad-read) ticks so the rate stays correct across a transient miss. Seeded at
-    ///<        dispatch, updated on every PD tick.
+    ///< @brief Previous tick's PROGRESS-frame error (deg), for the mentor's RAW per-iteration
+    ///<        derivative in `TurnPDPolicy.h::turnPdStepRaw` (`kd*(errNew - errOld)`, no dt division;
+    ///<        ADR-077). Seeded at dispatch to the initial error magnitude (so the D term
+    ///<        contributes ~0 on the first tick), refreshed on every PD tick by
+    ///<        `_updateTurnProfile()`.
 
     float _turnPrevSpeed = 0.0f;
     ///< @brief Previous tick's EMITTED (post-creep-floor) progress-frame command, for the ramp-up

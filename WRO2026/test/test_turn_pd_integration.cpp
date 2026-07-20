@@ -249,7 +249,7 @@ static void test_TC10_first_tick_from_rest_snaps_to_breakaway_floor()
     turn_harness::resetWorld();
 
     const float   startYaw = 0.0f;
-    const int16_t deg      = 20;    // |Kp*err| == 20, well under the breakaway threshold -> floored.
+    const int16_t deg      = 20;    // first-tick |Kp*err| == 30 (Kp=1.5), under the breakaway floor -> floored.
 
     turn_harness::enqueueTurnDeg(deg);
     turn_harness::tickAtYaw(startYaw);    // dispatch.
@@ -313,8 +313,8 @@ static void test_breakaway_handoff_latches_static_to_kinetic_floor()
     turn_harness::resetWorld();
 
     const float   startYaw = 0.0f;
-    // A SMALL turn on purpose: with Kp=2 and the 5 ms mock tick (Kd's D term ~= 12x the per-tick
-    // yaw delta), a 6 deg turn keeps `Kp*err` under BOTH floor thresholds at every hand-off tick
+    // A SMALL turn on purpose: with Kp=1.5 and the mentor's raw D term (10x the per-tick error
+    // change), a 6 deg turn keeps the PD command under BOTH floor thresholds at every hand-off tick
     // below, so the ONLY thing that can change the dispatched magnitude is which floor is selected
     // (a 20 deg turn's command now clears the lowered creep threshold and would read the raw PD
     // value, not the floor).
@@ -361,7 +361,7 @@ static void test_small_turn_breaks_away_then_settles_cleanly()
 
     const float   startYaw  = 0.0f;
     // Small (see the breakaway hand-off case above) so the dispatched magnitude reflects the
-    // floor SELECTION under the stiffer Kp=2 gains, not the raw PD command.
+    // floor SELECTION under the Kp=1.5 gain, not the PD command.
     const int16_t deg       = 6;
     const float   targetYaw = startYaw + (float) deg;
 
