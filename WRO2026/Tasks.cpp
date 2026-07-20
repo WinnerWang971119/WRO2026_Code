@@ -758,8 +758,153 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 
 
 // =============================================================================
+// Mosaic board model — shared by `mosaic` and `_mosaicAlgo`.
+//
+// The mosaic is a 4-column x 3-row card grid; cell index = row * kMosaicCols + col,
+// matching `Vision.getColor()`'s cell numbering. Only the topmost uncleared card of
+// each column is face-up, so the robot can never see a card until the ones above it
+// have been taken.
+// =============================================================================
+
+// `WHITE` is a macro (`SSD1306_WHITE`) in every TU that includes <MatrixMiniR4.h>,
+// which Manipulator.h does. Hide it while naming `Config::Color::WHITE`, then restore
+// it so OLED code elsewhere still compiles — same idiom as ConfigVision.h.
+#pragma push_macro("WHITE")
+#undef WHITE
+
+namespace
+{
+    constexpr uint8_t kMosaicCols       = 4;
+    constexpr uint8_t kMosaicRows       = 3;
+    constexpr uint8_t kMosaicColorCount = 4;   // YELLOW / BLUE / GREEN / WHITE
+
+    static_assert(kMosaicCols * kMosaicRows == Config::VISION_CELL_COUNT,
+                  "Mosaic grid must cover exactly the vision cells");
+    static_assert(kMosaicColorCount == Config::SORTER_BIN_COUNT,
+                  "One sorter bin per mosaic colour — colour index doubles as bin index");
+
+    /**
+     * @brief Order in which one sweep passes the four M-wall colour stations.
+     *
+     * Up the wall (Y B G W), back down (G B Y), then up again (B G W) — the physical
+     * order of the station markers along the M chain. This is the *superset* of stops:
+     * a station is only visited when its colour is actually face-up on the board.
+     */
+    constexpr Config::Color kMosaicVisitOrder[] = {
+        Config::Color::YELLOW, Config::Color::BLUE,  Config::Color::GREEN,
+        Config::Color::WHITE,  Config::Color::GREEN, Config::Color::BLUE,
+        Config::Color::YELLOW, Config::Color::BLUE,  Config::Color::GREEN,
+        Config::Color::WHITE,
+    };
+
+    constexpr uint8_t kMosaicVisitOrderCount =
+        sizeof(kMosaicVisitOrder) / sizeof(kMosaicVisitOrder[0]);
+
+    // -------------------------------------------------------------------------
+    // Wall supply model
+    //
+    // Each colour occupies two rows of the M wall — a lower node (`MxD`) and an
+    // upper node (`MxU`) — and each row holds `kMosaicTilesPerRow` tiles that the
+    // belt reaches without the chassis moving. So one colour supplies
+    // 2 * kMosaicTilesPerRow tiles in total.
+    // -------------------------------------------------------------------------
+
+    constexpr uint8_t kMosaicTilesPerRow = 3;
+    constexpr uint8_t kMosaicRowLower    = 0;
+    constexpr uint8_t kMosaicRowUpper    = 1;
+
+    /**
+     * @brief One row node of the M wall.
+     *
+     * `chainPos` is the node's place along the wall from the top (`MWU` = 0) down to the
+     * bottom (`MYD` = 7), matching the blind-edge chain in `field_data.json`. It lets a
+     * stop enter a colour at whichever of its two rows is nearer to where the robot
+     * currently sits, instead of always taking the same one.
+     */
+    struct MosaicRowNode
+    {
+        const char* node;
+        uint8_t     chainPos;
+    };
+
+    /** @brief Wall row nodes, indexed `[colour index][kMosaicRowLower | kMosaicRowUpper]`. */
+    constexpr MosaicRowNode kMosaicRowNodes[kMosaicColorCount][2] = {
+        { { "MYD", 7 }, { "MYU", 6 } },   // YELLOW
+        { { "MBD", 5 }, { "MBU", 4 } },   // BLUE
+        { { "MGD", 3 }, { "MGU", 2 } },   // GREEN
+        { { "MWD", 1 }, { "MWU", 0 } },   // WHITE
+    };
+
+    /**
+     * @brief Belt positions reaching the three tiles of one wall row, in take order.
+     *
+     * `GRAB_MID` comes first because the belt is parked there after every drive (it is the
+     * travel pose — see `Config::BeltStation`), so the first tile of a row costs no belt move.
+     */
+    constexpr Config::BeltStation kMosaicGrabOrder[kMosaicTilesPerRow] = {
+        Config::BeltStation::GRAB_MID,
+        Config::BeltStation::GRAB_LEFT,
+        Config::BeltStation::GRAB_RIGHT,
+    };
+
+    /**
+     * @brief Index of @p color in the mosaic colour set.
+     * @return Index in `[0, kMosaicColorCount)` — also the sorter bin index and the row of
+     *         `kMosaicRowNodes` — or `0xFF` for a colour with no station (UNKNOWN / RED).
+     */
+    uint8_t mosaicColorIndex(Config::Color color)
+    {
+        switch (color)
+        {
+        case Config::Color::YELLOW: return 0;
+        case Config::Color::BLUE:   return 1;
+        case Config::Color::GREEN:  return 2;
+        case Config::Color::WHITE:  return 3;
+        default:                    return 0xFF;
+        }
+    }
+
+    /** @brief Single-letter tag for @p color, used when logging a route. */
+    char mosaicColorTag(Config::Color color)
+    {
+        switch (color)
+        {
+        case Config::Color::YELLOW: return 'Y';
+        case Config::Color::BLUE:   return 'B';
+        case Config::Color::GREEN:  return 'G';
+        case Config::Color::WHITE:  return 'W';
+        default:                    return '?';
+        }
+    }
+
+    /**
+     * @brief Whether every column has had all `kMosaicRows` of its cards cleared.
+     * @param top Per-column read cursor; `kMosaicRows` means that column is empty.
+     */
+    bool mosaicBoardEmpty(const uint8_t top[kMosaicCols])
+    {
+        for (uint8_t col = 0; col < kMosaicCols; ++col)
+        {
+            if (top[col] < kMosaicRows)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** @brief Absolute distance between two wall chain positions. */
+    uint8_t mosaicChainGap(uint8_t a, uint8_t b)
+    {
+        return (uint8_t)((a > b) ? (a - b) : (b - a));
+    }
+}    // namespace
+
+#pragma pop_macro("WHITE")
+
+// =============================================================================
 // Competition tasks
-// Very important: Keep task and task task specific. 
+// Very important: Keep task and task task specific.
 // Do not place every task in a single task. This will make the code hard to read and maintain.
 // =============================================================================
 
@@ -802,8 +947,81 @@ bool TasksClass::pot(const TaskArgs& /*args*/)
 
 bool TasksClass::mosaic(const TaskArgs& /*args*/)
 {
-    Vision.getColor(0);
-    
+    // Consumes the latch captured by the `readMosaic` task — this body does not read the
+    // camera itself. With no successful read every cell is UNKNOWN, so the planner clears
+    // nothing and reports zero stops.
+    MosaicPick    picks[Config::VISION_CELL_COUNT];
+    const uint8_t stops = _mosaicAlgo(picks, Config::VISION_CELL_COUNT);
+
+    if (stops == 0)
+    {
+        Serial.println(F("[Tasks] mosaic: no route (mosaic not read?)"));
+        return false;
+    }
+
+    Serial.print(F("[Tasks] mosaic route:"));
+    for (uint8_t i = 0; i < stops; ++i)
+    {
+        Serial.print(' ');
+        Serial.print(mosaicColorTag(picks[i].color));
+        Serial.print('x');
+        Serial.print(picks[i].count);
+    }
+    Serial.println();
+
+    // Tiles still on the wall, indexed [colour][row]. Both rows start full.
+    uint8_t stock[kMosaicColorCount][2];
+    for (uint8_t c = 0; c < kMosaicColorCount; ++c)
+    {
+        stock[c][kMosaicRowLower] = kMosaicTilesPerRow;
+        stock[c][kMosaicRowUpper] = kMosaicTilesPerRow;
+    }
+
+    // Row node the chassis is currently parked at; 0xFF until the first drive.
+    uint8_t parkedColor = 0xFF;
+    uint8_t parkedRow   = 0xFF;
+    uint8_t chainPos    = 0;
+
+    for (uint8_t i = 0; i < stops; ++i)
+    {
+        const uint8_t colorIdx = mosaicColorIndex(picks[i].color);
+        if (colorIdx >= kMosaicColorCount)
+        {
+            continue;    // unreachable for the colours in `kMosaicVisitOrder`
+        }
+
+        for (uint8_t taken = 0; taken < picks[i].count; ++taken)
+        {
+            const uint8_t row = _mosaicPickRow(stock[colorIdx], colorIdx, parkedColor,
+                                               parkedRow, chainPos);
+            if (row >= 2)
+            {
+                Serial.print(F("[Tasks] mosaic: wall out of "));
+                Serial.println(mosaicColorTag(picks[i].color));
+                return false;
+            }
+
+            if (colorIdx != parkedColor || row != parkedRow)
+            {
+                // Retract before every chassis move — an extended belt throws the centre
+                // of mass too far off to drive on.
+                Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+                PathTracker.goTo(kMosaicRowNodes[colorIdx][row].node);
+
+                parkedColor = colorIdx;
+                parkedRow   = row;
+                chainPos    = kMosaicRowNodes[colorIdx][row].chainPos;
+            }
+
+            // Tiles come off a row in take order, so the slot index is how many are gone.
+            const uint8_t slot = (uint8_t)(kMosaicTilesPerRow - stock[colorIdx][row]);
+            Manipulator.beltTo(kMosaicGrabOrder[slot]);
+            _grabToBin(colorIdx);
+            --stock[colorIdx][row];
+        }
+    }
+
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
     return true;
 }
 
@@ -827,7 +1045,96 @@ bool TasksClass::debries(const TaskArgs& /*args*/)
 // Private helpers for competition tasks
 // =============================================================================
 
-bool TasksClass::_mosaicAlgo(const TaskArgs& args)
+uint8_t TasksClass::_mosaicPickRow(
+    const uint8_t stock[2],
+    uint8_t       colorIdx,
+    uint8_t       parkedColor,
+    uint8_t       parkedRow,
+    uint8_t       chainPos) const
 {
-    return true; //Maybe need to return a enum or num?
+    // Already parked on a row of this colour that still has tiles: stay put and let the
+    // belt reach the next one — a belt move is far cheaper than a drive.
+    if (colorIdx == parkedColor && parkedRow < 2 && stock[parkedRow] > 0)
+    {
+        return parkedRow;
+    }
+
+    // Otherwise enter the colour at whichever of its two rows still has tiles, preferring
+    // the one nearer along the wall chain to where the robot currently sits.
+    const bool lowerOk = stock[kMosaicRowLower] > 0;
+    const bool upperOk = stock[kMosaicRowUpper] > 0;
+
+    if (lowerOk && upperOk)
+    {
+        const uint8_t lowerGap =
+            mosaicChainGap(chainPos, kMosaicRowNodes[colorIdx][kMosaicRowLower].chainPos);
+        const uint8_t upperGap =
+            mosaicChainGap(chainPos, kMosaicRowNodes[colorIdx][kMosaicRowUpper].chainPos);
+        return (lowerGap <= upperGap) ? kMosaicRowLower : kMosaicRowUpper;
+    }
+
+    if (lowerOk) return kMosaicRowLower;
+    if (upperOk) return kMosaicRowUpper;
+    return 0xFF;    // this colour is exhausted on the wall
+}
+
+uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxStops) const
+{
+    if (picks == nullptr || maxStops == 0)
+    {
+        return 0;
+    }
+
+    // Per-column read cursor: the row of the topmost card not yet cleared.
+    uint8_t top[kMosaicCols] = { 0, 0, 0, 0 };
+    uint8_t stops            = 0;
+
+    // One sweep of the wall clears every card it can reach; cards buried under a colour
+    // the sweep passes late only surface on the next sweep. Repeat until the board is
+    // empty, the route buffer is full, or a whole sweep clears nothing.
+    while (!mosaicBoardEmpty(top) && stops < maxStops)
+    {
+        bool clearedThisSweep = false;
+
+        for (uint8_t v = 0; v < kMosaicVisitOrderCount && stops < maxStops; ++v)
+        {
+            if (mosaicBoardEmpty(top))
+            {
+                break;
+            }
+
+            const Config::Color target  = kMosaicVisitOrder[v];
+            uint8_t             cleared = 0;
+
+            // Take every face-up card of this colour. Taking one exposes the card beneath
+            // it, which may be the same colour again, so each column drains in a loop.
+            for (uint8_t col = 0; col < kMosaicCols; ++col)
+            {
+                while (top[col] < kMosaicRows &&
+                       Vision.getColor((uint8_t)(top[col] * kMosaicCols + col)) == target)
+                {
+                    ++top[col];
+                    ++cleared;
+                }
+            }
+
+            if (cleared > 0)
+            {
+                picks[stops].color = target;
+                picks[stops].count = cleared;
+                ++stops;
+                clearedThisSweep = true;
+            }
+        }
+
+        if (!clearedThisSweep)
+        {
+            // Every remaining face-up card is a colour no station serves (UNKNOWN / RED).
+            // Stop here rather than sweeping forever.
+            Serial.println(F("[Tasks] mosaic: board stuck, route truncated"));
+            break;
+        }
+    }
+
+    return stops;
 }
