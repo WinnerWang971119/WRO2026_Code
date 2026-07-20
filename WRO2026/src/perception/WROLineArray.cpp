@@ -869,6 +869,11 @@ uint8_t WROLineArrayClass::_classifyJunction(const uint8_t channels[8]) const
     // Stage 2 — priority-ordered predicates. Return as soon as one fires so the result
     // is deterministic (no later predicate can override an earlier match). The order
     // matches the header doxygen: T_OR_CROSS → LEFT → RIGHT → NONE.
+    //
+    // LEFT and RIGHT each test only their OWN half (the opposite side is DON'T-CARE), so
+    // the ONLY sample that could satisfy both is a fully lit bar — which trips T_OR_CROSS
+    // first and returns before either is reached (holds while RIGHT_LO <= LEFT_HI + 1, the
+    // no-gap default). Determinism therefore survives dropping the opposite-side-off checks.
     // -------------------------------------------------------------------------------------
 
     // ---- Predicate 1: T_OR_CROSS (3) — fat marker lighting up most of the bar. ----
@@ -885,10 +890,17 @@ uint8_t WROLineArrayClass::_classifyJunction(const uint8_t channels[8]) const
         return 3;
     }
 
-    // ---- Predicate 2: LEFT (1) — channels 0..LEFT_HI all ON, rest all OFF. ----
+    // ---- Predicate 2: LEFT (1) — channels 0..LEFT_HI all ON; right side DON'T-CARE. ----
+    //
+    // Only the left edge is required lit. The opposite (right) half is deliberately NOT
+    // required dark: a one-sided branch keeps its own edge channels lit for the whole
+    // crossing while the centre channels flicker on and off as the chassis sweeps over it,
+    // so the earlier exact-partition rule ("right half all OFF") dropped the verdict to NONE
+    // for most of the crossing and the debounce never armed at speed. The LEFTMOST channel
+    // (ch0) being lit is the discriminator a centred straight line can never produce, so
+    // dropping the opposite-side check stays false-fire-safe on a plain line.
     {
         bool ok = true;
-        // Left half must be fully lit.
         for (uint8_t c = 0; c <= Config::LINE_JUNCTION_LEFT_HI && c < 8; ++c)
         {
             if (!on[c])
@@ -899,46 +911,22 @@ uint8_t WROLineArrayClass::_classifyJunction(const uint8_t channels[8]) const
         }
         if (ok)
         {
-            // Right half must be fully dark.
-            for (uint8_t c = (uint8_t) (Config::LINE_JUNCTION_LEFT_HI + 1); c < 8; ++c)
-            {
-                if (on[c])
-                {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if (ok)
-        {
             return 1;
         }
     }
 
-    // ---- Predicate 3: RIGHT (2) — channels RIGHT_LO..7 all ON, rest all OFF. ----
+    // ---- Predicate 3: RIGHT (2) — channels RIGHT_LO..7 all ON; left side DON'T-CARE. ----
+    //
+    // Mirror of LEFT above: only the right edge is required lit, the left half is ignored.
+    // The RIGHTMOST channel (ch7) being lit is the discriminator a centred line never trips.
     {
         bool ok = true;
-        // Right half must be fully lit.
         for (uint8_t c = Config::LINE_JUNCTION_RIGHT_LO; c < 8; ++c)
         {
             if (!on[c])
             {
                 ok = false;
                 break;
-            }
-        }
-        if (ok && Config::LINE_JUNCTION_RIGHT_LO > 0)
-        {
-            // Left half must be fully dark. Guarded against `RIGHT_LO == 0` (which
-            // would underflow the loop bound below and is a degenerate "every channel
-            // is in the right half" config — left half is then trivially empty).
-            for (uint8_t c = 0; c < Config::LINE_JUNCTION_RIGHT_LO; ++c)
-            {
-                if (on[c])
-                {
-                    ok = false;
-                    break;
-                }
             }
         }
         if (ok)

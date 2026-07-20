@@ -296,8 +296,8 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    LineFollower.setEnabled(true).setDistanceTarget(100).setReverse(false);
-    LineFollower.waitUntilIntersection();
+    LineFollower.setEnabled(true).setReverse(true).setPreset(Config::SpeedPreset::NORMAL).setDistanceTarget(90);
+    LineFollower.waitUntilDistanceReached();
     LineFollower.setEnabled(false);
     Drive.stop(true);
     return true;

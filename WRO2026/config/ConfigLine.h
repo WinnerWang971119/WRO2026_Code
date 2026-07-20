@@ -195,7 +195,7 @@ namespace Config
      * Applied per-channel: onLine = (HIGH[b][ch] - raw) / (HIGH[b][ch] - LOW[b][ch])
      *                               >= LINE_CHANNEL_ON_RATIO.
      */
-    constexpr float LINE_CHANNEL_ON_RATIO = 0.7f;
+    constexpr float LINE_CHANNEL_ON_RATIO = 0.6f;
 
     /**
      * @brief Minimum number of channels simultaneously ON-LINE to declare a
@@ -219,9 +219,12 @@ namespace Config
     /**
      * @brief Upper inclusive channel index for the LEFT junction predicate.
      *
-     * LEFT junction fires when all channels ch[0..LINE_JUNCTION_LEFT_HI] are ON-LINE
-     * AND all channels ch[LINE_JUNCTION_LEFT_HI+1..7] are OFF-LINE. Adjust to match
-     * the physical width of the left-branch marker relative to the sensor array.
+     * LEFT junction fires when all channels ch[0..LINE_JUNCTION_LEFT_HI] are ON-LINE.
+     * The opposite (right-side) channels are DON'T-CARE — a one-sided branch is detected by
+     * its own edge staying lit through the crossing, not by the far side going dark (the old
+     * opposite-side-off rule flickered to NONE mid-junction at speed). ch0 (the LEFTMOST
+     * channel) being in the required set is what keeps a centred straight line from firing
+     * it. Default 3 = the left half of the 8-channel bar (ch0..3), adjacent to RIGHT_LO=4.
      *
      * @note **Compile-time override:** guarded by `#ifndef LINE_JUNCTION_LEFT_HI_DEFAULT`
      *       so a host test can pin it target-wide via `-DLINE_JUNCTION_LEFT_HI_DEFAULT=...`
@@ -230,16 +233,19 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_LEFT_HI_DEFAULT
-#define LINE_JUNCTION_LEFT_HI_DEFAULT 6
+#define LINE_JUNCTION_LEFT_HI_DEFAULT 4
 #endif
     constexpr uint8_t LINE_JUNCTION_LEFT_HI = LINE_JUNCTION_LEFT_HI_DEFAULT;
 
     /**
      * @brief Lower inclusive channel index for the RIGHT junction predicate.
      *
-     * RIGHT junction fires when all channels ch[LINE_JUNCTION_RIGHT_LO..7] are ON-LINE
-     * AND all channels ch[0..LINE_JUNCTION_RIGHT_LO-1] are OFF-LINE. Adjust to match
-     * the physical width of the right-branch marker relative to the sensor array.
+     * RIGHT junction fires when all channels ch[LINE_JUNCTION_RIGHT_LO..7] are ON-LINE.
+     * The opposite (left-side) channels are DON'T-CARE — mirror of LEFT_HI above. ch7 (the
+     * RIGHTMOST channel) being in the required set is what keeps a centred straight line from
+     * firing it. Default 4 = the right half of the 8-channel bar (ch4..7), adjacent to
+     * LEFT_HI=3. Keep RIGHT_LO <= LEFT_HI + 1 (no gap) so a fully lit bar always resolves to
+     * T_OR_CROSS before it could satisfy both LEFT and RIGHT.
      *
      * @note **Compile-time override:** guarded by `#ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT`
      *       so a host test can pin it target-wide via `-DLINE_JUNCTION_RIGHT_LO_DEFAULT=...`
@@ -248,7 +254,7 @@ namespace Config
      * @note TODO: tune on real mat.
      */
 #ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT
-#define LINE_JUNCTION_RIGHT_LO_DEFAULT 1
+#define LINE_JUNCTION_RIGHT_LO_DEFAULT 3
 #endif
     constexpr uint8_t LINE_JUNCTION_RIGHT_LO = LINE_JUNCTION_RIGHT_LO_DEFAULT;
 
@@ -381,7 +387,7 @@ namespace Config
     /**
      * @brief Consecutive valid-junction samples required to arm a rising edge.
      */
-    constexpr uint8_t INTERSECTION_DEBOUNCE_TICKS = 2;
+    constexpr uint8_t INTERSECTION_DEBOUNCE_TICKS = 1;
 
     /**
      * @brief Consecutive NONE samples required to release before re-arming.

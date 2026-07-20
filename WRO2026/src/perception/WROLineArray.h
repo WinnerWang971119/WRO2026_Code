@@ -267,10 +267,10 @@ public:
      *
      *  1. `T_OR_CROSS` (3) — if at least `Config::LINE_JUNCTION_T_MIN_ON` of 8 channels
      *     are on-line.
-     *  2. `LEFT` (1) — if channels `0 .. Config::LINE_JUNCTION_LEFT_HI` are ALL on-line
-     *     AND channels `LINE_JUNCTION_LEFT_HI+1 .. 7` are ALL off-line.
-     *  3. `RIGHT` (2) — if channels `Config::LINE_JUNCTION_RIGHT_LO .. 7` are ALL on-line
-     *     AND channels `0 .. LINE_JUNCTION_RIGHT_LO-1` are ALL off-line.
+     *  2. `LEFT` (1) — if channels `0 .. Config::LINE_JUNCTION_LEFT_HI` are ALL on-line.
+     *     The remaining (right-side) channels are DON'T-CARE.
+     *  3. `RIGHT` (2) — if channels `Config::LINE_JUNCTION_RIGHT_LO .. 7` are ALL on-line.
+     *     The remaining (left-side) channels are DON'T-CARE.
      *  4. `NONE` (0) — otherwise.
      *
      * @return One of `{0, 1, 2, 3}` mirroring the `JunctionType` enum in
@@ -284,11 +284,15 @@ public:
      *       inline on every call; the cache is still shared across getters
      *       within a tick because each refresh writes the same `_lastChannels`
      *       buffer, but a different mid-tick sample is taken per call.
-     * @note The asymmetric overlap between LEFT (`ch0..LEFT_HI`) and RIGHT
-     *       (`RIGHT_LO..ch7`) predicates on channels `[RIGHT_LO..LEFT_HI]` is by
-     *       design — the strict opposite-side-off requirement eliminates false fires
-     *       mid-segment when a few contiguous centre channels straddle a fat line. See
-     *       Decisions in the design plan.
+     * @note LEFT and RIGHT test only their OWN half — the opposite side is NOT required
+     *       to be dark. A one-sided branch keeps its edge channels lit for the whole
+     *       crossing while the centre channels flicker, so the earlier opposite-side-off
+     *       rule dropped the verdict to NONE mid-junction at line-follow speed. The
+     *       outermost required channel (ch0 for LEFT, ch7 for RIGHT) is what a centred
+     *       straight line can never light, so this stays false-fire-safe on a plain line.
+     *       Mutual exclusivity still holds: the only sample satisfying both LEFT and RIGHT
+     *       is a fully lit bar, which trips `T_OR_CROSS` first — provided
+     *       `LINE_JUNCTION_RIGHT_LO <= LINE_JUNCTION_LEFT_HI + 1` (no gap), the default.
      * @note `Intersection.update()` interprets `3` as `JunctionType::T_OR_CROSS`. The
      *       existing UNKNOWN-handling branch in `Intersection.cpp` becomes structurally
      *       unreachable with this backend but is left intact for safety.
