@@ -296,10 +296,9 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    LineFollower.setEnabled(true).setReverse(true).setPreset(Config::SpeedPreset::NORMAL).setDistanceTarget(90);
-    LineFollower.waitUntilDistanceReached();
-    LineFollower.setEnabled(false);
-    Drive.stop(true);
+    //Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
+    Manipulator.release();
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
     return true;
 }
 

@@ -257,8 +257,8 @@ namespace Config
         { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
         { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
-        { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
-        { BeltMode::POSITION,    340,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
+        { BeltMode::POSITION,    1380,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION,    860,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
         { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
         { BeltMode::POSITION,    940,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
     };
