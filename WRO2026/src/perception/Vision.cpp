@@ -27,8 +27,8 @@
  * The vendor `MiniR4SmartCamReader` / `MiniR4.Vision` are deliberately NOT used (its parser
  * runs off the end of a non-void function on a misaligned start, overruns a fixed stack buffer
  * on a corrupt length byte, and false-syncs on a `0xAA`-as-data byte — see the plan). We talk
- * to the camera UART directly via `Config::VISION_SERIAL` (see ConfigVision.h — it resolves
- * to `Serial2` on the R4 WiFi, the D0/D1 header socket; `MiniR4.Uart` is the same port).
+ * to the camera UART directly via `Config::VISION_SERIAL` (see ConfigVision.h — bench-confirmed
+ * to be `Serial1` at 115200, matching the vendor `MiniR4SmartCamReader::Begin()`).
  * We do NOT `#include <MatrixMiniR4.h>` from here.
  */
 
@@ -214,7 +214,9 @@ bool VisionClass::_classifyCandidate(
     Config::Color  outColors[Config::VISION_CELL_COUNT],
     uint8_t        outHue[Config::VISION_CELL_COUNT],
     uint8_t&       firstBadCell,
-    uint8_t&       badRaw) const
+    uint8_t&       badRaw,
+    bool           tolerant,
+    uint8_t        maxUnknown) const
 {
     // Unpack into per-SLOT hue / sta arrays (device order S1..S12).
     uint8_t hue[Config::VISION_CELL_COUNT];
@@ -224,6 +226,19 @@ bool VisionClass::_classifyCandidate(
     // Classify into CELL-indexed local buffers, applying the strict guard, so the caller touches
     // the latch ONLY after every active cell validates. This is what makes AC4's "no overwrite on
     // failure" hold (the caller commits the latch only on a true return).
+    //
+    // Tolerance is a parameter (not a compile-time constant) so the ONE loop serves three modes:
+    //   - strict            (tolerant=false)               — first UNKNOWN aborts (ADR-037).
+    //   - mission mask       (tolerant=true, maxUnknown=cap) — latch up to `cap` UNKNOWN cells, else
+    //                                                          fail; the mosaic planner injects a
+    //                                                          fallback for the latched UNKNOWNs.
+    //   - diagnostic          (tolerant=true, maxUnknown=CELL_COUNT) — never fail on UNKNOWN.
+    // In every tolerant case an UNKNOWN cell is LATCHED honestly as UNKNOWN and counted — Vision
+    // never fakes a colour, so getColor() / the console screens stay truthful.
+    uint8_t unknownCount     = 0;
+    uint8_t firstUnknownCell = 0xFF;
+    uint8_t firstUnknownRaw  = 0;
+
     for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
     {
         // DIRECTION MATTERS (TC19): the unpacked arrays are indexed BY SLOT, the result is stored
@@ -234,19 +249,40 @@ bool VisionClass::_classifyCandidate(
 
         if (col == Config::Color::UNKNOWN)
         {
-            // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
-            // Record the first offending CELL index and the raw hue of its mapped slot. The caller
-            // does NOT write the latch on a false return.
-            firstBadCell = c;
-            badRaw       = hue[slot];
-            return false;
+            if (!tolerant)
+            {
+                // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
+                // Record the first offending CELL index and the raw hue of its mapped slot. The
+                // caller does NOT write the latch on a false return.
+                firstBadCell = c;
+                badRaw       = hue[slot];
+                return false;
+            }
+
+            // Mask mode: latch the cell honestly as UNKNOWN and keep going.
+            if (firstUnknownCell == 0xFF)
+            {
+                firstUnknownCell = c;
+                firstUnknownRaw  = hue[slot];
+            }
+            ++unknownCount;
         }
 
-        outColors[c] = col;
+        outColors[c] = col;    // `col` here is UNKNOWN in the masked case — reported truthfully.
         outHue[c]    = hue[slot];
     }
 
-    // Every active cell validated.
+    // Tolerant over-budget: too many UNKNOWN cells is a genuine failure (bad camera / lighting), so
+    // surface it exactly like the strict guard would — the caller must NOT latch this frame. In the
+    // diagnostic path `maxUnknown` == VISION_CELL_COUNT, so this branch can never trip there.
+    if (tolerant && unknownCount > maxUnknown)
+    {
+        firstBadCell = firstUnknownCell;
+        badRaw       = firstUnknownRaw;
+        return false;
+    }
+
+    // Every active cell validated, or the UNKNOWN cells were within the mask budget.
     return true;
 }
 
@@ -268,6 +304,24 @@ bool VisionClass::_classifyCandidate(
 
 bool VisionClass::readMosaic()
 {
+    // Mission read: strict by default (ADR-037), or mask-tolerant up to the cap when enabled.
+    return _readMosaic(false);
+}
+
+bool VisionClass::readMosaicRaw()
+{
+    // Diagnostic read: always tolerant, no UNKNOWN cap (see _readMosaic).
+    return _readMosaic(true);
+}
+
+bool VisionClass::_readMosaic(bool diagnostic)
+{
+    // Resolve the classification tolerance ONCE for this read. Diagnostic reads never fail on
+    // UNKNOWN (cap == VISION_CELL_COUNT); mission reads follow the mask config.
+    const bool tolerant = diagnostic ? true : Config::VISION_MASK_UNKNOWN_ENABLED;
+    const uint8_t maxUnknown =
+        diagnostic ? Config::VISION_CELL_COUNT : Config::VISION_MASK_MAX_UNKNOWN_CELLS;
+
     for (uint8_t attempt = 0; attempt < kMaxAttempts; ++attempt)
     {
         // ---------------------------------------------------------------------------------
@@ -378,8 +432,9 @@ bool VisionClass::readMosaic()
                         Config::Color cellColors[Config::VISION_CELL_COUNT];
                         uint8_t       cellHue[Config::VISION_CELL_COUNT];
 
-                        const bool allValid =
-                            _classifyCandidate(words, cellColors, cellHue, badCellIndex, badCellRaw);
+                        const bool allValid = _classifyCandidate(
+                            words, cellColors, cellHue, badCellIndex, badCellRaw, tolerant,
+                            maxUnknown);
 
                         if (allValid)
                         {

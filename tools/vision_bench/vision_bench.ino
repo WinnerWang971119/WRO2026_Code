@@ -22,12 +22,13 @@
  * ---------------------------------------------------------------------------
  *
  * (a) CONFIRM BAUD AND MEASURE THE FRAME EMISSION RATE (Hz).
- *     Power the HUE12, wire its TX/RX to the R4's D0/D1 UART socket, flash this
+ *     Power the HUE12, plug it into the MATRIX "UART" socket (bench-confirmed to be `Serial1`,
+ *     pins 22/23, at 115200 — NOT the D0/D1 header socket), flash this
  *     sketch, and open the USB serial monitor at 115200 baud. Each second the
  *     sketch prints `fps=<N>` — the number of complete, checksum-valid frames
- *     decoded in the last ~1 s window. That N is the camera's EMISSION RATE.
+ *     decoded in the last ~1 s window. That N is the camera's EMISSION RATE (~16 fps measured).
  *       - If `fps` is a stable non-zero number, the configured UART baud
- *         (`Config::VISION_UART_BAUD`, currently 9600) is correct.
+ *         (`Config::VISION_UART_BAUD`, 115200) is correct.
  *       - If `fps` is 0 or you see only `(no frames this second)`, the baud is
  *         likely wrong (or see note (d) — check the physical socket FIRST).
  *     The measured rate feeds `Config::VISION_READ_TIMEOUT_MS`: that timeout
@@ -60,12 +61,11 @@
  *     `sta=<rawSta>` of a desaturated/white tile (sta is a 4-bit value, 0..15).
  *
  * (d) IF YOU GET NO BYTES, SUSPECT THE WIRING BEFORE THE BAUD.
- *     On the MatrixMiniR4, `MiniR4.Uart` is `UART(UART2_TX_PIN, UART2_RX_PIN)`
- *     (MatrixMiniR4.h:114) — the D0/D1 header socket, which on the UNO R4 WiFi is
- *     `Serial2`, NOT `Serial1` (Serial1 there is pins 22/23, the on-board ESP32
- *     link). This sketch talks to `Config::VISION_SERIAL` directly, exactly like
+ *     The camera is on `Serial1` (MATRIX "UART" socket, pins 22/23), bench-confirmed — NOT the
+ *     D0/D1 header socket (`Serial2` = `MiniR4.Uart` = `UART(UART2_TX_PIN, UART2_RX_PIN)`), which
+ *     reads dead-silent. This sketch talks to `Config::VISION_SERIAL` directly, exactly like
  *     the firmware. If `fps` stays 0 and no `slot` table ever prints,
- *     check the physical D0/D1 socket and the TX<->RX cross-wiring (camera TX
+ *     check the physical "UART" socket and the TX<->RX cross-wiring (camera TX
  *     must reach R4 RX) BEFORE assuming a baud mismatch. A dead socket and a
  *     wrong baud look identical from the serial monitor. If the wiring and baud
  *     check out but `fps` still stays 0, the camera may need the start command
@@ -277,8 +277,8 @@ void setup()
     Serial.begin(kUsbBaud);
 
     // HUE12 camera UART, selected through Config::VISION_SERIAL exactly like the firmware —
-    // Serial2 on the R4 WiFi (the D0/D1 socket), NOT Serial1 (pins 22/23, the on-board ESP32
-    // link). Use the Config baud so this bench and the firmware agree on one source of truth.
+    // bench-confirmed to be Serial1 at 115200 (the MATRIX "UART" socket, pins 22/23), NOT the
+    // D0/D1 header socket. Use the Config baud so this bench and the firmware share one source.
     VISION_SERIAL.begin(Config::VISION_UART_BAUD);
 
     // Wake the camera (vendor SmartCamReader contract) — a cold-booted HUE12 may stay idle

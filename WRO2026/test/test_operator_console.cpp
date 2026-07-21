@@ -83,10 +83,10 @@ namespace VisionFault
     constexpr uint8_t BAD_CELL     = 3;
 }    // namespace VisionFault
 
-/** @brief The nine item labels, in documented order -- shared by TC1/TC2/TC4/TC7. */
+/** @brief The item labels, in documented order -- shared by TC1/TC2/TC4/TC7. */
 static const char* const kLabels[Console::ITEM_COUNT] = {
-    "SELF TEST", "BATT",      "LINE VIEW", "VISION VIEW", "GYRO VIEW",
-    "GYRO ZERO", "CAL LINE",  "CAL MOTOR", "EXIT",
+    "SELF TEST", "BATT",       "LINE VIEW", "VISION VIEW", "VISION TEST",
+    "GYRO VIEW", "GYRO ZERO",  "CAL LINE",  "CAL MOTOR",   "EXIT",
 };
 
 // ---------------------------------------------------------------------------------------
@@ -277,7 +277,7 @@ int main()
     {
         Harness h;
         h.open();
-        check(Console::ITEM_COUNT == 9, "TC1: ITEM_COUNT == 9");
+        check(Console::ITEM_COUNT == 10, "TC1: ITEM_COUNT == 10");
         Console::ConsoleFrame f = h.tick();
         for (uint8_t i = 0; i < Console::ITEM_COUNT; ++i)
         {
@@ -292,7 +292,7 @@ int main()
         }
     }
 
-    // TC2 -- BTN_DOWN cycles the cursor through all 9 entries and wraps.
+    // TC2 -- BTN_DOWN cycles the cursor through all entries and wraps.
     {
         Harness h;
         h.open();
@@ -300,10 +300,10 @@ int main()
         check(std::strcmp(cursorLabel(f, "TC2: start frame has a visible cursor row"), kLabels[0]) ==
                   0,
               "TC2: cursor starts at 0");
-        for (int i = 1; i <= 9; ++i)
+        for (int i = 1; i <= Console::ITEM_COUNT; ++i)
         {
             f                   = tapDown(h);
-            const int expected = i % 9;
+            const int expected = i % Console::ITEM_COUNT;
             const char* label =
                 cursorLabel(f, msgf("TC2: tap %d leaves a visible cursor row", i));
             check(std::strcmp(label, kLabels[expected]) == 0,
@@ -320,13 +320,13 @@ int main()
         check(std::strcmp(f.rows[1] + 2, "SELF TEST") == 0, "TC3: cursor0 window row1");
         check(std::strcmp(f.rows[2] + 2, "BATT") == 0, "TC3: cursor0 window row2");
         check(std::strcmp(f.rows[3] + 2, "LINE VIEW") == 0, "TC3: cursor0 window row3");
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < Console::ITEM_COUNT - 1; ++i)
         {
             f = tapDown(h);
         }
-        check(std::strcmp(f.rows[1] + 2, "CAL LINE") == 0, "TC3: cursor8 window row1");
-        check(std::strcmp(f.rows[2] + 2, "CAL MOTOR") == 0, "TC3: cursor8 window row2");
-        check(std::strcmp(f.rows[3] + 2, "EXIT") == 0, "TC3: cursor8 window row3");
+        check(std::strcmp(f.rows[1] + 2, "CAL LINE") == 0, "TC3: bottom window row1");
+        check(std::strcmp(f.rows[2] + 2, "CAL MOTOR") == 0, "TC3: bottom window row2");
+        check(std::strcmp(f.rows[3] + 2, "EXIT") == 0, "TC3: bottom window row3");
         check(f.cursorRow == 3, "TC3: cursor stays visible at the bottom end");
     }
 
@@ -415,6 +415,7 @@ int main()
             {Console::Item::BATT, Console::State::VIEW_BATT, Console::ActionRequest::NONE},
             {Console::Item::LINE_VIEW, Console::State::VIEW_LINE, Console::ActionRequest::READ_LINE_BOARDS},
             {Console::Item::VISION_VIEW, Console::State::VIEW_VISION, Console::ActionRequest::READ_MOSAIC},
+            {Console::Item::VISION_TEST, Console::State::VISION_TEST, Console::ActionRequest::READ_MOSAIC},
             {Console::Item::GYRO_VIEW, Console::State::VIEW_GYRO, Console::ActionRequest::NONE},
             {Console::Item::CAL_LINE, Console::State::WAIT_RELEASE, Console::ActionRequest::CAL_LINE},
             {Console::Item::CAL_MOTOR, Console::State::WAIT_RELEASE, Console::ActionRequest::CAL_MOTOR},
@@ -1251,6 +1252,70 @@ int main()
         Console::ConsoleFrame f = confirmCursor(h);
         check(std::strstr(f.rows[2], "ALL MODULES OK") != nullptr,
               "BootReport flag-count pin: an all-clean report reads ALL MODULES OK");
+    }
+
+    // TC29 -- VISION TEST grades the mosaic against the expected colour code.
+    // Expected code (kExpectedMosaic): {4,3,1,2,3,4,2,2,1,1,4,3} -> letters WGYBGWBBYYWG.
+    {
+        static const uint8_t kExpect[12] = {4, 3, 1, 2, 3, 4, 2, 2, 1, 1, 4, 3};
+
+        // Navigate to VISION TEST and confirm -> enters VISION_TEST, one-shot READ_MOSAIC in flight.
+        auto enterVisionTest = [](Harness& h) {
+            h.open();
+            for (uint8_t i = 0; i < static_cast<uint8_t>(Console::Item::VISION_TEST); ++i)
+            {
+                tapDown(h);
+            }
+            Console::ConsoleFrame f = confirmCursor(h);
+            check(h.core.state() == Console::State::VISION_TEST, "TC29: entered VISION_TEST");
+            check(f.action == Console::ActionRequest::READ_MOSAIC,
+                  "TC29: VISION_TEST emits a one-shot READ_MOSAIC on entry");
+        };
+
+        // PASS: an exact match -> Signal::PASS, "all 12 match", PASS tag on the title row.
+        {
+            Harness h;
+            enterVisionTest(h);
+            for (uint8_t c = 0; c < 12; ++c)
+            {
+                h.in.sample.visionCell[c] = kExpect[c];
+            }
+            h.in.sample.visionFaultKind = VisionFault::NONE;
+            Console::ConsoleFrame f = completeRead(h, Console::ActionRequest::READ_MOSAIC);
+            check(f.signal == Console::Signal::PASS, "TC29: exact match raises Signal::PASS");
+            check(std::strstr(f.rows[0], "PASS") != nullptr, "TC29: title row shows PASS");
+            check(std::strcmp(f.rows[1], "GOT WGYBGWBBYYWG") == 0, "TC29: GOT row (match)");
+            check(std::strcmp(f.rows[2], "EXP WGYBGWBBYYWG") == 0, "TC29: EXP row");
+            check(std::strcmp(f.rows[3], "all 12 match") == 0, "TC29: verdict all match");
+        }
+
+        // FAIL: cell 4 reads UNKNOWN instead of GREEN -> Signal::FAIL + first-mismatch detail.
+        {
+            Harness h;
+            enterVisionTest(h);
+            for (uint8_t c = 0; c < 12; ++c)
+            {
+                h.in.sample.visionCell[c] = kExpect[c];
+            }
+            h.in.sample.visionCell[4]   = 0;    // UNKNOWN where GREEN (3) was expected
+            h.in.sample.visionFaultKind = VisionFault::NONE;
+            Console::ConsoleFrame f = completeRead(h, Console::ActionRequest::READ_MOSAIC);
+            check(f.signal == Console::Signal::FAIL, "TC29: a mismatch raises Signal::FAIL");
+            check(std::strstr(f.rows[0], "FAIL") != nullptr, "TC29: title row shows FAIL");
+            check(std::strcmp(f.rows[1], "GOT WGYB?WBBYYWG") == 0, "TC29: GOT row (mismatch)");
+            check(std::strcmp(f.rows[3], "1 bad c4 G->?") == 0,
+                  "TC29: verdict names the first bad cell (expected G, got ?)");
+        }
+
+        // Transport fault -> graded FAIL with a READ FAULT line, never a spurious pass.
+        {
+            Harness h;
+            enterVisionTest(h);
+            h.in.sample.visionFaultKind = VisionFault::READ_TIMEOUT;
+            Console::ConsoleFrame f = completeRead(h, Console::ActionRequest::READ_MOSAIC);
+            check(f.signal == Console::Signal::FAIL, "TC29: a read fault grades FAIL");
+            check(std::strcmp(f.rows[3], "READ FAULT") == 0, "TC29: read fault shows READ FAULT");
+        }
     }
 
     if (g_failures == 0)

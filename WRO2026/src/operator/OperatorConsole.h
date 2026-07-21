@@ -369,6 +369,17 @@ private:
     void _updateGyroBaseline(const Console::ConsoleInput& in);
 
     /**
+     * @brief Grade the VISION TEST once its one-shot mosaic read completes.
+     *
+     * On the tick the requested `READ_MOSAIC` finishes (`_readInFlight` cleared), compares every
+     * cell of `in.sample.visionCell` against the expected colour code, latches the pass/fail
+     * verdict, and raises `Signal::PASS` / `Signal::FAIL` exactly once. A read that faulted
+     * (transport error) grades as FAIL. No-op once judged — re-enter the item to re-test.
+     * @param in This tick's input (carries the pulled `visionCell` / `visionFaultKind`).
+     */
+    void _updateVisionTest(const Console::ConsoleInput& in);
+
+    /**
      * @brief Render the active state into @p out and publish the level-triggered outputs.
      *
      * Blanks the frame, dispatches to the per-state renderer, then raises `dirty` if the rows
@@ -506,6 +517,9 @@ private:
     /** @brief Render `State::VIEW_VISION`: the twelve mosaic cells plus the fault kind. */
     void _renderVisionView(const Console::ConsoleInput& in, Console::ConsoleFrame& out) const;
 
+    /** @brief Render the VISION TEST screen: GOT vs EXP colour rows plus the graded verdict. */
+    void _renderVisionTest(const Console::ConsoleInput& in, Console::ConsoleFrame& out) const;
+
     /** @brief Render `State::VIEW_GYRO`: yaw, health and wrap-correct drift since entry. */
     void _renderGyroView(const Console::ConsoleInput& in, Console::ConsoleFrame& out) const;
 
@@ -603,6 +617,14 @@ private:
     bool     _lineReqIssued   = false;  ///< `_lastLineReqMs` is meaningful.
     uint32_t _lastVisionReqMs = 0;      ///< `nowMs` of the last `READ_MOSAIC`.
     bool     _visionReqIssued = false;  ///< `_lastVisionReqMs` is meaningful.
+
+    // --- VISION TEST (grade the mosaic against the expected colour code) --------------------
+    /// One-shot READ_MOSAIC was requested for this `VISION_TEST` entry. Reset on entry.
+    bool _visionTestReqIssued = false;
+    /// The requested read has completed and the verdict below is valid.
+    bool _visionTestJudged = false;
+    /// The graded verdict (all cells matched the expected code) — meaningful only when judged.
+    bool _visionTestPass = false;
 
     double _gyroBaselineDeg = 0.0;    ///< Yaw latched on `VIEW_GYRO` entry.
     bool   _gyroBaselineSet = false;  ///< Baseline captured from a good sample.

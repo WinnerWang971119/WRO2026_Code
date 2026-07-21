@@ -46,10 +46,10 @@ class BoardPort:
     hardware_id: str | None = None
 
 
-def parse_args(sketch_name: str) -> argparse.Namespace:
+def parse_args(sketch_label: str) -> argparse.Namespace:
     """Parse command-line overrides for the compiler, board, and monitor."""
     parser = argparse.ArgumentParser(
-        description=f"Build, upload, and monitor inoTest/{sketch_name}."
+        description=f"Build, upload, and monitor {sketch_label}."
     )
     parser.add_argument(
         "--build-only",
@@ -289,34 +289,65 @@ def _compile_command(
     sketch_name: str,
     source_domains: Sequence[str],
     defines: Sequence[str] = (),
+    *,
+    sketch_dir: Path | None = None,
+    includes: Sequence[str] = (),
 ) -> list[str]:
-    """Build the single Arduino CLI compile command with all legacy-library roots.
+    """Build the single Arduino CLI compile command.
 
-    ``--library WRO2026`` reaches only the firmware root (``Config.h``, ``Tasks.cpp``);
-    each ``src/<domain>`` the sketch pulls in needs its own ``--library`` flag on top.
+    Two include regimes:
 
-    ``defines`` are emitted as ONE ``compiler.cpp.extra_flags`` build property: Arduino
-    CLI keeps only the last value for a repeated property key, so passing them separately
-    would silently drop all but the final define.
+    * The inoTest default — ``--library WRO2026`` reaches only the firmware root
+      (``Config.h``, ``Tasks.cpp``); each ``src/<domain>`` the sketch pulls in needs its
+      own ``--library`` flag on top.
+    * The ``includes`` opt-in (vision_bench) — a sketch that reaches its firmware headers by
+      path-qualified quoted include (``config/ConfigVision.h``, ``src/perception/...``)
+      cannot use ``--library``: that flag's include scan only recognises bare basenames and
+      silently drops the path. Such a sketch passes a raw ``-I`` root here instead and no
+      ``--library`` flag is emitted.
+
+    ``includes`` (as ``-I``) and ``defines`` (as ``-D``) are merged into ONE
+    ``compiler.cpp.extra_flags`` build property: Arduino CLI keeps only the last value for a
+    repeated property key, so emitting them separately would silently drop all but the last.
+
+    ``sketch_dir`` overrides the default ``inoTest/<sketch_name>`` sketch path (used by
+    sketches that live elsewhere, e.g. ``tools/vision_bench``).
     """
     repo_root = Path(__file__).resolve().parents[1]
-    sketch = repo_root / "inoTest" / sketch_name
+    sketch = sketch_dir if sketch_dir is not None else repo_root / "inoTest" / sketch_name
     firmware = repo_root / "WRO2026"
     command = [cli, "compile", "--fqbn", fqbn]
     if upload_port is not None:
         command.extend(("--upload", "--port", upload_port))
-    command.extend((str(sketch), "--library", str(firmware)))
-    for domain in source_domains:
-        command.extend(("--library", str(firmware / "src" / domain)))
-    if defines:
-        flags = " ".join(f"-D{define}" for define in defines)
-        command.extend(("--build-property", f"compiler.cpp.extra_flags={flags}"))
+    command.append(str(sketch))
+    if includes:
+        extra = [f"-I{include}" for include in includes]
+    else:
+        command.extend(("--library", str(firmware)))
+        for domain in source_domains:
+            command.extend(("--library", str(firmware / "src" / domain)))
+        extra = []
+    extra.extend(f"-D{define}" for define in defines)
+    if extra:
+        command.extend(("--build-property", f"compiler.cpp.extra_flags={' '.join(extra)}"))
     return command
 
 
-def main(sketch_name: str, source_domains: Sequence[str]) -> int:
-    """Compile, optionally upload, then monitor; return the child command exit status."""
-    args = parse_args(sketch_name)
+def main(
+    sketch_name: str,
+    source_domains: Sequence[str] = (),
+    *,
+    sketch_dir: Path | None = None,
+    includes: Sequence[str] = (),
+    location: str | None = None,
+) -> int:
+    """Compile, optionally upload, then monitor; return the child command exit status.
+
+    ``sketch_dir`` / ``includes`` let a sketch outside ``inoTest/`` (e.g. ``tools/vision_bench``)
+    reuse this driver with a raw ``-I`` include instead of ``--library`` — see
+    :func:`_compile_command`. ``location`` overrides the ``inoTest/<name>`` label in ``--help``.
+    """
+    args = parse_args(location or f"inoTest/{sketch_name}")
     cli = shutil.which(args.cli)
     if cli is None:
         print(
@@ -328,7 +359,16 @@ def main(sketch_name: str, source_domains: Sequence[str]) -> int:
 
     if args.build_only:
         return subprocess.run(
-            _compile_command(cli, args.fqbn, None, sketch_name, source_domains, args.define),
+            _compile_command(
+                cli,
+                args.fqbn,
+                None,
+                sketch_name,
+                source_domains,
+                args.define,
+                sketch_dir=sketch_dir,
+                includes=includes,
+            ),
             check=False,
         ).returncode
 
@@ -346,7 +386,14 @@ def main(sketch_name: str, source_domains: Sequence[str]) -> int:
     _close_existing_monitors(cli)
     result = subprocess.run(
         _compile_command(
-            cli, args.fqbn, board.address, sketch_name, source_domains, args.define
+            cli,
+            args.fqbn,
+            board.address,
+            sketch_name,
+            source_domains,
+            args.define,
+            sketch_dir=sketch_dir,
+            includes=includes,
         ),
         check=False,
     )

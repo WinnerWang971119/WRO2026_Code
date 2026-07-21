@@ -281,15 +281,16 @@ static void test_TC5_classify_band_boundaries_and_gap()
 {
     TEST_SCOPE("TC5: band boundaries inclusive (lo,hi) + gaps -> UNKNOWN");
 
-    // YELLOW band {20,45}: lo and hi inclusive; lo-1 and hi+1 outside.
+    // YELLOW band {20,50}: lo and hi inclusive; lo-1 and hi+1 outside.
     ASSERT_TRUE(VisionFrame::classifyHue(20, kStaHigh) == Config::Color::YELLOW);    // lo
-    ASSERT_TRUE(VisionFrame::classifyHue(45, kStaHigh) == Config::Color::YELLOW);    // hi
+    ASSERT_TRUE(VisionFrame::classifyHue(50, kStaHigh) == Config::Color::YELLOW);    // hi
     ASSERT_TRUE(VisionFrame::classifyHue(19, kStaHigh) == Config::Color::UNKNOWN);   // lo-1 (gap)
-    ASSERT_TRUE(VisionFrame::classifyHue(46, kStaHigh) == Config::Color::UNKNOWN);   // hi+1 (gap)
+    ASSERT_TRUE(VisionFrame::classifyHue(51, kStaHigh) == Config::Color::UNKNOWN);   // hi+1 (gap)
 
-    // GREEN band {80,140}: lo/hi inclusive.
-    ASSERT_TRUE(VisionFrame::classifyHue(80, kStaHigh) == Config::Color::GREEN);
+    // GREEN band {70,140}: lo/hi inclusive; lo-1 is the gap below it.
+    ASSERT_TRUE(VisionFrame::classifyHue(70, kStaHigh) == Config::Color::GREEN);
     ASSERT_TRUE(VisionFrame::classifyHue(140, kStaHigh) == Config::Color::GREEN);
+    ASSERT_TRUE(VisionFrame::classifyHue(69, kStaHigh) == Config::Color::UNKNOWN);   // lo-1 (gap)
 
     // BLUE band {141,200}: 141 is the first BLUE (hi GREEN is 140 — adjacent, no gap),
     // 200 is the last BLUE, 201 is the gap before device White at 240.
@@ -297,7 +298,7 @@ static void test_TC5_classify_band_boundaries_and_gap()
     ASSERT_TRUE(VisionFrame::classifyHue(200, kStaHigh) == Config::Color::BLUE);
     ASSERT_TRUE(VisionFrame::classifyHue(201, kStaHigh) == Config::Color::UNKNOWN);   // gap
 
-    // A gap strictly between two bands (between YELLOW hi=45 and GREEN lo=80).
+    // A gap strictly between two bands (between YELLOW hi=50 and GREEN lo=70).
     ASSERT_TRUE(VisionFrame::classifyHue(60, kStaHigh) == Config::Color::UNKNOWN);
 }
 

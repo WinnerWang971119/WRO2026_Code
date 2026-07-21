@@ -397,6 +397,8 @@
     }
   },
   "blind_projection_auto_seek": false,
+  "pipeline_speed": "NORMAL",
+  "pipeline_blind_mode": "GYRO_TSHAPE",
   "EDGES": [
     {
       "type": "LINE",

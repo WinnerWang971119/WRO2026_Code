@@ -72,6 +72,28 @@ static_assert(
     static_cast<uint8_t>(VisionClass::Fault::BAD_CELL) == 3,
     "VisionClass::Fault::BAD_CELL must stay 3 — mirrored as kVisionFaultBadCell");
 
+// Cross-module tripwire: OperatorConsole.cpp renders mosaic cells through `kColorLetters`
+// ("?YBGWR") and grades the VISION TEST against `kExpectedMosaic`, both of which index colours by
+// `static_cast<uint8_t>(Config::Color)`. `Config::Color` is Arduino-side, so the core mirrors the
+// codes as raw bytes; this TU includes both, so it is the one place the mapping is pinned. If a
+// code moves, fix the mirror in OperatorConsole.cpp (kColorLetters order + kExpectedMosaic).
+// `WHITE` is a MiniR4OLED.h macro here, so guard the named enumerator (as ConfigVision.h does).
+#pragma push_macro("WHITE")
+#undef WHITE
+static_assert(static_cast<uint8_t>(Config::Color::UNKNOWN) == 0,
+              "Config::Color::UNKNOWN must stay 0 — kColorLetters[0]=='?'");
+static_assert(static_cast<uint8_t>(Config::Color::YELLOW) == 1,
+              "Config::Color::YELLOW must stay 1 — kColorLetters[1]=='Y'");
+static_assert(static_cast<uint8_t>(Config::Color::BLUE) == 2,
+              "Config::Color::BLUE must stay 2 — kColorLetters[2]=='B'");
+static_assert(static_cast<uint8_t>(Config::Color::GREEN) == 3,
+              "Config::Color::GREEN must stay 3 — kColorLetters[3]=='G'");
+static_assert(static_cast<uint8_t>(Config::Color::WHITE) == 4,
+              "Config::Color::WHITE must stay 4 — kColorLetters[4]=='W'");
+static_assert(static_cast<uint8_t>(Config::Color::RED) == 5,
+              "Config::Color::RED must stay 5 — kColorLetters[5]=='R'");
+#pragma pop_macro("WHITE")
+
 namespace
 {
     /**
@@ -485,7 +507,11 @@ void OperatorPanelClass::_serviceRequestCompletion()
 
 void OperatorPanelClass::_executeReadMosaic()
 {
-    const bool ok = Vision.readMosaic();
+    // DIAGNOSTIC read: the console is advisory, and VISION VIEW / VISION TEST must be able to SHOW
+    // which cells read UNKNOWN. The tolerant read latches every cell's classification (unknowns as
+    // UNKNOWN) instead of throwing the whole frame away on the first UNKNOWN like the strict
+    // mission `readMosaic()` (ADR-037) does. It still faults on a transport error (timeout/checksum).
+    const bool ok = Vision.readMosaicRaw();
 
     // Vision.getColor()/getFault() retain the prior latch on a failed read (ADR-037), so it is
     // always safe to re-copy every cell regardless of `ok` — a failure simply re-latches the
