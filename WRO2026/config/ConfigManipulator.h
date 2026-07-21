@@ -87,7 +87,7 @@ namespace Config
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 126};  
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 127};  
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
@@ -243,9 +243,9 @@ namespace Config
      *       end, so its row drives toward HOME (`-BELT_STALL_SPEED`).
      * @note `GRAB_RIGHT` / `GRAB_MID` / `GRAB_LEFT` are the three reach positions that let
      *       the manipulator take each of the three tiles in one M-wall row without driving
-     *       (see the `mosaic` task). `GRAB_MID` is also the mandatory travel pose: the belt
-     *       must be returned to it before ANY chassis move, or the extended manipulator
-     *       throws the centre of mass too far off.
+     *       (see the `mosaic` task). `MID` is the mandatory travel pose: the belt must be
+     *       returned to it before ANY chassis move, or the extended manipulator throws the
+     *       centre of mass too far off.
      */
     enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4,
                                        GRAB_RIGHT = 5, GRAB_MID = 6, GRAB_LEFT = 7 };  // TODO finalize

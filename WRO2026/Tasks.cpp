@@ -13,6 +13,7 @@
 #include "src/nav/Localization.h"
 
 #include <Arduino.h>
+#include <MatrixMiniR4.h>    // MiniR4 global — buzzer + on-board RGB LED for _signalSuccess/_signalFail
 #ifdef CTPS_RECORD
 #include <time.h>
 #endif
@@ -88,10 +89,21 @@ bool TasksClass::begin()
 
 void TasksClass::update()
 {
-    // Intentional no-op. Tasks has no persistent active-task FSM in this
-    // plan; bodies run to completion inside `runTask`. Kept non-trivial as
-    // a stable hook for the cooperative tick list — see Tasks.h class
-    // docstring.
+    // Tasks has no persistent active-task FSM in this plan; bodies run to
+    // completion inside `runTask`. The only per-tick work is advancing the
+    // non-blocking task-fail beep train armed by `_signalFail`: fire the next
+    // low tone once its on-time + gap has elapsed, until the count runs out.
+    if (_failBeepsLeft > 0)
+    {
+        const uint32_t interval =
+            (uint32_t)Config::TASK_FAIL_BEEP_MS + Config::TASK_FAIL_BEEP_GAP_MS;
+        if ((uint32_t)(millis() - _failPhaseStartMs) >= interval)
+        {
+            MiniR4.Buzzer.Tone(Config::TASK_FAIL_BEEP_HZ, Config::TASK_FAIL_BEEP_MS);
+            _failPhaseStartMs = millis();
+            _failBeepsLeft--;
+        }
+    }
 }
 
 void TasksClass::setTickCallback(void (*cb)())
@@ -297,50 +309,25 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    //Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
-    //Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
-    //_grabToBin(0);
-
-
-    /*PathTracker.goTo("MR").setArrivalDirection(Direction::FRONT);
-    Drive.turnToYaw(90);
-    PathTracker.goTo("MYD").setArrivalDirection(Direction::FRONT);
-    Manipulator.dumper.open();
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
-    _grabToBin(0);
-    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
-    _grabToBin(1);
-    PathTracker.goTo("MYU");
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
-    _grabToBin(2);
-    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
-    _grabToBin(3);
-
-    PathTracker.goTo("MBD");
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
-    _grabToBin(0);
-    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
-    _grabToBin(1);
+    PathTracker.goTo("i2");
+    Drive.turnToYaw(Localization.toImuYaw(90));
+    PathTracker.goTo("MWU");
+    _signalSuccess();
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MWD");
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MGU");
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MGD");
+    _waitStationaryMs(1000);
     PathTracker.goTo("MBU");
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
-    _grabToBin(2);
-    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
-    _grabToBin(3);
-    Manipulator.beltTo(Config::BeltStation::MID);
-
-    PathTracker.goTo("i3");
-    Drive.turnToYaw(90);
-
-    PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
-    Manipulator.dump();
-    _waitMs(500);
-    Manipulator.dumpReset();
-    PathTracker.goTo("dump2");*/
-
-    Drive.turnToYaw(Localization.toImuYaw(180));
-
-    
-
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MBD");
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MYU");
+    _waitStationaryMs(1000);
+    PathTracker.goTo("MYD");
+    _waitStationaryMs(1000);
     return true;
 }
 
@@ -402,6 +389,49 @@ void TasksClass::_waitMs(uint32_t durationMs)
     {
         _pumpTick();
     }
+}
+
+void TasksClass::_setLeds(LedColor color)
+{
+    // Resolve the named colour to an 8-bit RGB triple, then drive both on-board
+    // LEDs to it. Full brightness on each channel, matching the boot cues.
+    uint8_t r = 0, g = 0, b = 0;
+    switch (color)
+    {
+        case LedColor::White:  r = 255; g = 255; b = 255; break;
+        case LedColor::Red:    r = 255;                   break;
+        case LedColor::Green:           g = 255;          break;
+        case LedColor::Blue:                     b = 255; break;
+        case LedColor::Yellow: r = 255; g = 255;          break;
+        case LedColor::Off:                               break;
+    }
+    MiniR4.LED.setColor(1, r, g, b);
+    MiniR4.LED.setColor(2, r, g, b);
+}
+
+void TasksClass::_signalSuccess()
+{
+    // Cancel any in-flight fail beep train so success cleanly overrides it.
+    _failBeepsLeft = 0;
+
+    // Solid green on both on-board RGB LEDs + one short bright chirp. Tone() is
+    // non-blocking (hardware timer), so this returns immediately.
+    _setLeds(LedColor::Green);
+    MiniR4.Buzzer.Tone(Config::TASK_OK_BEEP_HZ, Config::TASK_OK_BEEP_MS);
+}
+
+void TasksClass::_signalFail()
+{
+    // Solid red on both on-board RGB LEDs.
+    _setLeds(LedColor::Red);
+
+    // Fire tone 1 now and arm the beep train; update() emits the remaining
+    // TASK_FAIL_BEEPS-1 tones as each gap elapses, so the caller never blocks.
+    MiniR4.Buzzer.Tone(Config::TASK_FAIL_BEEP_HZ, Config::TASK_FAIL_BEEP_MS);
+    _failBeepsLeft    = (Config::TASK_FAIL_BEEPS > 0)
+                            ? (uint8_t)(Config::TASK_FAIL_BEEPS - 1)
+                            : 0;
+    _failPhaseStartMs = millis();
 }
 
 bool TasksClass::_waitForServo(ManipServo& servo, uint32_t timeoutMs, const char* label)
@@ -853,6 +883,18 @@ namespace
      */
     constexpr const char* kMosaicColorTag[kMosaicColorCount] = { "Y", "B", "G", "W" };
 
+    /**
+     * @brief On-board RGB LED colour per station index, parallel to `kMosaicColors`.
+     * @note Keyed by station index (not `Config::Color`) so it never names the `WHITE`
+     *       enumerator, which the OLED library also `#define`s as a macro.
+     */
+    constexpr TasksClass::LedColor kMosaicStationLed[kMosaicColorCount] = {
+        TasksClass::LedColor::Yellow,
+        TasksClass::LedColor::Blue,
+        TasksClass::LedColor::Green,
+        TasksClass::LedColor::White,
+    };
+
     // -------------------------------------------------------------------------
     // Wall supply model
     //
@@ -891,13 +933,15 @@ namespace
     /**
      * @brief Belt positions reaching the three tiles of one wall row, in take order.
      *
-     * `GRAB_MID` comes first because the belt is parked there after every drive (it is the
-     * travel pose — see `Config::BeltStation`), so the first tile of a row costs no belt move.
+     * The belt parks at `MID` (the far-end travel pose — see `Config::BeltStation`) before
+     * every drive, so `GRAB_RIGHT` — the reach position nearest that pose — comes first and
+     * costs almost no belt move. The order then sweeps monotonically toward the HOME end
+     * (`GRAB_RIGHT` -> `GRAB_MID` -> `GRAB_LEFT`), so no grab backtracks across the belt.
      */
     constexpr Config::BeltStation kMosaicGrabOrder[kMosaicTilesPerRow] = {
+        Config::BeltStation::GRAB_RIGHT,
         Config::BeltStation::GRAB_MID,
         Config::BeltStation::GRAB_LEFT,
-        Config::BeltStation::GRAB_RIGHT,
     };
 
     /**
@@ -1036,7 +1080,13 @@ bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i3");
     Drive.turnToYaw(Localization.toImuYaw(90));
-    return _visionRead();
+    _waitStationaryMs(200);
+    if (!_visionRead()){
+        _signalFail();
+        return false;
+    }
+    _signalSuccess();
+    return true;
 }
 
 bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)
@@ -1113,6 +1163,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     // and re-anchors Localization on its own.
     Manipulator.beltTo(Config::BeltStation::MID);
     PathTracker.goTo(kMosaicResetNode);
+    Drive.turnToYaw(Localization.toImuYaw(90));
 
     for (uint8_t i = 0; i < tiles; ++i)
     {
@@ -1130,16 +1181,19 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
 
         if (station != parkedColor || row != parkedRow)
         {
-            // Retract before every chassis move — an extended belt throws the centre of mass
-            // too far off to drive on.
-            Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+            // Retract before every chassis move — an extended belt throws the centre of mass too far off to drive on.
+            Manipulator.beltTo(Config::BeltStation::MID);
             PathTracker.goTo(kMosaicRowNodes[station][row].node);
-            Drive.turnToYaw(90);
+            Drive.turnToYaw(Localization.toImuYaw(90));
 
             parkedColor = station;
             parkedRow   = row;
             chainPos    = kMosaicRowNodes[station][row].chainPos;
         }
+
+        // Show the colour being grabbed — set AFTER the drive so the LED matches the
+        // wall the chassis is physically parked at, not the one it's still driving to.
+        _setLeds(kMosaicStationLed[station]);
 
         // Tiles come off a row in take order, so the slot index is how many are gone.
         const uint8_t slot = (uint8_t)(kMosaicTilesPerRow - stock[station][row]);
@@ -1148,7 +1202,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         --stock[station][row];
     }
 
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    Manipulator.beltTo(Config::BeltStation::MID);
     return true;
 }
 

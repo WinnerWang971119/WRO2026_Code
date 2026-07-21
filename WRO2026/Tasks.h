@@ -73,9 +73,9 @@ public:
     /**
      * @brief Cooperative tick. Call from ``loop()`` alongside the other modules.
      *
-     * Housekeeping only; no FSM state in this plan. Kept as a non-trivial
-     * entry point so the call-site list in ``cooperativeTick()`` does not
-     * churn when a future iteration adds multi-tick task support.
+     * Housekeeping only; no active-task FSM in this plan. Advances the
+     * non-blocking task-fail beep train armed by ``_signalFail`` (fires the
+     * next tone once its gap elapses) and is otherwise idle.
      */
     void update();
 
@@ -168,6 +168,24 @@ public:
 
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
     bool inTask() const;
+
+    /**
+     * @brief Named colours for the on-board RGB LED pair (see ``_setLeds``).
+     *
+     * @note Enumerators are mixed-case on purpose: the OLED library ``#define``s
+     *       the all-caps ``WHITE``/``BLACK`` macros, which would expand inside an
+     *       ``enum class { WHITE }`` and break the build in any TU that includes
+     *       ``MatrixMiniR4.h`` before this header (e.g. ``Mission.cpp``).
+     */
+    enum class LedColor : uint8_t
+    {
+        Off,     ///< Both LEDs dark.
+        White,   ///< R+G+B full.
+        Red,     ///< R full.
+        Green,   ///< G full.
+        Blue,    ///< B full.
+        Yellow,  ///< R+G full.
+    };
 
 private:
     /**
@@ -397,6 +415,34 @@ private:
      */
     bool _waitForBelt(uint32_t timeoutMs, const char* label);
 
+    // --- Result-feedback helpers --------------------------------------------
+    // Non-blocking audible + visual pass/fail cue for a task body. Both light the
+    // two on-board RGB LEDs and drive the buzzer via the non-blocking ``Tone()``
+    // (hardware timer), so they return immediately without spinning the tick.
+
+    /**
+     * @brief Set both on-board RGB LEDs to a named colour.
+     * @param color One of ``LedColor`` (``LedColor::Off`` turns both LEDs off).
+     * @note Drives both LEDs to the same colour at full brightness, matching the
+     *       boot / pass-fail cues. Returns immediately (``setColor`` is non-blocking).
+     */
+    void _setLeds(LedColor color);
+
+    /**
+     * @brief Emit the task-success cue: one short bright chirp + solid green LEDs.
+     * @note Non-blocking — returns immediately; the single tone plays out on the
+     *       hardware timer. Also cancels any in-flight ``_signalFail`` beep train.
+     */
+    void _signalSuccess();
+
+    /**
+     * @brief Emit the task-fail cue: ``Config::TASK_FAIL_BEEPS`` low tones + solid red LEDs.
+     * @note Non-blocking — fires the first tone and returns; ``update()`` emits the
+     *       remaining tones as each gap elapses, so the beeps stay audibly separate
+     *       without blocking the caller. See ``_failBeepsLeft`` / ``_failPhaseStartMs``.
+     */
+    void _signalFail();
+
     /**
      * @brief One planned tile: which wall colour to take it from, and where it goes.
      */
@@ -475,6 +521,21 @@ private:
      *        ``_pumpTick`` fires at most once per run.
      */
     bool _noCallbackWarned = false;
+
+    // --- Non-blocking task-fail beep train (see _signalFail / update) --------
+
+    /**
+     * @brief Task-fail tones still to emit after the first. ``_signalFail`` fires
+     *        tone 1 and sets this to ``Config::TASK_FAIL_BEEPS - 1``; ``update()``
+     *        decrements it as each gap elapses. ``0`` means idle.
+     */
+    uint8_t _failBeepsLeft = 0;
+
+    /**
+     * @brief ``millis()`` when the current task-fail tone started; ``update()``
+     *        fires the next tone once ``TASK_FAIL_BEEP_MS + GAP_MS`` has elapsed.
+     */
+    uint32_t _failPhaseStartMs = 0;
 };
 
 extern TasksClass Tasks;

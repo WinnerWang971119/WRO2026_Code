@@ -422,7 +422,7 @@ namespace Config
      *
      * @note Must be non-negative — enforced by a `ConfigChecks.h` static_assert.
      */
-    constexpr float LINE_APPROACH_MARGIN_CM = 4.0f;
+    constexpr float LINE_APPROACH_MARGIN_CM = 5.0f;
 
     /**
      * @brief Overrun bound (cm) PAST the predicted line crossing before the bounded
@@ -509,9 +509,9 @@ namespace Config
      *          `STOP_AT_LINE_STALL_TIMEOUT_MS` so a genuine wall press trips the inner
      *          stall-success path BEFORE this outer advisory cap fires. If this were smaller, every
      *          wall press would report the advisory timeout instead of success. The static_assert
-     *          below enforces the ordering.
+     *          below enforces the ordering. 
      */
-    constexpr uint32_t WALL_STOP_TIMEOUT_MS = 3000;
+    constexpr uint32_t WALL_STOP_TIMEOUT_MS = 2500;
     static_assert(WALL_STOP_TIMEOUT_MS > STOP_AT_LINE_STALL_TIMEOUT_MS,
                   "Config::WALL_STOP_TIMEOUT_MS must exceed STOP_AT_LINE_STALL_TIMEOUT_MS so a real "
                   "wall press trips the inner stall-success watchdog before the outer advisory "

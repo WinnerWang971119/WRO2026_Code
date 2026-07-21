@@ -69,7 +69,7 @@ namespace Config
     constexpr int16_t PWM_MIN_MAGNITUDE = 45;
 
 #ifndef PWM_MOVING_MIN_DEFAULT
-#define PWM_MOVING_MIN_DEFAULT 32
+#define PWM_MOVING_MIN_DEFAULT 35
 #endif
     /** @brief Kinetic (moving) deadband floor for the tShape/line-stop decel tail.
      *  @warning Load-bearing: consumed by Drive::_updateProfile decel, Drive::setSpeed,
@@ -118,6 +118,34 @@ namespace Config
 
     /** @brief Duration (ms) of the single long boot-FAIL tone. */
     constexpr uint16_t BOOT_FAIL_BEEP_MS = 2000;
+
+    // ---------------------------------------------------------------------------------------
+    // Task result feedback (buzzer + on-board RGB LED)
+    //
+    // Tasks::_signalSuccess / _signalFail give a task an audible + visual result cue.
+    // SUCCESS = one short bright chirp + green LEDs; FAIL = TASK_FAIL_BEEPS low tones
+    // (same low pitch as the boot-fail tone) + red LEDs. Unlike the boot feedback these
+    // run under the cooperative tick, so the on-times and gaps are spun via Tasks::_waitMs
+    // (which keeps every module ticking), never a raw delay().
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Frequency (Hz) of the task-success chirp (bright/high). */
+    constexpr uint16_t TASK_OK_BEEP_HZ = 2000;
+
+    /** @brief On-duration (ms) of the task-success chirp. */
+    constexpr uint16_t TASK_OK_BEEP_MS = 150;
+
+    /** @brief Number of low tones emitted on task failure. */
+    constexpr uint8_t TASK_FAIL_BEEPS = 3;
+
+    /** @brief Frequency (Hz) of each task-fail tone (low/ominous, like boot-fail). */
+    constexpr uint16_t TASK_FAIL_BEEP_HZ = 600;
+
+    /** @brief On-duration (ms) of each task-fail tone. */
+    constexpr uint16_t TASK_FAIL_BEEP_MS = 200;
+
+    /** @brief Silent gap (ms) between consecutive task-fail tones. */
+    constexpr uint16_t TASK_FAIL_BEEP_GAP_MS = 120;
 }    // namespace Config
 
 #endif    // CONFIG_GLOBAL_H

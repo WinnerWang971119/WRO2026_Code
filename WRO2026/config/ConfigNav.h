@@ -99,7 +99,7 @@ namespace Config
      * @note Consumer: `PathTracker`'s SETTLE state (ADR-061).
      */
 #ifndef HOP_SETTLE_MS_DEFAULT
-#define HOP_SETTLE_MS_DEFAULT 100
+#define HOP_SETTLE_MS_DEFAULT 120
 #endif
     constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // TODO bench-tune
 
@@ -110,7 +110,7 @@ namespace Config
      * colinear (e.g. mid-segment projection-node hand-off). 0.5 deg is well below the
      * `Drive.turnToYaw` resolvable range.
      */
-    constexpr float NAV_TURN_TOLERANCE_DEG = 0.5f;
+    constexpr float NAV_TURN_TOLERANCE_DEG = 10.0f;
 
     /**
      * @brief Whether PathTracker passes straight through collinear intersections
@@ -777,7 +777,7 @@ namespace Config
      *       must be applied target-wide (`target_compile_definitions`), never per-TU.
      */
 #ifndef MAX_CHAIN_HOPS_DEFAULT
-#define MAX_CHAIN_HOPS_DEFAULT 8
+#define MAX_CHAIN_HOPS_DEFAULT 16
 #endif
     constexpr uint8_t MAX_CHAIN_HOPS = MAX_CHAIN_HOPS_DEFAULT;
 
