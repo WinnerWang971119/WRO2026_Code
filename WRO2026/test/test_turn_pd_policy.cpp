@@ -169,6 +169,49 @@ static void testPdStepZeroAndNegativeDt()
 }
 
 // -------------------------------------------------------------------------------------------
+// TC3d — turnPdStepRaw: the in-place turn's RAW per-iteration derivative (mentor M_Turn_angle
+// parity, ADR-077). D is `kd*(errNew - errOld)` with NO dt division: errNew==errOld => pure P.
+// -------------------------------------------------------------------------------------------
+static void testPdStepRawPureProportional()
+{
+    check(turnPdStepRaw(90.0f, 90.0f, 1.5f, 10.0f) == 135.0f,
+          "TC3d: errNew==errOld => raw cmd == Kp*errNew (D contributes exactly 0, no dt)");
+}
+
+// -------------------------------------------------------------------------------------------
+// TC3e — turnPdStepRaw superposition + damping: a shrinking error makes the raw D term negative
+// and pulls the command below pure-P, and the full command is exactly P + D. Unlike turnPdStep,
+// the D term is the plain difference (no /dtSec), so it is invariant to any tick timing.
+// -------------------------------------------------------------------------------------------
+static void testPdStepRawDampingOpposesP()
+{
+    const float errNew = 45.0f;
+    const float errOld = 90.0f;
+    const float kp     = 1.5f;
+    const float kd     = 10.0f;
+
+    const float pOnly = turnPdStepRaw(errNew, errOld, kp, 0.0f);
+    const float dOnly = turnPdStepRaw(errNew, errOld, 0.0f, kd);
+    const float pdCmd = turnPdStepRaw(errNew, errOld, kp, kd);
+
+    check(pOnly == kp * errNew, "TC3e: raw P-only term is Kp*errNew (sanity baseline)");
+    check(dOnly < 0.0f, "TC3e: raw D-only term is negative when the error is shrinking");
+    check(dOnly == kd * (errNew - errOld), "TC3e: raw D is exactly kd*(errNew-errOld), NO dt");
+    check(pdCmd < pOnly, "TC3e: full raw PD command is pulled below pure-P by the opposing D");
+    check(approx(pdCmd, pOnly + dOnly), "TC3e: full raw PD command is exactly P + D (superposition)");
+}
+
+// -------------------------------------------------------------------------------------------
+// TC3f — mentor-parity value: `speed = 1.5*error_new + 10*(error_new - error_old)` reproduces
+// M_Turn_angle to the number. error_new=30, error_old=33 (a 3-deg shrink) => 45 + 10*(-3) == 15.
+// -------------------------------------------------------------------------------------------
+static void testPdStepRawMentorParityValue()
+{
+    check(turnPdStepRaw(30.0f, 33.0f, 1.5f, 10.0f) == 15.0f,
+          "TC3f: raw PD equals mentor M_Turn_angle speed (1.5*30 + 10*-3 == 15)");
+}
+
+// -------------------------------------------------------------------------------------------
 // TC4 — turnSlewLimit: growth from rest (prevCmd==0) is bounded by prevCmd + slewPerTick.
 // -------------------------------------------------------------------------------------------
 static void testSlewLimitGrowthFromRest()
@@ -288,6 +331,9 @@ int main()
     testPdStepDtNormalizedInvariance();
     testPdStepDtRatioScaling();
     testPdStepZeroAndNegativeDt();
+    testPdStepRawPureProportional();
+    testPdStepRawDampingOpposesP();
+    testPdStepRawMentorParityValue();
     testSlewLimitGrowthFromRest();
     testSlewLimitGrowthWithinBudget();
     testSlewLimitReversalUnlimited();

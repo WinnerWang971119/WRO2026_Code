@@ -358,7 +358,6 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnBrokeAway      = false;                              // static kick until motion is seen.
     _turnStartYaw       = (float) curYaw;                     // breakaway-motion reference yaw.
     _turnStartMs        = nowMs;    // non-convergence timeout epoch.
-    _turnLastStepMs     = nowMs;    // measured-dt epoch for the time-normalized D term.
     _turnLastGoodReadMs = nowMs;    // persistent-IMU-fault watchdog seed.
 
     // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing extra
@@ -428,7 +427,6 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     _turnBrokeAway      = false;                              // static kick until motion is seen.
     _turnStartYaw       = (float) curYaw;                     // breakaway-motion reference yaw.
     _turnStartMs        = nowMs;    // non-convergence timeout epoch.
-    _turnLastStepMs     = nowMs;    // measured-dt epoch for the time-normalized D term.
     _turnLastGoodReadMs = nowMs;    // persistent-IMU-fault watchdog seed.
 
     (void) blocking;
@@ -1254,17 +1252,16 @@ void DriveClass::_updateTurnProfile()
         _turnBrokeAway = true;
     }
 
-    // One PD step. The derivative is TIME-NORMALIZED by the MEASURED per-tick dt (the ~8 ms tick
-    // jitters to ~11.5 ms and the new gyro may speed the loop up, so dt cannot be assumed
-    // constant). `_turnLastStepMs` spans any skipped (bad-read) ticks, so the rate stays correct
-    // across a transient miss. Modular millis() subtraction is rollover-safe; a same-millis
-    // re-entry yields dt == 0 and `turnPdStep` contributes 0 D term.
-    const uint32_t nowMs = millis();
-    const float    dtSec = (float) (nowMs - _turnLastStepMs) / 1000.0f;
-    _turnLastStepMs      = nowMs;
-
-    // Operator order is a contract (TurnPDPolicy.h): pdStep -> clamp -> slewLimit -> creepFloor.
-    float cmd = turnPdStep(errProg, _turnErrOld, dtSec, Config::TURN_KP, Config::TURN_KD);
+    // One PD step — the mentor's RAW per-iteration difference (`M_Turn_angle` parity, ADR-077):
+    // the D term is `kd*(errNew - errOld)` with NO dt division. ADR-068 originally time-normalized
+    // it (divided by the measured tick), but on our whole-degree gyro + jittery ~8-11.5 ms tick
+    // that turned a single 1-degree quantization step into a timing-dependent D spike and left the
+    // turn under-damped versus the mentor's proven law, so his gains never settled. The
+    // straight-line hold KEEPS the time-normalized `turnPdStep` (`GyroHoldPolicy.h`, ADR-075) — it
+    // rides a clean, non-quantized signal and is a separate, deliberate design.
+    //
+    // Operator order is a contract (TurnPDPolicy.h): pdStepRaw -> clamp -> slewLimit -> creepFloor.
+    float cmd = turnPdStepRaw(errProg, _turnErrOld, Config::TURN_KP, Config::TURN_KD);
 
     // Clamp to the caller's authority (the builder power override, or Config::TURN_CRUISE_PWM). A
     // clamped P term already IS the deceleration ramp — there is no separate slow zone.

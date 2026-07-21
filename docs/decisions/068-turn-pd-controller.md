@@ -1,6 +1,6 @@
 # ADR-068: In-place turns run a per-tick PD controller in `Drive.cpp`, not `TurnGyro`
 
-**Status:** Implemented
+**Status:** Implemented (the time-normalized `Kd*rate` D-term clause is superseded by ADR-077 — the turn's derivative reverts to the mentor's raw per-iteration difference; all other clauses remain in force)
 **Date decided:** 2026-07 (Phase 6)
 
 ## Rule
@@ -74,6 +74,10 @@ one that already has.
 
 ## See also
 
+- [ADR-077](./077-turn-raw-derivative.md) — supersedes this ADR's time-normalized D-term clause:
+  the turn's derivative reverts to the mentor's raw per-iteration difference (`Kd*(errNew -
+  errOld)`, no dt division; `TURN_KP`/`TURN_KD` = 1.5/10). The two-level floor, slew limiter,
+  settle debounce, and FSM structure decided here are unchanged.
 - [ADR-004](./004-pid-stays-on-stm32.md) — its Turn/`TurnGyro`/`TURN_PID_*` clause is
   superseded by this ADR; the Sync and Gyro-straight clauses are unaffected and it remains
   Implemented.
