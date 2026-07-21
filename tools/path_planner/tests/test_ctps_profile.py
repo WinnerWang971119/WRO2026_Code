@@ -27,7 +27,7 @@ Covered cases:
 * **TC6** — the DISPLAY-ONLY constant-rate + settle-allowance turn profile
   (ADR-068 T8; the two-stage slow-zone-angle / slow-stage-PWM knobs it used to
   mirror no longer exist, AC7). (a) Under the DEFAULT Config a turn/pivot
-  sweeps at a SINGLE constant rate derived from ``TURN_CRUISE_PWM = 50``
+  sweeps at a SINGLE constant rate derived from ``TURN_CRUISE_PWM = 60``
   (unsnapped — the real firmware turn path no longer applies ``deadbandSnap``
   to any turn command, AC3), so every ``sample_turn`` sub-keyframe interval is
   evenly timed EXCEPT the last, which also carries the fixed nominal
@@ -830,7 +830,7 @@ def test_tc6_default_config_turn_renders_constant_rate_with_settle_tail(
 ) -> None:
     """TC6(a): with the default Config a turn/pivot renders CONSTANT-RATE.
 
-    ``TURN_CRUISE_PWM = 50`` is read directly, unsnapped (the real firmware
+    ``TURN_CRUISE_PWM = 60`` is read directly, unsnapped (the real firmware
     turn path no longer applies ``deadbandSnap`` to any turn command, AC3), and
     drives a SINGLE angular rate for the whole sweep. ``duration_s()`` is
     exactly the sweep time at that rate plus the fixed nominal settle
@@ -841,7 +841,7 @@ def test_tc6_default_config_turn_renders_constant_rate_with_settle_tail(
     cfg = load_profile_config()
     profile = resolve_turn_profile(90.0, is_pivot=is_pivot)
 
-    assert profile.cruise_pwm == cfg.turn_cruise_pwm == 50
+    assert profile.cruise_pwm == cfg.turn_cruise_pwm == 60
     assert profile.settle_s == pytest.approx(TURN_SETTLE_ALLOWANCE_S)
 
     expected_omega = _expected_omega_deg_s(cfg.turn_cruise_pwm, cfg.track_cm, is_pivot)
@@ -894,18 +894,18 @@ def test_tc6_perturbed_cruise_pwm_scales_the_constant_rate(tmp_path: Path) -> No
 
     baseline_cfg = load_profile_config()
     perturbed_cfg = load_profile_config(perturbed_drive_h)
-    assert baseline_cfg.turn_cruise_pwm == 50
+    assert baseline_cfg.turn_cruise_pwm == 60
     assert perturbed_cfg.turn_cruise_pwm == 80
 
     baseline = resolve_turn_profile(90.0, is_pivot=False, cfg=baseline_cfg)
     perturbed = resolve_turn_profile(90.0, is_pivot=False, cfg=perturbed_cfg)
 
     assert perturbed.cruise_pwm == 80
-    assert perturbed.omega_deg_s == pytest.approx(baseline.omega_deg_s * 80.0 / 50.0)
+    assert perturbed.omega_deg_s == pytest.approx(baseline.omega_deg_s * 80.0 / 60.0)
 
     baseline_sweep_s = baseline.duration_s() - baseline.settle_s
     perturbed_sweep_s = perturbed.duration_s() - perturbed.settle_s
-    assert perturbed_sweep_s == pytest.approx(baseline_sweep_s * 50.0 / 80.0)
+    assert perturbed_sweep_s == pytest.approx(baseline_sweep_s * 60.0 / 80.0)
 
     # The settle allowance is a fixed nominal display constant, not Config-derived.
     assert perturbed.settle_s == pytest.approx(baseline.settle_s)
