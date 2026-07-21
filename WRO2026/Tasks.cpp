@@ -297,8 +297,48 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
     //Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
-    Manipulator.release();
+    //Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
+    //_grabToBin(0);
+
+
+    PathTracker.goTo("MR").setArrivalDirection(Direction::FRONT);
+    Drive.turnToYaw(90);
+    PathTracker.goTo("MYD").setArrivalDirection(Direction::FRONT);
+    Manipulator.dumper.open();
     Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    _grabToBin(0);
+    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
+    _grabToBin(1);
+    PathTracker.goTo("MYU");
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    _grabToBin(2);
+    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
+    _grabToBin(3);
+
+    PathTracker.goTo("MBD");
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    _grabToBin(0);
+    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
+    _grabToBin(1);
+    PathTracker.goTo("MBU");
+    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    _grabToBin(2);
+    Manipulator.beltTo(Config::BeltStation::GRAB_RIGHT);
+    _grabToBin(3);
+    Manipulator.beltTo(Config::BeltStation::MID);
+
+    PathTracker.goTo("i3");
+    Drive.turnToYaw(90);
+
+    PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
+    Manipulator.dump();
+    _waitMs(500);
+    Manipulator.dumpReset();
+    PathTracker.goTo("dump2");
+
+
+    
+
     return true;
 }
 
@@ -992,7 +1032,8 @@ namespace
 
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("CY3").setArrivalDirection(Direction::FRONT);
+    PathTracker.goTo("i3");
+    Drive.turnToYaw(90);
     return _visionRead();
 }
 
@@ -1128,14 +1169,14 @@ bool TasksClass::debries(const TaskArgs& /*args*/)
 bool TasksClass::dumpMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
-    Manipulator.dump();
-    Manipulator.dumpReset();
+    Manipulator.dumper.open();
+    Manipulator.dumper.close();
     PathTracker.goTo("dump2").setArrivalDirection(Direction::REAR);
-    Manipulator.dump();
-    Manipulator.dumpReset();
+    Manipulator.dumper.open();
+    Manipulator.dumper.close();
     PathTracker.goTo("dump3").setArrivalDirection(Direction::REAR);
-    Manipulator.dump();
-    Manipulator.dumpReset();
+    Manipulator.dumper.open();
+    Manipulator.dumper.close();
     return true;
 }
 

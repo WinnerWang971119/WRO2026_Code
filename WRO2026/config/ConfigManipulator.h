@@ -78,7 +78,7 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 105, 7.0f, 80, true };  
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 97, 7.0f, 80, true };  
     /** @brief Dumper servo calibration. TODO calibrate. */
     constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  78, 33, 18, 5.0f, 80, false };  
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
@@ -87,7 +87,7 @@ namespace Config
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 102, 126};  
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 126};  
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
@@ -258,9 +258,9 @@ namespace Config
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
         { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
         { BeltMode::POSITION,    1380,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
-        { BeltMode::POSITION,    860,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
-        { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
-        { BeltMode::POSITION,    940,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
+        { BeltMode::POSITION,    920,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
+        { BeltMode::POSITION,    400,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
+        { BeltMode::POSITION,    5,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
     };
 }    // namespace Config
 
