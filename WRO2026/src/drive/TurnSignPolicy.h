@@ -110,30 +110,25 @@ inline int8_t turnSign(int32_t foldedDelta)
  */
 inline TurnWheels turnWheelPattern(int8_t sign, int16_t pwmMag, uint8_t mode)
 {
-    // DIRECTION FIX (bench 2026-07): the original convention (`L=-sign, R=+sign`) drove THIS
-    // chassis the wrong physical way — a commanded CCW/left turn (`sign=+1`) spun it CW/right, so
-    // the yaw error grew and every turn ran away to timeout (confirmed on-robot). Yaw sign is
-    // correct, so the actuation is the inverted side; the two wheel signs are negated below.
-    // NOTE: `test_turn_sign_policy` still asserts the OLD convention and will need updating.
     int16_t L = 0;
     int16_t R = 0;
     switch (mode)
     {
     case 0:    // COUNTER_ROT — both wheels spin opposite directions.
-        L = (int16_t) (+sign * pwmMag);
-        R = (int16_t) (-sign * pwmMag);
+        L = (int16_t) (-sign * pwmMag);
+        R = (int16_t) (+sign * pwmMag);
         break;
     case 1:    // PIVOT_LEFT — left wheel stationary, right wheel drives the rotation.
         L = 0;
-        R = (int16_t) (-sign * pwmMag);
+        R = (int16_t) (+sign * pwmMag);
         break;
     case 2:    // PIVOT_RIGHT — right wheel stationary, left wheel drives the rotation.
-        L = (int16_t) (+sign * pwmMag);
+        L = (int16_t) (-sign * pwmMag);
         R = 0;
         break;
     default:    // Unknown mode — fall back to counter-rotation rather than refusing to turn.
-        L = (int16_t) (+sign * pwmMag);
-        R = (int16_t) (-sign * pwmMag);
+        L = (int16_t) (-sign * pwmMag);
+        R = (int16_t) (+sign * pwmMag);
         break;
     }
 
