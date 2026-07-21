@@ -1035,7 +1035,7 @@ namespace
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i3");
-    Drive.turnDeg(-90);
+    Drive.turnToYaw(Localization.toImuYaw(90));
     return _visionRead();
 }
 

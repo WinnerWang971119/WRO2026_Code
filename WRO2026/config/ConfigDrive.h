@@ -930,13 +930,13 @@ namespace Config
     // =============================================================================
 
     /** @brief PWM units gained per cm of travel during the ramp phase. */
-    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 4.0f;
+    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 3.5f;
 
     /** @brief Floor on the per-side ramp distance — never shorter than this (cm). */
     constexpr float TSHAPE_RAMP_MIN_CM = 5.0f;
 
     /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
-    constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
+    constexpr float TSHAPE_RAMP_MAX_CM = 22.0f;
 
     /**
      * @brief Default starting speed for a profiled move (raw PWM).
