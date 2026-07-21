@@ -10,6 +10,7 @@
 #include "src/drive/Drive.h"
 #include "src/drive/LineFollower.h"
 #include "src/perception/Vision.h"
+#include "src/nav/Localization.h"
 
 #include <Arduino.h>
 #ifdef CTPS_RECORD
@@ -336,13 +337,8 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     Manipulator.dumpReset();
     PathTracker.goTo("dump2");*/
 
-    
-    
-    
+    Drive.turnToYaw(Localization.toImuYaw(180));
 
-    Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
-    Manipulator.beltTo(Config::BeltStation::REAR_BOX_OPEN);
-    Manipulator.beltTo(Config::BeltStation::MID);
     
 
     return true;

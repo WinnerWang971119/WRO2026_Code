@@ -36,6 +36,17 @@ class LocalizationClass
 public:
     /** @brief No-op re-anchor — the dump does not model graph position. */
     void declarePosition(uint8_t /*nodeId*/) {}
+
+    /**
+     * @brief World->IMU yaw conversion — IDENTITY in the CTPS world frame.
+     *
+     * The real `toImuYaw` maps a world heading into the gyro frame via the live
+     * yaw offset. The CTPS dump has no physical gyro and records turns as absolute
+     * WORLD headings (`ctps_mocks/Drive.h`'s `TurnToYawBuilder` re-emits the target
+     * unchanged), so the correct shadow is the identity: a task body's
+     * `Drive.turnToYaw(Localization.toImuYaw(180))` records a turn to WORLD 180.
+     */
+    int16_t toImuYaw(float worldHeadingDeg) const { return (int16_t) worldHeadingDeg; }
 };
 
 /** @brief Single global instance — defined in ctps_record.cpp. */

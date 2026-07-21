@@ -63,6 +63,16 @@ public:
         lastDeclaredNode = nodeId;
         declareCount++;
     }
+
+    /**
+     * @brief World->IMU yaw conversion — identity shadow.
+     *
+     * Heading math is not modelled here (the mission-dispatch tests assert task /
+     * queue behaviour, not heading values). Present only so a `Tasks.cpp` task body
+     * that calls `Localization.toImuYaw(...)` links against this shadow instead of
+     * dragging in the real translation unit (Drive / MatrixMiniR4 / IMU chain).
+     */
+    int16_t toImuYaw(float worldHeadingDeg) const { return (int16_t) worldHeadingDeg; }
 };
 
 // Single global instance — `inline` (force-included only into `test_mission_dispatch`;
