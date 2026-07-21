@@ -110,13 +110,11 @@ inline int8_t turnSign(int32_t foldedDelta)
  */
 inline TurnWheels turnWheelPattern(int8_t sign, int16_t pwmMag, uint8_t mode)
 {
-    // EXPERIMENTAL DIRECTION FLIP (bench): the shipped convention (`L=-sign, R=+sign`) drove this
-    // chassis the WRONG physical way — a commanded CCW/left turn spun it CW/right, so the yaw error
-    // grew and every turn ran away (trace 2026-07). Yaw sign is confirmed correct, so the actuation
-    // is the inverted sign; negated here. If turns now converge but end at a MIRRORED heading, the
-    // real culprit was GYRO_YAW_SIGN instead — revert this and flip that. Host tests
-    // (test_turn_sign_policy / test_turn_profile_integration) still encode the OLD convention and
-    // will need updating before this is committed.
+    // DIRECTION FIX (bench 2026-07): the original convention (`L=-sign, R=+sign`) drove THIS
+    // chassis the wrong physical way — a commanded CCW/left turn (`sign=+1`) spun it CW/right, so
+    // the yaw error grew and every turn ran away to timeout (confirmed on-robot). Yaw sign is
+    // correct, so the actuation is the inverted side; the two wheel signs are negated below.
+    // NOTE: `test_turn_sign_policy` still asserts the OLD convention and will need updating.
     int16_t L = 0;
     int16_t R = 0;
     switch (mode)

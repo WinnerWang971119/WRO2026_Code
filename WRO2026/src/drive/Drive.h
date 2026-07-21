@@ -56,10 +56,6 @@
                                    // <stdint.h> + TShapeProfilePolicy.h only, no Arduino/Config
                                    // surface — needed here because `_stopApproachSchedule` is a
                                    // by-value `ApproachSchedule` member below.
-#include "TurnProfilePolicy.h"    // In-place turn phase profile (ADR-078): `TurnPhase` enum +
-                                   // phaseFor/profileSpeed/settleNudge. Header-only pure policy
-                                   // (transitively pulls TurnPDPolicy.h); needed here because
-                                   // `_turnPhase` is a by-value `TurnPhase` member below.
 
 // Forward declarations so DriveClass can name-friend the builders before they are defined.
 class DriveDistBuilder;
@@ -800,32 +796,27 @@ private:
                                         ///< stale prev ⇒ the D term is exactly 0.
 
     // -------------------------------------------------------------------------------------
-    // Turn profile state machine (ADR-078 — replaces MiniR4.DriveDC.TurnGyro, the earlier
-    // two-stage cruise/slow-zone bang-bang, AND the ADR-068/077 per-tick PD controller).
+    // Turn PD controller state machine (ADR-068 — replaces MiniR4.DriveDC.TurnGyro AND the
+    // earlier two-stage cruise/slow-zone profile).
     //
     // Parallel to the trapezoidal move profile above, but for in-place turns. The lower-MCU
-    // `TurnGyro` primitive overshoots noticeably; the two-stage bang-bang that first replaced it
-    // could not reach its own tolerance band; and the per-tick PD law that followed still hunted
-    // on our slow, jittery cooperative tick (a whole-degree gyro + varying dt made the D term
-    // timing-dependent). All are superseded by a monotonic gated speed profile on the
-    // progress-frame error: a from-rest breakaway kick until motion is seen, then fixed-fast
-    // CRUISE while far from target, a hard switch to fixed-slow CREEP inside a wide window, and a
-    // terminal SETTLE that lightly P-nudges the residual to zero and releases (brake, motors off).
-    // Every phase commands `copysignf(speed, errProg)`, so an overshoot reverses the wheels in any
-    // phase — no derivative term anywhere, which makes it immune to loop-rate. The pure decision
-    // math lives in `TurnProfilePolicy.h` (`turnPhaseFor`/`turnProfileSpeed`/`turnSettleNudge`, the
-    // settle debounce stays in `TurnPDPolicy.h`); `_updateTurnProfile()` feeds it the measured yaw
-    // and dispatches the resulting command through `turnWheelPattern`. Hooked into `Drive.update()`
-    // parallel to `_updateProfile()`.
+    // `TurnGyro` primitive overshoots noticeably, and the two-stage bang-bang that first replaced
+    // it could not reach its own tolerance band (a per-tick int16_t yaw truncation quantized the
+    // error to whole degrees). Both are superseded by ONE per-tick PD step
+    // (`Kp*err + Kd*d(err)/dt`), clamped to the caller's power, slew-limited on the ramp-up, and
+    // creep-floored where the P term loses authority. The pure decision math lives in
+    // `TurnPDPolicy.h`; `_updateTurnProfile()` feeds it the measured yaw + dt and dispatches the
+    // resulting command through `turnWheelPattern`. Hooked into `Drive.update()` parallel to
+    // `_updateProfile()`.
     // -------------------------------------------------------------------------------------
     /**
-     * @brief State of the in-flight turn profile (parallel to ProfileState).
+     * @brief State of the in-flight turn PD controller (parallel to ProfileState).
      *
-     * Collapsed to a plain IDLE/ACTIVE signal: it only tracks whether a turn owns the wheels. The
-     * breakaway/CRUISE/CREEP/SETTLE staging lives in the separate `_turnPhase` member (ADR-078),
-     * not here. `IDLE` means no turn is in flight and `_updateTurnProfile()` short-circuits;
-     * `ACTIVE` means the turn profile owns the wheels. `_updateWallStop()` polls this (`!= IDLE`)
-     * to know when a SQUARE-phase in-place turn has finished before it seeds the push.
+     * Collapsed to a plain IDLE/ACTIVE signal: the PD is a single continuous control law, not a
+     * staged profile, so there are no CRUISE/SLOW/BRAKE phases to distinguish. `IDLE` means no
+     * turn is in flight and `_updateTurnProfile()` short-circuits; `ACTIVE` means the per-tick PD
+     * owns the wheels. `_updateWallStop()` polls this (`!= IDLE`) to know when a SQUARE-phase
+     * in-place turn has finished before it seeds the push.
      */
     enum class TurnProfileState : uint8_t
     {
@@ -834,8 +825,8 @@ private:
     };
 
     TurnProfileState _turnProfileState = TurnProfileState::IDLE;
-    ///< @brief Current turn profile state. `IDLE` = no turn in flight; `ACTIVE` = the turn profile
-    ///<        (`_updateTurnProfile()`) owns the wheels.
+    ///< @brief Current turn PD state. `IDLE` = no turn in flight; `ACTIVE` = the per-tick PD
+    ///<        controller (`_updateTurnProfile()`) owns the wheels.
 
     float _turnTargetYaw = 0.0f;
     ///< @brief Absolute app-frame (CCW-positive) yaw target for the in-flight turn, in degrees,
@@ -871,13 +862,13 @@ private:
     uint8_t _turnMotorMode = 0;
 
     int16_t _turnCruisePwm = Config::TURN_CRUISE_PWM;
-    ///< @brief CRUISE-phase PWM magnitude for the in-flight turn profile (ADR-078). Captured from
+    ///< @brief Authority-clamp PWM magnitude for the in-flight turn PD (ADR-068). Captured from
     ///<        `cmd.power` at dispatch time by `_execTurnDeg`/`_execTurnToYaw`, defaulting to
     ///<        `Config::TURN_CRUISE_PWM` when the caller did not override via `.setPower(...)` on
-    ///<        the builder. Non-positive overrides fall back to the Config default. Passed as the
-    ///<        `cruisePwm` argument to `TurnProfilePolicy.h::turnProfileSpeed`, so the `.setPower()`
-    ///<        override — NOT the raw `Config::TURN_CRUISE_PWM` — sets the fixed-fast CRUISE speed
-    ///<        (CREEP uses `Config::TURN_CREEP_PWM`, SETTLE uses the clamped nudge).
+    ///<        the builder. Non-positive overrides fall back to the Config default. The raw PD
+    ///<        command `Kp*err + Kd*d(err)/dt` is clamped to `±this` before the slew limiter and
+    ///<        creep floor — a clamped P term already IS the deceleration ramp, so there is no
+    ///<        separate slow-zone magnitude.
 
     bool _turnProfileBrakeOnDone = true;
     ///< @brief Whether to engage the active brake at completion of the turn profile.
@@ -892,14 +883,19 @@ private:
     ///<        Config::TURN_IMU_STALL_TIMEOUT_MS)` trips, the turn hard-stops and latches
     ///<        `Fault::IMU_READ_FAILED` so a sustained read failure cannot spin unbounded.
 
-    TurnPhase _turnPhase = TurnPhase::CRUISE;
-    ///< @brief Monotonic profile phase for the in-flight turn (ADR-078). Seeded to
-    ///<        `TurnPhase::CRUISE` at dispatch (`_execTurnDeg`/`_execTurnToYaw`) and advanced every
-    ///<        tick by the max-latch `if (turnPhaseFor(...) > _turnPhase) _turnPhase = ...` in
-    ///<        `_updateTurnProfile()` — it only ever moves forward CRUISE→CREEP→SETTLE, never back,
-    ///<        even if a later read shows the error back above the window. The `TurnPhase` uint8_t
-    ///<        ordering (`CRUISE=0 < CREEP=1 < SETTLE=2`) is LOAD-BEARING: the latch's relational
-    ///<        compare depends on it (see `TurnProfilePolicy.h`).
+    float _turnErrOld = 0.0f;
+    ///< @brief Previous tick's PROGRESS-frame error (deg), for the mentor's RAW per-iteration
+    ///<        derivative in `TurnPDPolicy.h::turnPdStepRaw` (`kd*(errNew - errOld)`, no dt division;
+    ///<        ADR-077). Seeded at dispatch to the initial error magnitude (so the D term
+    ///<        contributes ~0 on the first tick), refreshed on every PD tick by
+    ///<        `_updateTurnProfile()`.
+
+    float _turnPrevSpeed = 0.0f;
+    ///< @brief Previous tick's EMITTED (post-creep-floor) progress-frame command, for the ramp-up
+    ///<        slew limiter (`TurnPDPolicy.h::turnSlewLimit`). Tracking the POST-creep value is
+    ///<        load-bearing: storing the pre-creep value would re-snap a command growing off the
+    ///<        creep floor back to creep every tick and lock the ramp at the creep speed. Seeded
+    ///<        at dispatch to `Config::TURN_BREAKAWAY_PWM` so the ramp starts at the breakaway floor.
 
     uint8_t _turnInBandCount = 0;
     ///< @brief Consecutive in-band sample count for the settle debounce
@@ -912,13 +908,10 @@ private:
 
     bool _turnBrokeAway = false;
     ///< @brief Latched false→true once the chassis has demonstrably started rotating this turn
-    ///<        (`|yaw - _turnStartYaw| >= Config::TURN_BREAKAWAY_MOTION_DEG`). While false, the
-    ///<        profile commands the STATIC `Config::TURN_BREAKAWAY_PWM` kick regardless of phase so
-    ///<        the spin breaks away from rest (even a small `|err| <= window` turn that would
-    ///<        otherwise creep from a dead stop and stall); once true, the command is phase-driven
-    ///<        (CRUISE=`_turnCruisePwm`, CREEP=kinetic `Config::TURN_CREEP_PWM`, SETTLE=nudge). The
-    ///<        static breakaway floor is higher than the kinetic creep (measured 44 vs 38 — a spin
-    ///<        scrubs the tires, so starting costs more torque than sustaining).
+    ///<        (`|yaw - _turnStartYaw| >= Config::TURN_BREAKAWAY_MOTION_DEG`). While false the PD
+    ///<        floors its command to the STATIC `Config::TURN_BREAKAWAY_PWM` so the spin breaks away
+    ///<        from rest; once true it drops to the kinetic `Config::TURN_CREEP_PWM` (bench: 44 vs
+    ///<        38 — a spin scrubs the tires, so starting costs more torque than sustaining).
 
     float _turnStartYaw = 0.0f;
     ///< @brief Corrected yaw (deg) captured at turn dispatch — the reference the breakaway detector
@@ -1315,21 +1308,15 @@ private:
     void _updateProfile();
 
     /**
-     * @brief Cooperative tick for the turn profile controller (ADR-078 — replaces
-     *        `MiniR4.DriveDC.TurnGyro`, the earlier two-stage profile, and the ADR-068/077 PD law).
-     *        Reads the IMU yaw as a FLOAT, computes the folded progress-frame error to
-     *        `_turnTargetYaw`, and runs a monotonic gated speed profile: a from-rest
-     *        `Config::TURN_BREAKAWAY_PWM` kick until motion is seen, then fixed-fast CRUISE
-     *        (`_turnCruisePwm`) while far from target, a hard switch to fixed-slow CREEP
-     *        (`Config::TURN_CREEP_PWM`) inside `Config::TURN_CREEP_WINDOW_DEG`, and a terminal
-     *        SETTLE that P-nudges the residual (`Config::TURN_SETTLE_KP`, clamped to
-     *        `±TURN_CREEP_PWM`) to zero. Every phase dispatches `copysignf(speed, errProg)` via
-     *        `turnWheelPattern(_turnDeltaSign, cmd, _turnMotorMode)` as `Move(L, R)` (NO
-     *        `deadbandSnap` — the profile speeds ARE the floors), so an overshoot reverses in any
-     *        phase. The phase latches monotonically forward (`_turnPhase`), never regressing.
-     *        Exits on `Config::TURN_SETTLE_SAMPLES` consecutive in-band samples (brake + done) or
-     *        on `Config::TURN_TIMEOUT_MS` (brake + log residual + done, WITHOUT a fault or queue
-     *        clear). Idempotent / no-op when `_turnProfileState == IDLE`.
+     * @brief Cooperative tick for the turn PD controller (ADR-068 — replaces
+     *        `MiniR4.DriveDC.TurnGyro` and the earlier two-stage profile). Reads the IMU yaw as a
+     *        FLOAT, computes the folded progress-frame error to `_turnTargetYaw`, and runs ONE PD
+     *        step per tick: `Kp*err + Kd*d(err)/dt` → clamp to `±_turnCruisePwm` → slew-limit →
+     *        creep-floor → dispatch via `turnWheelPattern(_turnDeltaSign, cmd, _turnMotorMode)` as
+     *        `Move(L, R)` (NO `deadbandSnap`). Exits on `Config::TURN_SETTLE_SAMPLES` consecutive
+     *        in-band samples (brake + done) or on `Config::TURN_TIMEOUT_MS` (brake + log residual +
+     *        done, WITHOUT a fault or queue clear). Idempotent / no-op when
+     *        `_turnProfileState == IDLE`.
      *
      * @note Hook ordering inside `Drive.update()`: drain-task-done bit →
      *       `_updateProfile()` → `_updateTurnProfile()` → `_dispatchNext`. The

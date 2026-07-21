@@ -2604,47 +2604,47 @@ target_compile_definitions(test_drive_decel_floor_identity
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
 
 # =========================================================================================
-# Test executable #30 — TurnProfilePolicy unit tests (ADR-078, T4 / TC1–TC8).
+# Test executable #30 — TurnPDPolicy unit tests (ADR-068, T5 / TC1–TC8).
 #
-# Pure decision math for the gated speed-profile turn executor (breakaway -> CRUISE -> CREEP ->
-# SETTLE). `TurnProfilePolicy.h` (which pulls in the kept-kernel `TurnPDPolicy.h`) is
-# deliberately self-contained (`<math.h>` + `<stdint.h>` only — zero Arduino / Config.h surface),
-# so this target needs NO mocks and NO MOCK_SOURCES, exactly like `test_turn_sign_policy` /
+# Pure decision math for the per-tick PD turn executor. `TurnPDPolicy.h` is deliberately
+# self-contained (`<math.h>` + `<stdint.h>` only — zero Arduino / Config.h surface), so this
+# target needs NO mocks and NO MOCK_SOURCES, exactly like `test_turn_sign_policy` /
 # `test_pivot_trim_policy`. Every tunable is injected as a parameter, which is what makes the
 # control law testable in isolation from the Drive FSM.
 # =========================================================================================
-add_executable(test_turn_profile_policy
-    ${TEST_DIR}/test_turn_profile_policy.cpp
+add_executable(test_turn_pd_policy
+    ${TEST_DIR}/test_turn_pd_policy.cpp
 )
-target_include_directories(test_turn_profile_policy PRIVATE ${SKETCH_DIR})
-add_test(NAME turn_profile_policy COMMAND test_turn_profile_policy)
+target_include_directories(test_turn_pd_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME turn_pd_policy COMMAND test_turn_pd_policy)
 
 # =========================================================================================
-# Test executable #31 — Turn profile controller stateful integration (ADR-078, T4, TC9-TC18).
+# Test executable #31 — Turn PD controller stateful integration (ADR-068, T6, TC9-TC17).
 #
-# Stateful test of the turn FSM: links the REAL Drive.cpp + YawSource.cpp per the issue-#106
-# host-link recipe (SKETCH_DIR FIRST, path_mocks.cpp NOT hal_mocks.cpp, NO force-included
-# hal_mocks/Drive.h) so the dispatched MiniR4.DriveDC PWM is observable end-to-end, post-
-# breakaway-gate, post-phase-latch — not just the pure TurnProfilePolicy.h math (already covered
-# in isolation by test_turn_profile_policy). PathTracker/Localization/routes are NOT linked —
-# Drive.cpp does not touch any of them, so this target stays the minimal three-file link.
+# First stateful test of the turn FSM: links the REAL Drive.cpp + YawSource.cpp per the
+# issue-#106 host-link recipe (SKETCH_DIR FIRST, path_mocks.cpp NOT hal_mocks.cpp, NO
+# force-included hal_mocks/Drive.h) so the dispatched MiniR4.DriveDC PWM is observable
+# end-to-end, post-creep-floor, post-slew-limit — not just the pure TurnPDPolicy.h math
+# (already covered in isolation by test_turn_pd_policy). PathTracker/Localization/routes are
+# NOT linked — Drive.cpp does not touch any of them, so this target stays the minimal
+# three-file link.
 # =========================================================================================
-add_executable(test_turn_profile_integration
-    ${TEST_DIR}/test_turn_profile_integration.cpp
+add_executable(test_turn_pd_integration
+    ${TEST_DIR}/test_turn_pd_integration.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
     ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_turn_profile_integration PRIVATE
+target_include_directories(test_turn_pd_integration PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
-add_path_force_includes(test_turn_profile_integration)   # EventTrace + path_mocks peripherals — no routes needed.
-add_test(NAME turn_profile_integration COMMAND test_turn_profile_integration)
+add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks peripherals — no routes needed.
+add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
 
 # =========================================================================================
 # GYRO straight heading-hold PD — pure decision math (GyroHoldPolicy.h, ADR-075, T7, TC1-6).
 # Self-contained header (only TurnPDPolicy.h / TurnSignPolicy.h, <math.h>/<stdint.h>), so NO
-# mocks — exactly like test_turn_profile_policy. Every tunable is injected as a parameter.
+# mocks — exactly like test_turn_pd_policy. Every tunable is injected as a parameter.
 # =========================================================================================
 add_executable(test_gyro_hold_policy
     ${TEST_DIR}/test_gyro_hold_policy.cpp
@@ -2654,7 +2654,7 @@ add_test(NAME gyro_hold_policy COMMAND test_gyro_hold_policy)
 
 # =========================================================================================
 # GYRO straight heading-hold PD — stateful integration (ADR-075, T7, TC7-TC11 + hitch).
-# Mirrors test_turn_profile_integration: links the REAL Drive.cpp + EncoderSource.cpp +
+# Mirrors test_turn_pd_integration: links the REAL Drive.cpp + EncoderSource.cpp +
 # YawSource.cpp + path_mocks.cpp so the dispatched MiniR4.DriveDC.Move(L,R) is observable
 # end-to-end. Added to the GYRO_SCALE/YAW_SIGN pinning foreach below (YawSource-linked).
 # =========================================================================================
@@ -2896,7 +2896,7 @@ foreach(_yawsrc_target IN ITEMS
     test_drive_decel_floor_identity
     test_drive_hardening
     test_path_tracker_lost_line
-    test_turn_profile_integration
+    test_turn_pd_integration
     test_gyro_hold_integration
 )
     target_compile_definitions(${_yawsrc_target} PRIVATE

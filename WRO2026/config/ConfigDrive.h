@@ -518,20 +518,14 @@ namespace Config
                   "timeout — otherwise every successful press would mis-report as a timeout.");
 
     // ---------------------------------------------------------------------------------------
-    // Turn profile controller (ADR-078) — gated speed profile: breakaway kick -> CRUISE ->
-    // CREEP -> terminal SETTLE.
+    // Turn PD controller (ADR-068) — per-tick PD + kinetic creep floor + slew-limited ramp-up.
     //
-    // Replaces `MiniR4.DriveDC.TurnGyro`, the earlier two-stage cruise/slow-zone TurnGyro state
-    // machine (2026-05-17 PR4 plan), and the per-tick PD controller (ADR-068, ADR-077). The
-    // profile keeps ADR-068's from-rest static breakaway kick (a differential spin must break
-    // static scrub friction to start) but replaces the continuous PD law with a monotonic
-    // error-zone phase: fixed-fast CRUISE while far from target, a hard switch to fixed-slow
-    // CREEP inside a wide window, and a SETTLE phase that lightly P-nudges any residual to zero.
-    // Every phase commands `copysign(speed, errProg)` so an overshoot in any phase reverses
-    // toward the target. This is immune to loop-rate jitter: a fixed creep speed can only carry
-    // a fraction of a degree per slow tick. Pure decision math lives in `TurnProfilePolicy.h`;
-    // these constants are the tunables `Drive::_updateTurnProfile` feeds into it. See ADR-078
-    // for the full rationale.
+    // Replaces `MiniR4.DriveDC.TurnGyro` AND the earlier two-stage cruise/slow-zone TurnGyro
+    // state machine (2026-05-17 PR4 plan, now superseded). Ported from the mentor's
+    // competition-verified `M_Turn_angle` (`Meat_code/wro20260714_大通道gyro+16路2ms_RT.mbr4`),
+    // with one addition the mentor's light TT chassis does not need (the slew limiter, for the
+    // heavier Lofaix chassis). Pure decision math lives in `TurnPDPolicy.h`; these constants are
+    // the tunables `Drive::_updateTurnProfile` feeds into it. See ADR-068 for the full rationale.
     // ---------------------------------------------------------------------------------------
 
     /**
@@ -540,10 +534,11 @@ namespace Config
      * Two roles:
      *   1. Default value of `TurnDegBuilder::_power` / `TurnToYawBuilder::_power`;
      *      callers can override per-call via `.setPower(...)` on the builder.
-     *   2. CRUISE magnitude of the phase profile (ADR-078): the fixed-fast speed the
-     *      turn commands far from target (`absErr > TURN_CREEP_WINDOW_DEG`), before the
-     *      hard switch to the fixed-slow `TURN_CREEP_PWM`. This is still the builder's
-     *      `.setPower()` default when no per-call override is given (role 1 above).
+     *   2. Authority clamp for the per-tick turn PD controller (ADR-068): the raw
+     *      `Kp*err + Kd*d(err)/dt` command is clamped to `±power` (this constant,
+     *      absent a per-call override) BEFORE the slew limiter and creep floor are
+     *      applied. A clamped P term already IS the deceleration ramp — there is no
+     *      separate slow zone or terminal stage.
      *
      * @note **Compile-time override:** guarded by `#ifndef TURN_CRUISE_PWM_DEFAULT` so a
      *       host test can pin it target-wide via `-DTURN_CRUISE_PWM_DEFAULT=...` without
@@ -552,79 +547,109 @@ namespace Config
      * @note TODO: tune on real chassis.
      */
 #ifndef TURN_CRUISE_PWM_DEFAULT
-#define TURN_CRUISE_PWM_DEFAULT 55
+#define TURN_CRUISE_PWM_DEFAULT 50
 #endif
     constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
     /**
-     * @brief Distance (deg) above which the turn profile runs CRUISE, and at/below which it hands
-     *        off to CREEP (ADR-078, `TurnProfilePolicy.h::turnPhaseFor`).
+     * @brief Proportional gain for the per-tick turn PD controller (ADR-068, ADR-077), in PWM per
+     *        degree.
      *
-     * A wide window (25 deg) gives the chassis's rotational momentum room to bleed off before the
-     * hard cruise-to-creep switch, instead of a narrow band that would still be carrying cruise
-     * speed at the handoff. `absErr > TURN_CREEP_WINDOW_DEG` -> CRUISE;
-     * `TURN_TOLERANCE_DEG < absErr <= TURN_CREEP_WINDOW_DEG` -> CREEP;
-     * `absErr <= TURN_TOLERANCE_DEG` -> SETTLE.
+     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 1.5` (his newest 2026-07
+     * revision, which also matches his straight-drive `gyro_move` gain; the prior revision used
+     * `Kp = 2`, and one before that `Kp = 1`). Kp maps a degree error straight to a PWM.
+     * `TurnPDPolicy.h::turnPdStepRaw` computes `Kp * errNew` before the D term, clamp, slew, and
+     * creep floor.
      *
-     * @note Must sit strictly above `TURN_TOLERANCE_DEG`, or there is no CREEP zone at all —
-     *       enforced by a `ConfigChecks.h` static_assert.
-     * @note TODO: bench-tune (T11).
+     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
-#ifndef TURN_CREEP_WINDOW_DEG_DEFAULT
-#define TURN_CREEP_WINDOW_DEG_DEFAULT 25.0f
+#ifndef TURN_KP_DEFAULT
+#define TURN_KP_DEFAULT 1.5f
 #endif
-    constexpr float TURN_CREEP_WINDOW_DEG = TURN_CREEP_WINDOW_DEG_DEFAULT;
+    constexpr float TURN_KP = TURN_KP_DEFAULT;
 
     /**
-     * @brief KINETIC creep floor (PWM magnitude) the turn profile commands while in the CREEP
-     *        phase (ADR-078, `TurnProfilePolicy.h::turnProfileSpeed`).
+     * @brief RAW per-iteration derivative gain for the turn PD controller (ADR-077), in PWM per
+     *        degree of per-tick error change — the mentor's gain, applied WITHOUT dt division.
+     *
+     * The mentor's `M_Turn_angle` computes `error = error_new - error_old` (the raw change in error
+     * between two consecutive PD ticks) and `speed = Kp*error_new + Kd*error`, with NO division by
+     * elapsed time. `TurnPDPolicy.h::turnPdStepRaw` reproduces that exactly, so his proven
+     * `Kd_raw = 10` transfers verbatim. ADR-068 originally TIME-NORMALIZED this (dividing by the
+     * measured tick, `TURN_KD ~= Kd_raw * loop_period ~= 0.06`), but on our whole-degree gyro plus
+     * jittery ~8-11.5 ms tick that turned a single 1-degree quantization step into a
+     * timing-dependent D spike (~5..15 PWM for the same physical event) and left the turn
+     * under-damped, so the mentor's gains never settled; ADR-077 reverted to his raw model. The
+     * straight-line heading hold keeps the time-normalized `turnPdStep` (ADR-075) — it does not
+     * read a quantized signal near zero, so it is unaffected.
+     *
+     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
+     */
+#ifndef TURN_KD_DEFAULT
+#define TURN_KD_DEFAULT 10.0f
+#endif
+    constexpr float TURN_KD = TURN_KD_DEFAULT;
+
+    /**
+     * @brief Threshold (PWM magnitude) below which the turn PD stops modulating and emits the
+     *        fixed kinetic creep floor instead (ADR-068, `TurnPDPolicy.h::turnCreepFloor`).
+     *
+     * `TURN_CREEP_PWM` plus a 5-PWM headroom margin, so a command handing off to the creep floor
+     * has a small band to land in instead of chattering across the boundary tick-to-tick.
+     *
+     * Robot-verified 2026-07: the bench-measured 43 (over a 38 creep) collapsed the whole final
+     * ~21 deg of a turn to a flat, fast creep and overshot a 90 deg turn to ~120. Lowered to the
+     * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
+     */
+#ifndef TURN_CREEP_THRESH_PWM_DEFAULT
+#define TURN_CREEP_THRESH_PWM_DEFAULT 25
+#endif
+    constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
+
+    /**
+     * @brief KINETIC creep floor (PWM magnitude) the turn PD emits once it loses authority
+     *        (`|cmd| < TURN_CREEP_THRESH_PWM`), ADR-068.
      *
      * The lowest PWM that reliably SUSTAINS rotation once the chassis is already turning — NOT the
      * static breakaway floor (`TURN_BREAKAWAY_PWM`, the higher PWM needed to START an in-place spin
      * from rest, measured HIGHER than this because a spin scrubs the tires sideways). Do not reuse
-     * `deadbandSnap` / `PWM_MIN_MAGNITUDE` here.
+     * `deadbandSnap` / `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the
+     * creep floor is not deadbandSnap").
      *
-     * Bench-measured Lofaix kinetic sustain floor (ADR-068): 38, not the earlier 20. The mentor's
-     * proven tail of 20 stalls on this chassis below the measured sustain floor, leaving CREEP
-     * unable to sustain rotation and every turn hunting to `TURN_TIMEOUT_MS`. CREEP activation is
-     * now driven directly by `TurnProfilePolicy.h::turnPhaseFor` against `TURN_CREEP_WINDOW_DEG` /
-     * `TURN_TOLERANCE_DEG` above — the profile selects the phase, so there is no separate PWM
-     * handoff threshold.
-     *
-     * @warning This is a MEASURED sustain floor, not a placeholder — it still must be
-     *          bench-confirmed on bring-up (`inoTest/turn_probe`'s kinetic sweep) before shipping,
-     *          and must never regress below the measured sustain floor or CREEP stalls.
+     * Robot-verified 2026-07: the bench sweep's 38 approached the target too fast and coasted a
+     * 90 deg turn out to ~120. Set to the mentor's competition-proven kinetic tail floor of 20,
+     * which lands on target on this chassis.
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 30
+#define TURN_CREEP_PWM_DEFAULT 20
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
     /**
-     * @brief STATIC breakaway floor (PWM magnitude) the turn profile emits from REST until the
-     *        chassis has demonstrably started rotating (ADR-068).
+     * @brief STATIC breakaway floor (PWM magnitude) the turn PD emits from REST until the chassis
+     *        has demonstrably started rotating (ADR-068).
      *
      * Bench-measured on Lofaix (T1, 2026-07-16, phase a1): the lowest PWM that reliably STARTS an
      * in-place spin from a standstill, plus a small margin. HIGHER than the kinetic
      * `TURN_CREEP_PWM` that sustains an already-moving spin (44 vs 38 measured) because starting
      * from rest must break STATIC scrub friction across every contact patch at once. Applied as
-     * the from-rest kick only while `!_turnBrokeAway`; once `_updateTurnProfile` sees the yaw move
+     * the creep floor only while `!_turnBrokeAway`; once `_updateTurnProfile` sees the yaw move
      * past `TURN_BREAKAWAY_MOTION_DEG` it drops to the efficient kinetic `TURN_CREEP_PWM`. Without
-     * it, a small in-place turn (which dispatches straight into the CREEP phase) would command
-     * only `TURN_CREEP_PWM` from rest, which is below the static breakaway, and never start —
-     * hunting to `TURN_TIMEOUT_MS`.
+     * it, a small in-place turn (whose PD command never exceeds the creep floor) would command
+     * only `TURN_CREEP_PWM`, which is below the static breakaway, and never start — hunting to
+     * `TURN_TIMEOUT_MS`.
      *
      * @note TODO: bench-tune (T11) — raise if a cold/heavy chassis or a sagging pack fails to
      *       break away on the first ticks.
      */
 #ifndef TURN_BREAKAWAY_PWM_DEFAULT
-#define TURN_BREAKAWAY_PWM_DEFAULT 50
+#define TURN_BREAKAWAY_PWM_DEFAULT 46
 #endif
     constexpr int16_t TURN_BREAKAWAY_PWM = TURN_BREAKAWAY_PWM_DEFAULT;
 
     /**
-     * @brief Rotation from the turn's start yaw (degrees) after which the profile hands off from
-     *        the static `TURN_BREAKAWAY_PWM` kick to the kinetic `TURN_CREEP_PWM` floor (ADR-068).
+     * @brief Rotation from the turn's start yaw (degrees) after which the PD hands off from the
+     *        static `TURN_BREAKAWAY_PWM` kick to the kinetic `TURN_CREEP_PWM` floor (ADR-068).
      *
      * Chosen well above the bench IMU noise spread (T1: 0.100 deg over 100 stationary reads) so a
      * stationary chassis's read jitter cannot falsely latch "moving" and drop it to a creep floor
@@ -634,12 +659,30 @@ namespace Config
      *       the IMU noise floor.
      */
 #ifndef TURN_BREAKAWAY_MOTION_DEG_DEFAULT
-#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 2.0f
+#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 1.0f
 #endif
     constexpr float TURN_BREAKAWAY_MOTION_DEG = TURN_BREAKAWAY_MOTION_DEG_DEFAULT;
 
     /**
-     * @brief Consecutive in-band samples required to exit the turn profile's settle debounce
+     * @brief Maximum PWM growth per tick for the turn PD's ramp-up limiter (ADR-068,
+     *        `TurnPDPolicy.h::turnSlewLimit`).
+     *
+     * NOT part of the mentor's TT-verified law — his light rover does not need it. Added
+     * because at large heading error `Kp*err` saturates instantly (0 -> power in one tick),
+     * which risks a traction break on the heavier Lofaix chassis (rotates about the gripping
+     * wheel and translates the axle off the node, invisible to a heading-only loop). Binds
+     * ONLY while `|cmd|` is growing in the previous command's direction; ramp-down needs no
+     * limiter since P already shrinks with the error.
+     *
+     * @note TODO: bench-tune (T11) — down-tune until the initial kick no longer slips on Lofaix.
+     */
+#ifndef TURN_SLEW_PWM_PER_TICK_DEFAULT
+#define TURN_SLEW_PWM_PER_TICK_DEFAULT 10
+#endif
+    constexpr int16_t TURN_SLEW_PWM_PER_TICK = TURN_SLEW_PWM_PER_TICK_DEFAULT;
+
+    /**
+     * @brief Consecutive in-band samples required to exit the turn PD's settle debounce
      *        (ADR-068, `TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      *
      * A single out-of-band sample resets the count to 0. Set to 2 (operator decision) rather
@@ -656,7 +699,7 @@ namespace Config
     constexpr uint8_t TURN_SETTLE_SAMPLES = TURN_SETTLE_SAMPLES_DEFAULT;
 
     /**
-     * @brief Timeout (ms) for the turn profile controller before it gives up converging (ADR-068).
+     * @brief Timeout (ms) for the turn PD controller before it gives up converging (ADR-068).
      *
      * On expiry the profile brakes, prints the residual heading error, and marks the turn done
      * WITHOUT latching a fault or clearing the queue — a 1-2 deg miss must not end a scored
@@ -671,7 +714,7 @@ namespace Config
     constexpr uint32_t TURN_TIMEOUT_MS = TURN_TIMEOUT_MS_DEFAULT;
 
     /**
-     * @brief Final heading tolerance in degrees for the turn profile controller (ADR-068).
+     * @brief Final heading tolerance in degrees for the turn PD controller (ADR-068).
      *
      * When |heading error| < this value for `TURN_SETTLE_SAMPLES` consecutive ticks, the turn
      * brakes and declares itself complete (`TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
@@ -689,35 +732,16 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.5f;
+    constexpr float TURN_TOLERANCE_DEG = 3.0f;
 
     /**
-     * @brief SETTLE-phase P gain for the turn profile's terminal nudge, in PWM per degree
-     *        (ADR-078, `TurnProfilePolicy.h::turnSettleNudge`).
-     *
-     * Once the turn profile latches SETTLE (`|err| <= TURN_TOLERANCE_DEG`), any residual
-     * `|errProg| >= TURN_TOLERANCE_DEG` is nudged toward the
-     * target with `clamp(TURN_SETTLE_KP * errProg, ±TURN_CREEP_PWM)` instead of the fixed CREEP
-     * floor — a light proportional correction sized to settle the last fraction of a degree
-     * without re-entering CREEP's fixed speed. Clamped to `TURN_CREEP_PWM` so the nudge can never
-     * exceed the kinetic sustain floor the rest of the profile relies on.
-     *
-     * @note TODO: bench-tune (T11).
-     */
-#ifndef TURN_SETTLE_KP_DEFAULT
-#define TURN_SETTLE_KP_DEFAULT 10.0f
-#endif
-    constexpr float TURN_SETTLE_KP = TURN_SETTLE_KP_DEFAULT;
-
-    /**
-     * @brief Smallest physically resolvable heading step at the turn profile's creep floor, in
+     * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
      *        degrees (ADR-068).
      *
      * Bench-measured (T1, Lofaix, 2026-07-16): `omega_at_creep * measured_tick_period` =
      * 19.52 deg/s * ~22.66 ms = 0.4423 — the angular rate sustained at `TURN_CREEP_PWM` times the
-     * measured ~22.66 ms TURN tick (T1 phase b: the tick a real profile turn actually runs at,
-     * higher than the ~8 ms idle tick because a turn adds a live yaw read plus a Move write per
-     * tick).
+     * measured ~22.66 ms TURN tick (T1 phase b: the tick a real PD turn actually runs at, higher
+     * than the ~8 ms idle tick because a turn adds a live yaw read plus a Move write per tick).
      * NOT a placeholder: T1's bench run is the source of truth this value is pinned to. Consumed
      * only by the `static_assert`s in `ConfigChecks.h` (never read at runtime) — it exists so a
      * future retune of `TURN_TOLERANCE_DEG` / `TURN_SETTLE_SAMPLES` / `TURN_CREEP_PWM` cannot
@@ -746,7 +770,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 3000;
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 500;
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");
@@ -789,8 +813,8 @@ namespace Config
      *
      * The mentor's `gyro_move` computes a raw per-ITERATION difference (no division by loop
      * period), so his continuous damping is `Kd_raw * loop_period` — correct only at his fixed
-     * ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters (the ~8-11.5 ms vs
-     * ~22.66 ms timing-doc inconsistency noted on `TURN_MIN_RESOLVABLE_DEG`),
+     * ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters (see `TURN_KD` above and
+     * the ~8-11.5 ms vs ~22.66 ms timing-doc inconsistency noted on `TURN_MIN_RESOLVABLE_DEG`),
      * so porting the raw gain verbatim would silently re-scale every time the tick jitters.
      * `GyroHoldPolicy.h::gyroHoldCorrection` (via `TurnPDPolicy.h::turnPdStep`) instead divides by
      * the MEASURED per-step `dtSec`, so this gain carries real units of PWM per (deg/s):

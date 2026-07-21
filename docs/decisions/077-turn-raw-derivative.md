@@ -1,6 +1,6 @@
 # ADR-077: The in-place turn's D term is the mentor's RAW per-iteration difference, not time-normalized
 
-**Status:** Superseded by [ADR-078](./078-turn-profile-controller.md)
+**Status:** Implemented
 **Date decided:** 2026-07 (Phase 6)
 
 ## Rule
@@ -58,6 +58,3 @@ independent `M_Turn_angle` revisions (Kp 2 and Kp 1.5) both use it and neither d
   quantization this ADR's model tolerates.
 - `WRO2026/src/drive/TurnPDPolicy.h::turnPdStepRaw`, `WRO2026/src/drive/Drive.cpp::_updateTurnProfile`,
   `WRO2026/config/ConfigDrive.h`, `WRO2026/test/test_turn_pd_policy.cpp`.
-- [ADR-078](./078-turn-profile-controller.md) — superseding decision: the turn's PD control law,
-  raw derivative included, is replaced by a derivative-free breakaway→cruise→creep→settle
-  profile. `turnPdStepRaw` is deleted.

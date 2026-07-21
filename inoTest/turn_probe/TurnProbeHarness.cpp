@@ -168,6 +168,10 @@ namespace
     constexpr float TURN_PROBE_TICK_REF_AVG_US = 8056.0f;
     constexpr uint16_t TURN_PROBE_IMU_SAMPLE_COUNT  = 100;    // stationary yaw reads for (d)
     constexpr uint32_t TURN_PROBE_IMU_SAMPLE_GAP_MS = 20;
+    // Bench data alone cannot set this -- it is a design headroom choice made in T3/T11 (the
+    // mentor's verified pair is creep=15 / thresh=20, a +5 headroom). Printed as a SUGGESTION
+    // only; see `turnProbePrintSummary`.
+    constexpr int16_t TURN_PROBE_CREEP_THRESH_HEADROOM_PWM = 5;
 
     static_assert(TURN_PROBE_SWEEP_MAX_PWM > Config::PWM_MIN_MAGNITUDE,
                   "TURN_PROBE_SWEEP_MAX_PWM must exceed Config::PWM_MIN_MAGNITUDE -- the sweep "
@@ -192,9 +196,9 @@ namespace
     /// @brief Per-phase measurement results, threaded through the harness and printed by
     /// `turnProbePrintSummary` at the end. `-1` / `*Valid == false` mean "not measured".
     /// @note "not measured" is a first-class outcome here and MUST stay distinguishable from a
-    ///       value. Every consumer of this bench (`TURN_CREEP_PWM`, `TURN_MIN_RESOLVABLE_DEG`
-    ///       -> an AC8 `static_assert`) takes its number on trust, so a plausible-but-fabricated
-    ///       result is strictly worse than a printed `NOT MEASURED`.
+    ///       value. Every consumer of this bench (`TURN_CREEP_PWM`, `TURN_CREEP_THRESH_PWM`,
+    ///       `TURN_MIN_RESOLVABLE_DEG` -> an AC8 `static_assert`) takes its number on trust, so a
+    ///       plausible-but-fabricated result is strictly worse than a printed `NOT MEASURED`.
     struct TurnProbeResults
     {
         int16_t breakawayPwm   = -1;
@@ -757,10 +761,9 @@ namespace
             // The asymmetry decides it. A floor set LOW is the SILENT failure: the executor creeps
             // at a PWM that cannot sustain rotation, so every turn stalls short of tolerance and
             // hunts to its 3 s timeout -- which is non-faulting BY DESIGN, so nothing reports it.
-            // A floor set HIGH is loud (AC8's static_assert) and is absorbed by the few PWM of
-            // headroom the operator adds when setting TURN_CREEP_PWM above this measured floor.
-            // Unanimity trades a ~49% chance of a silently-wrong number for a ~15% chance of a
-            // conservative one.
+            // A floor set HIGH is loud (AC8's static_assert) and is absorbed by the +5 headroom in
+            // TURN_CREEP_THRESH_PWM. Unanimity trades a ~49% chance of a silently-wrong number for
+            // a ~15% chance of a conservative one.
             //
             // Unanimity also IMPLIES both directions passed, for free -- and structurally, not
             // just as a matter of plant numbers. `dir=-1` requires net > 0, so a -1 trial leaves
@@ -1206,9 +1209,9 @@ namespace
         results.imuValid     = true;
     }
 
-    /// @brief Final copy-pasteable block naming the two Config outputs this bench feeds
-    /// (T3's `TURN_CREEP_PWM` / `TURN_MIN_RESOLVABLE_DEG`), plus the raw measurements they are
-    /// derived from.
+    /// @brief Final copy-pasteable block naming the three Config outputs this bench feeds
+    /// (T3's `TURN_CREEP_PWM` / `TURN_CREEP_THRESH_PWM` / `TURN_MIN_RESOLVABLE_DEG`), plus the
+    /// raw measurements they are derived from.
     ///
     /// @note Every line is labelled MEASURED, SUGGESTED or NOT MEASURED, and that labelling is
     ///       load-bearing: nothing downstream re-questions a number taken from this block.
@@ -1236,6 +1239,18 @@ namespace
         else
         {
             Serial.println(F("NOT MEASURED -- see the (a2) verdict above"));
+        }
+
+        Serial.print(F("[T1] [SUGGESTED] TURN_CREEP_THRESH_PWM (bench does not measure this "
+                        "directly -- pick headroom above TURN_CREEP_PWM so the PD has room to "
+                        "modulate before snapping; mentor used +5) = "));
+        if (results.sustainPwm > 0)
+        {
+            Serial.println(results.sustainPwm + TURN_PROBE_CREEP_THRESH_HEADROOM_PWM);
+        }
+        else
+        {
+            Serial.println(F("NOT COMPUTABLE -- TURN_CREEP_PWM not measured"));
         }
 
         Serial.print(F("[T1] [MEASURED] omega at the creep pwm = "));

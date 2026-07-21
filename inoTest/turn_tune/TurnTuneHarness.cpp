@@ -1,15 +1,16 @@
 /**
  * @file TurnTuneHarness.cpp
- * @brief Implementation of the closed-loop turn-accuracy bench harness (turn profile knob tuning).
+ * @brief Implementation of the closed-loop turn-accuracy bench harness (T11 gain tuning).
  * @author WRO 2026
  *
  * @details
  * The companion to `inoTest/turn_probe`. The probe measures the OPEN-LOOP plant constants the
- * turn executor needs before it can run at all — the kinetic/breakaway creep floors, the
- * turn-representative tick, and the IMU noise floor. This harness runs the REAL `Drive.turnDeg()`
- * profile path over and over and reports how accurately it lands, so `Config::TURN_CREEP_WINDOW_DEG`
- * / `TURN_CREEP_PWM` / `TURN_SETTLE_KP` / `TURN_BREAKAWAY_PWM` can be bench-tuned on the assembled
- * Lofaix chassis and B3.2 re-passed.
+ * PD turn executor needs before it can run at all — the kinetic/breakaway creep floors, the
+ * turn-representative tick, and the IMU noise floor (docs/plans/2026-07-16-turn-pd-controller.md,
+ * tasks T1/T10). This harness is the next step in that plan (T11): with the executor built, it
+ * runs the REAL `Drive.turnDeg()` PD path over and over and reports how accurately it lands, so
+ * `Config::TURN_KP` / `TURN_KD` / `TURN_CREEP_PWM` / `TURN_BREAKAWAY_PWM` / `TURN_SLEW_PWM_PER_TICK`
+ * can be bench-tuned on the assembled Lofaix chassis and B3.2 re-passed.
  *
  * Kept in its own `.cpp` (not inlined into `turn_tune.ino`) for the same ctags/auto-prototype
  * reason `TurnProbeHarness.cpp` documents at length — see that file's header.
@@ -29,7 +30,7 @@
  *
  * WHY THE TURNS ARE SYNC-BLOCKING (not `.async()` + poll): a sync turn spins on the sketch's
  * real `cooperativeTick()` (the same module set, in the same order, at the same
- * turn-representative tick a real nav turn pays), so the turn dynamics measured here match what
+ * turn-representative tick a real nav turn pays), so the PD dynamics measured here match what
  * the mission will see. Polling from the harness would add a second yaw read per iteration and
  * slow the loop, changing the very dynamics being tuned. The cost is that peak mid-turn
  * excursion is not captured directly — it surfaces indirectly as `coast`, `durMs`, and the
@@ -218,27 +219,30 @@ namespace
         }
     };
 
-    /// @brief Echo the profile knobs in force so each run's log self-documents which build
-    /// produced it.
+    /// @brief Echo the gains in force so each run's log self-documents which build produced it.
     void turnTunePrintGains()
     {
-        Serial.println(F("[TT] knobs in force (WRO2026/config/ConfigDrive.h):"));
-        Serial.print(F("[TT]   TURN_CREEP_WINDOW_DEG="));
-        Serial.print(Config::TURN_CREEP_WINDOW_DEG, 3);
-        Serial.print(F("  TURN_CREEP_PWM="));
-        Serial.print(Config::TURN_CREEP_PWM);
-        Serial.print(F("  TURN_SETTLE_KP="));
-        Serial.println(Config::TURN_SETTLE_KP, 4);
-        Serial.print(F("[TT]   TURN_CRUISE_PWM="));
-        Serial.print(Config::TURN_CRUISE_PWM);
-        Serial.print(F("  TURN_BREAKAWAY_PWM="));
+        Serial.println(F("[TT] gains in force (WRO2026/config/ConfigDrive.h):"));
+        Serial.print(F("[TT]   TURN_KP="));
+        Serial.print(Config::TURN_KP, 4);
+        Serial.print(F("  TURN_KD="));
+        Serial.print(Config::TURN_KD, 4);
+        Serial.print(F("  TURN_CRUISE_PWM="));
+        Serial.println(Config::TURN_CRUISE_PWM);
+        Serial.print(F("[TT]   TURN_BREAKAWAY_PWM="));
         Serial.print(Config::TURN_BREAKAWAY_PWM);
         Serial.print(F("  TURN_BREAKAWAY_MOTION_DEG="));
-        Serial.println(Config::TURN_BREAKAWAY_MOTION_DEG, 3);
-        Serial.print(F("[TT]   TURN_TOLERANCE_DEG="));
-        Serial.print(Config::TURN_TOLERANCE_DEG, 3);
+        Serial.print(Config::TURN_BREAKAWAY_MOTION_DEG, 3);
+        Serial.print(F("  TURN_CREEP_THRESH_PWM="));
+        Serial.print(Config::TURN_CREEP_THRESH_PWM);
+        Serial.print(F("  TURN_CREEP_PWM="));
+        Serial.println(Config::TURN_CREEP_PWM);
+        Serial.print(F("[TT]   TURN_SLEW_PWM_PER_TICK="));
+        Serial.print(Config::TURN_SLEW_PWM_PER_TICK);
         Serial.print(F("  TURN_SETTLE_SAMPLES="));
         Serial.print(Config::TURN_SETTLE_SAMPLES);
+        Serial.print(F("  TURN_TOLERANCE_DEG="));
+        Serial.print(Config::TURN_TOLERANCE_DEG, 3);
         Serial.print(F("  TURN_TIMEOUT_MS="));
         Serial.println(Config::TURN_TIMEOUT_MS);
     }
@@ -330,11 +334,10 @@ namespace
         Serial.println(F(" deg  (large coast = raise brake authority / lower creep)"));
 
         Serial.println(F("[TT] tuning hints:"));
-        Serial.println(F("[TT]   overshoot mean > 0 and repeatable  -> lower TURN_CREEP_PWM or widen TURN_CREEP_WINDOW_DEG"));
-        Serial.println(F("[TT]   overshoot mean < 0 (stops short)    -> raise TURN_CREEP_PWM"));
-        Serial.println(F("[TT]   turn-time max >> mean (hunting)      -> raise TURN_CREEP_PWM, or widen TURN_CREEP_WINDOW_DEG"));
-        Serial.println(F("[TT]   slow final approach into tolerance   -> raise TURN_SETTLE_KP"));
-        Serial.println(F("[TT]   +dir vs -dir split                  -> motor bias, not the knobs"));
+        Serial.println(F("[TT]   overshoot mean > 0 and repeatable  -> lower TURN_KP or raise TURN_KD"));
+        Serial.println(F("[TT]   overshoot mean < 0 (stops short)    -> raise TURN_CREEP_PWM / TURN_KP"));
+        Serial.println(F("[TT]   turn-time max >> mean (hunting)      -> raise TURN_KD"));
+        Serial.println(F("[TT]   +dir vs -dir split                  -> motor bias, not the gains"));
         Serial.println(F("[TT] ==========================================="));
     }
 }    // namespace
@@ -348,7 +351,7 @@ void runTurnTune(void (*tickCb)())
 
     Serial.println(F("\n############################################################"));
     Serial.println(F("#  WRO2026 turn tune (inoTest/turn_tune)                    #"));
-    Serial.println(F("#  Closed-loop turnDeg() accuracy sweep for profile tuning  #"));
+    Serial.println(F("#  Closed-loop turnDeg() accuracy sweep for PD gain tuning  #"));
     Serial.println(F("############################################################"));
     turnTunePrintGains();
 
@@ -386,7 +389,7 @@ void runTurnTune(void (*tickCb)())
             Drive.clearFault();
         }
 
-        // The real turn: sync-blocking temporary (RAII -- emit as ONE statement, never a local;
+        // The real PD turn: sync-blocking temporary (RAII -- emit as ONE statement, never a local;
         // a stored builder corrupts the queue). Blocks until the executor settles or times out,
         // spinning cooperativeTick() throughout via the registered tick callback.
         const uint32_t t0 = millis();

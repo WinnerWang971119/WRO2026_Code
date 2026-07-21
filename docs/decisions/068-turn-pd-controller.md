@@ -1,11 +1,6 @@
 # ADR-068: In-place turns run a per-tick PD controller in `Drive.cpp`, not `TurnGyro`
 
-**Status:** Implemented (the PD control-law clause — `Kp*err + Kd*rate`, no trapezoid, no
-terminal stage — is superseded by ADR-078's breakaway→cruise→creep→settle profile; the
-two-level breakaway/creep floor, settle debounce, float-yaw comparison, `ConfigChecks.h`
-coupling, and `TurnSignPolicy` wheel dispatch this ADR introduced are reused unchanged by
-ADR-078. The time-normalized `Kd*rate` D-term clause was earlier superseded by ADR-077, itself
-now folded into ADR-078's supersession. All other clauses remain in force.)
+**Status:** Implemented (the time-normalized `Kd*rate` D-term clause is superseded by ADR-077 — the turn's derivative reverts to the mentor's raw per-iteration difference; all other clauses remain in force)
 **Date decided:** 2026-07 (Phase 6)
 
 ## Rule
@@ -79,14 +74,10 @@ one that already has.
 
 ## See also
 
-- [ADR-077](./077-turn-raw-derivative.md) — superseded this ADR's time-normalized D-term clause:
-  the turn's derivative reverted to the mentor's raw per-iteration difference (`Kd*(errNew -
-  errOld)`, no dt division; `TURN_KP`/`TURN_KD` = 1.5/10). Itself now superseded by ADR-078.
-- [ADR-078](./078-turn-profile-controller.md) — supersedes this ADR's PD control-law clause
-  outright: no more `Kp*err + Kd*rate` in any form, replaced by a derivative-free
-  breakaway→cruise→creep→settle profile. The two-level floor, settle debounce, and FSM
-  structure decided here carry over unchanged; the ramp-up slew limiter (`turnSlewLimit`) is
-  retired, since CRUISE now launches at a fixed speed with nothing to ramp.
+- [ADR-077](./077-turn-raw-derivative.md) — supersedes this ADR's time-normalized D-term clause:
+  the turn's derivative reverts to the mentor's raw per-iteration difference (`Kd*(errNew -
+  errOld)`, no dt division; `TURN_KP`/`TURN_KD` = 1.5/10). The two-level floor, slew limiter,
+  settle debounce, and FSM structure decided here are unchanged.
 - [ADR-004](./004-pid-stays-on-stm32.md) — its Turn/`TurnGyro`/`TURN_PID_*` clause is
   superseded by this ADR; the Sync and Gyro-straight clauses are unaffected and it remains
   Implemented.
