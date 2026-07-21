@@ -315,6 +315,15 @@ NAV_TURN_TOLERANCE_DEG: float = 0.5
 # behavioral disable, not the constant-value parity check.
 PATH_PASS_THROUGH_ENABLED: bool = True
 
+# MUST mirror ``Config::PATH_PASS_THROUGH_TRUST_LINE_ENABLED`` in
+# WRO2026/config/ConfigNav.h. Contract-honesty mirror only (ADR-078): the sim has
+# no IMU-drift model, so on a collinear pass-through ``_emit_turn_to`` already
+# lands the chassis exactly on the target heading and emits no turn -- the
+# firmware needs this flag only to SUPPRESS a drift-induced turn the sim can never
+# produce. Kept here so the config contract stays complete; there is no behavioral
+# consumer and no dedicated regex-parity test (unlike PATH_PASS_THROUGH_ENABLED).
+PATH_PASS_THROUGH_TRUST_LINE_ENABLED: bool = True
+
 # MUST mirror ``Config::SPEED_NORMAL`` in WRO2026/config/ConfigDrive.h. The
 # blind-run cruise PWM (``CRUISE_SPEED`` is symbolically the same value). The sim
 # does not model speed presets or ramps for MOTION, but the ADR-059 blind-chain
@@ -2888,6 +2897,16 @@ class PathTrackerSim:
         :param target_heading_deg: world-frame heading the chassis must face (deg).
         :return: the ``(ACT_TURN_REL, delta)`` primitive if a turn fired, else ``None``.
         """
+        # ADR-078: the firmware's ``PathTracker::_dispatchTurnIfNeeded`` SUPPRESSES
+        # this pre-edge turn on a LINE pass-through continuation when accumulated
+        # IMU-yaw drift would otherwise push the live delta past
+        # ``NAV_TURN_TOLERANCE_DEG`` and break the pass-through into a stop-and-turn.
+        # The sim needs NO matching branch: it has no IMU-drift model -- the
+        # one-logical-heading rule (above) advances the chassis exactly onto
+        # ``target_heading_deg``, so ``delta`` is always sub-tolerance on a collinear
+        # pass-through hop and no turn is ever emitted here. The mirrored
+        # PATH_PASS_THROUGH_TRUST_LINE_ENABLED constant is carried for config-contract
+        # completeness only; there is deliberately no dead code branch for it.
         delta = wrap_pm180(target_heading_deg - self._chassis.heading_deg)
         if abs(delta) <= NAV_TURN_TOLERANCE_DEG:
             # Sub-tolerance: emit no ACT_TURN_REL, but STILL advance the logical

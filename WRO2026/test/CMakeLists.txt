@@ -577,6 +577,51 @@ add_fixture_routes_force_include(test_path_tracker_passthrough_off)   # FIRST (R
 add_path_force_includes(test_path_tracker_passthrough_off)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough_off)
 
+# --- Test executable #2c — PATH_PASS_THROUGH_TRUST_LINE_ENABLED == true build (ADR-078 fix). ---
+# A collinear LINE pass-through with a >NAV_TURN_TOLERANCE_DEG IMU-yaw drift injected at the mid
+# junction: the fix suppresses the pre-edge turn (follower stays live, no TURNING). Same real-link
+# recipe as #2a/#2b (real PathTracker.cpp + Drive.cpp + Localization.cpp + YawSource.cpp).
+add_executable(test_path_tracker_passthrough_drift_on
+    ${TEST_DIR}/test_path_tracker_passthrough_drift.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+# ADR-061: pin HOP_SETTLE_MS=0 so the tick sequence is unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_passthrough_drift_on
+    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_passthrough_drift_on PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_passthrough_drift_on)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_passthrough_drift_on)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_passthrough_drift_on COMMAND test_path_tracker_passthrough_drift_on)
+
+# --- Test executable #2d — PATH_PASS_THROUGH_TRUST_LINE_ENABLED == false build (ADR-078 bug). ---
+# The compile-def flips the guard off, reproducing the bug: the same injected drift fires a real
+# pre-edge turn (follower disabled, FSM enters TURNING), proving the toggle + fix are load-bearing.
+add_executable(test_path_tracker_passthrough_drift_off
+    ${TEST_DIR}/test_path_tracker_passthrough_drift.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+# ADR-061: pin HOP_SETTLE_MS=0 so the tick sequence is unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_passthrough_drift_off
+    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
+target_include_directories(test_path_tracker_passthrough_drift_off PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_passthrough_drift_off)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_passthrough_drift_off)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_passthrough_drift_off COMMAND test_path_tracker_passthrough_drift_off)
+
 # --- Test executable #3a — BIDIRECTIONAL_AUTO_ENABLED == true build (kill-switch ON, default). ---
 # The compile-flag toggle flips the resolved direction the REAL FSM takes on the same fixture
 # heading; the rear-override LINE hop on the default 2-board config drives through the real

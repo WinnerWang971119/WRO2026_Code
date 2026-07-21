@@ -2347,6 +2347,22 @@ void PathTrackerClass::_onPlanNextHop()
 
 bool PathTrackerClass::_dispatchTurnIfNeeded(float bodyHeadingWorld, uint8_t turnModeByte)
 {
+    // ADR-078: a LINE pass-through continuation trusts the line, not the drifted gyro. On a
+    // collinear pass-through into a LINE edge the LineFollower is live and the physical line is
+    // the heading authority -- its P+D washes out residual heading over the hop -- so suppress the
+    // pre-edge yaw turn UNCONDITIONALLY here, regardless of the live IMU delta. Without this,
+    // IMU-yaw drift accumulated over the inbound leg exceeds NAV_TURN_TOLERANCE_DEG and breaks a
+    // geometry-classified pass-through into a stop-and-turn (the ADR-023/ADR-052 yaw-vs-peek guard
+    // below). `_passThrough` is provably false on the return prologue (`_dispatchReturnMove`), so
+    // this never fires there; LINE_LOST (#146) remains the safety net if the follower actually
+    // leaves the line. A BLIND continuation is intentionally excluded (no line to correct heading).
+    // Returning false lands the FSM in the SAME continue-live state as a driftless pass-through.
+    if (Config::PATH_PASS_THROUGH_TRUST_LINE_ENABLED && _passThrough
+        && _activeEdgeType == Routes::EdgeType::LINE)
+    {
+        return false;    // keep the follower live; no stop, no gyro turn
+    }
+
     const float currentWorld = Localization.getHeadingDeg();
     const float delta        = wrapDeltaDeg(bodyHeadingWorld - currentWorld);
     if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)

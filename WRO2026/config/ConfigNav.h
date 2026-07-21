@@ -144,6 +144,32 @@ namespace Config
 #endif
     constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
 
+    /**
+     * @brief Master enable for "a LINE pass-through trusts the line, not the drifted gyro"
+     *        (ADR-078).
+     *
+     * When `true` (default), on a collinear pass-through continuation into a LINE edge,
+     * `PathTracker::_dispatchTurnIfNeeded` suppresses the pre-edge yaw turn regardless of the
+     * live IMU-heading delta — the physical line is the heading authority and the live
+     * LineFollower's P+D washes out residual heading over the hop. This prevents accumulated
+     * IMU-yaw drift from breaking a geometry-classified pass-through into a stop-and-turn. When
+     * `false`, the historical yaw-vs-peek guard (ADR-023/ADR-052) applies and a drifted heading
+     * past `NAV_TURN_TOLERANCE_DEG` fires a real turn.
+     *
+     * @note Scoped to LINE pass-through only: a BLIND continuation has no line to correct
+     *       heading, so it still turns on live yaw. The return prologue is unaffected
+     *       (`_passThrough` is false there). LINE_LOST (#146) remains the safety net.
+     * @note Consumer: `PathTracker::_dispatchTurnIfNeeded`. Mirrored (as a value, inert — the
+     *       sim has no IMU drift) in `tools/path_planner/sim/runtime.py`.
+     * @note **Compile-time override:** `-DPATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=false`
+     *       for a bench A/B, same idiom as the other `_DEFAULT` hooks here.
+     */
+#ifndef PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT
+#define PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_PASS_THROUGH_TRUST_LINE_ENABLED =
+        PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT;
+
     /// Kill-switch for bidirectional line-following auto-selection.
     ///
     /// Scope: gates ONLY the auto branch of `PathTracker::_resolveDirection`
