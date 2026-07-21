@@ -1129,12 +1129,12 @@ def test_tc11_accel_and_cruise_floor_at_static_not_kinetic_floor() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TC13 — PWM_MOVING_MIN parses to 30 (AC1)
+# TC13 — PWM_MOVING_MIN parses to 35 (AC1)
 # ---------------------------------------------------------------------------
 
 
-def test_tc13_pwm_moving_min_parses_to_30() -> None:
-    """TC13: ``PWM_MOVING_MIN`` parses to 30 through the CTPS config loader.
+def test_tc13_pwm_moving_min_parses_to_35() -> None:
+    """TC13: ``PWM_MOVING_MIN`` parses to 35 through the CTPS config loader.
 
     Mirrors how the sibling static floor (``PWM_MIN_MAGNITUDE`` / ``pwm_min``)
     is pinned elsewhere in this module (e.g. ``test_doubling_tshape_accel_...``
@@ -1148,7 +1148,7 @@ def test_tc13_pwm_moving_min_parses_to_30() -> None:
     from tools.path_planner.config_parse import parse_config_int
 
     cfg = load_profile_config()
-    assert cfg.pwm_moving_min == 30
+    assert cfg.pwm_moving_min == 35
 
     global_h = DEFAULT_CONFIG_H_PATH.parent / "ConfigGlobal.h"
-    assert parse_config_int("PWM_MOVING_MIN", global_h) == 30
+    assert parse_config_int("PWM_MOVING_MIN", global_h) == 35

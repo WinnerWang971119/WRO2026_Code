@@ -510,16 +510,17 @@ void test_main_chain_dispatch()
     // ---- Hop 3 (FINAL): ChainC -> ChainD. -----------------------------------
     // The final hop is the cruise->floor->brake stop: T13 dispatches
     // `.setEndSpeed(±PWM_MIN_MAGNITUDE)` (floor, not 0) and the brake completes floor->rest.
-    // Under the shipped tune the (cruise−PWM_MIN)/accel = (70−35)/4 = 8.75 cm shed OVERRUNS
-    // the 8 cm hop, so the profile triangle-collapses and the hop LAUNCHES BELOW the plan
-    // start (unlike the pre-retune 7 cm / 8 cm case that launched exactly at the plan start).
-    // predictHopDispatchPwm models that collapse via the profile math with the floor target.
+    // Under the retuned floor the (cruise−PWM_MIN)/accel = (70−45)/4 = 6.25 cm shed FITS within
+    // the 8 cm hop, so the profile does NOT triangle-collapse and the hop LAUNCHES AT the plan
+    // start. (The PWM_MIN_MAGNITUDE 35->45 retune, commit 55648f2, shortened the shed below the
+    // hop length, reversing the earlier collapse-below-plan-start case.)
+    // predictHopDispatchPwm models the now-uncollapsed dispatch via the profile math.
     if (Config::PATH_BLIND_CHAIN_ENABLED)
     {
         const int16_t expected3 = predictHopDispatchPwm(kMainHopDistCm, plan, 3, Config::SPEED_NORMAL);
         ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, expected3);
         ASSERT_TRUE(plan[3].brake);
-        ASSERT_TRUE(expected3 < plan[3].startPwm);    // shed overruns the hop -> collapses below plan start
+        ASSERT_EQ(expected3, plan[3].startPwm);    // shed fits the hop -> launches at plan start
     }
     else
     {

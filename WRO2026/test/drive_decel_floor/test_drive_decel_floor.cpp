@@ -284,24 +284,23 @@ void test_TC5_rest_start_accel_floor_stays_static()
 }
 
 // ===========================================================================================
-// TC6 — triangle short hop. start=35 (default), end=0, cruise=60, distance=20cm.
-//   accelCm = |60-35|/4 = 6.25cm
-//   decelCm = |60-0|/4  = 15cm
-//   accelCm+decelCm = 21.25cm > totalCm(20cm) -> TRIANGLE COLLAPSE:
-//     peak = (35+0+60)/3 = 31 (int16 truncation of 31.67)
-//     scale = 20/21.25 ~= 0.9412; accelCm ~= 5.88cm, decelCm ~= 14.12cm
-//     half-cap: totalCm*0.5=10cm -> decelCm(14.12) > 10 -> decelCm clamped to 10cm; accelCm(5.88)
-//               unaffected.
-// Intended behaviour (documented + asserted): the reduced PEAK (31, itself below the static
-// floor 35) is reached via the ACCEL ramp, which `_decelTailFloorMag` NEVER flags `inDecel` —
-// so the plateau setpoint snaps UP to the STATIC floor (35), not down toward the kinetic one.
-// Only once travel enters the decel region (traveled >= totalEnc - decelEnc = 20cm - 10cm =
-// 10cm) does the emitted setpoint crawl from the (floor-snapped) peak down toward the KINETIC
-// floor (30) as the ramp approaches its endSpeed-0 finish.
+// TC6 — short hop. start=45 (default TSHAPE_START_SPEED == PWM_MIN_MAGNITUDE), end=0, cruise=60,
+//   distance=20cm. The T-shape decel sheds cruise->PWM_MIN floor (not cruise->0); the brake
+//   finishes floor->rest.
+//   accelCm = |60-45|/4 = 3.75cm   (start -> cruise)
+//   decelCm = |60-45|/4 = 3.75cm   (cruise -> PWM_MIN floor)
+//   accelCm+decelCm = 7.5cm < totalCm(20cm) -> NO triangle collapse: the profile reaches cruise
+//   and holds a plateau from ~3.75cm to ~16.25cm.
+// NOTE (retune 55648f2): TSHAPE_START_SPEED was bumped to 45 == PWM_MIN_MAGNITUDE, so the accel
+// ramp now starts AT the static floor and never dips below it — the old "collapsed peak below the
+// static floor snaps UP to it" plateau condition is no longer reachable (nothing runs below the
+// floor). The plateau here is therefore the commanded cruise (60). Only once travel enters the
+// decel region (last ~3.75cm) does the setpoint crawl toward the KINETIC floor (35 == PWM_MOVING_MIN)
+// as endSpeed(0) < floor pins it there — the kinetic decel-tail floor this file guards.
 // ===========================================================================================
 void test_TC6_triangle_short_hop_plateau_then_decel_crawl()
 {
-    TEST_SCOPE("TC6: triangle short hop (35/0/60, 20cm) — floor-snapped plateau(35), decel crawl to 30");
+    TEST_SCOPE("TC6: short hop (45/0/60, 20cm) — cruise plateau(60), decel crawl to kinetic floor(35)");
 
     resetWorld();
 
@@ -315,18 +314,19 @@ void test_TC6_triangle_short_hop_plateau_then_decel_crawl()
 
     const int32_t encPerCm = (int32_t) cmToEncDeg(1.0f);
 
-    // --- Plateau: land squarely between the (collapsed) accel ramp end (~5.88cm) and the decel
-    //     threshold (10cm) -- e.g. 8cm traveled. The un-snapped peak (31) is BELOW the static
-    //     floor, so the DISPATCHED setpoint must be the static floor (35), never a bare 31 and
-    //     never the kinetic floor (30) — the plateau is never in the decel region.
+    // --- Plateau: sample mid-cruise (past the accel end ~3.75cm, before the decel region at
+    //     ~16.25cm) -- e.g. 8cm traveled. With start(45) == floor the accel ramp never dips below
+    //     the floor, so there is no below-floor plateau to snap up: the dispatched setpoint is
+    //     simply the commanded cruise (60). (Pre-retune this plateau snapped UP to the static floor
+    //     from a collapsed sub-floor peak; that condition is unreachable now — see the header note.)
     tickProfileToEnc(8L * encPerCm, profileStartEnc, 5000);
 
     const int16_t plateauL = MiniR4.DriveDC.lastMoveSyncL;
     const int16_t plateauR = MiniR4.DriveDC.lastMoveSyncR;
-    ASSERT_EQ(plateauL, (int16_t) Config::PWM_MIN_MAGNITUDE);
-    ASSERT_EQ(plateauR, (int16_t) Config::PWM_MIN_MAGNITUDE);
+    ASSERT_EQ(plateauL, (int16_t) 60);    // commanded cruise (setPower(60)); no floor-snap on the plateau
+    ASSERT_EQ(plateauR, (int16_t) 60);
 
-    // --- Decel crawl: push deep into the decel region (traveled >= 10cm), close to the 20cm
+    // --- Decel crawl: push deep into the decel region (traveled >= ~16.25cm), close to the 20cm
     //     finish -- e.g. 19cm traveled, 1cm from completion. endSpeed(0) < PWM_MIN_MAGNITUDE, so
     //     once `inDecel` this must be pinned at the KINETIC floor.
     tickProfileToEnc(19L * encPerCm, profileStartEnc, 5000);

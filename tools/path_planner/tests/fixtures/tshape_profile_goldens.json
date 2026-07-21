@@ -2,18 +2,18 @@
   {
     "dist": 3,
     "cruise": 85,
-    "start": 35,
+    "start": 45,
     "end": 0,
     "accel": 4,
     "expect": {
-      "accelCm": 1.15384614,
+      "accelCm": 1,
       "decelCm": 1.5,
-      "peakPwm": 40,
+      "peakPwm": 43,
       "pwm_at": [
-        {"traveled": 0, "pwm": 35},
-        {"traveled": 1, "pwm": 39},
-        {"traveled": 1.5, "pwm": 40},
-        {"traveled": 2.5, "pwm": 14},
+        {"traveled": 0, "pwm": 45},
+        {"traveled": 1, "pwm": 43},
+        {"traveled": 1.5, "pwm": 43},
+        {"traveled": 2.5, "pwm": 15},
         {"traveled": 3, "pwm": 0}
       ]
     }
@@ -21,18 +21,18 @@
   {
     "dist": 12,
     "cruise": 85,
-    "start": 35,
+    "start": 45,
     "end": 0,
     "accel": 4,
     "expect": {
-      "accelCm": 4.61538458,
+      "accelCm": 4,
       "decelCm": 6,
-      "peakPwm": 40,
+      "peakPwm": 43,
       "pwm_at": [
-        {"traveled": 0, "pwm": 35},
-        {"traveled": 3, "pwm": 38},
-        {"traveled": 6, "pwm": 40},
-        {"traveled": 9, "pwm": 20},
+        {"traveled": 0, "pwm": 45},
+        {"traveled": 3, "pwm": 44},
+        {"traveled": 6, "pwm": 43},
+        {"traveled": 9, "pwm": 22},
         {"traveled": 12, "pwm": 0}
       ]
     }
@@ -40,17 +40,17 @@
   {
     "dist": 40,
     "cruise": 85,
-    "start": 35,
+    "start": 45,
     "end": 0,
     "accel": 4,
     "expect": {
-      "accelCm": 12.5,
+      "accelCm": 10,
       "decelCm": 20,
       "peakPwm": 85,
       "pwm_at": [
-        {"traveled": 0, "pwm": 35},
-        {"traveled": 3.5, "pwm": 49},
-        {"traveled": 7, "pwm": 63},
+        {"traveled": 0, "pwm": 45},
+        {"traveled": 3.5, "pwm": 59},
+        {"traveled": 7, "pwm": 73},
         {"traveled": 15, "pwm": 85},
         {"traveled": 23, "pwm": 73},
         {"traveled": 30, "pwm": 43},
@@ -83,7 +83,7 @@
   {
     "dist": 20,
     "cruise": 85,
-    "start": 35,
+    "start": 45,
     "end": 85,
     "accel": 4,
     "expect": {
@@ -91,9 +91,9 @@
       "decelCm": 0,
       "peakPwm": 85,
       "pwm_at": [
-        {"traveled": 0, "pwm": 35},
-        {"traveled": 5, "pwm": 60},
-        {"traveled": 7, "pwm": 70},
+        {"traveled": 0, "pwm": 45},
+        {"traveled": 5, "pwm": 65},
+        {"traveled": 7, "pwm": 73},
         {"traveled": 15, "pwm": 85},
         {"traveled": 20, "pwm": 85}
       ]
@@ -102,21 +102,21 @@
   {
     "dist": 30,
     "cruise": 85,
-    "start": 35,
+    "start": 45,
     "end": 0,
     "accel": 4,
     "expect": {
-      "accelCm": 11.5384617,
+      "accelCm": 10,
       "decelCm": 15,
-      "peakPwm": 40,
+      "peakPwm": 85,
       "pwm_at": [
-        {"traveled": 0, "pwm": 35},
-        {"traveled": 3.5, "pwm": 36},
-        {"traveled": 7, "pwm": 38},
-        {"traveled": 13, "pwm": 40},
-        {"traveled": 20, "pwm": 27},
-        {"traveled": 27, "pwm": 8},
-        {"traveled": 29, "pwm": 3},
+        {"traveled": 0, "pwm": 45},
+        {"traveled": 3.5, "pwm": 59},
+        {"traveled": 7, "pwm": 73},
+        {"traveled": 13, "pwm": 85},
+        {"traveled": 20, "pwm": 57},
+        {"traveled": 27, "pwm": 17},
+        {"traveled": 29, "pwm": 6},
         {"traveled": 30, "pwm": 0}
       ]
     }

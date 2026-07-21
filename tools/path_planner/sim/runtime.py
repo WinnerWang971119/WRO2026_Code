@@ -346,12 +346,12 @@ SPEED_SLOW: int = 60
 SPEED_FAST: int = 90
 
 # MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h
-# (``= PWM_MIN_MAGNITUDE`` = 35). The cold-start ramp seed a non-pass-through
+# (``= PWM_MIN_MAGNITUDE`` = 45). The cold-start ramp seed a non-pass-through
 # blind hop's velocity plan begins at (ADR-023). ADR-059 emits it as the
 # ``start_pwm`` of every non-chained, non-pass-through ``blind_dead_reckon``
 # record, so it must match the firmware's ``Config::TSHAPE_START_SPEED``.
 # Hand-mirrored; keep in lockstep.
-TSHAPE_START_SPEED: int = 35
+TSHAPE_START_SPEED: int = 45
 
 # MUST mirror ``Config::TSHAPE_MIN_MOVE_CM`` in WRO2026/config/ConfigDrive.h
 # (5.0). The Drive-profile floor below which a hop silently degrades to a flat
@@ -3962,7 +3962,7 @@ class PathTrackerSim:
                 # slower blind hop never exceeds the hop's own cruise (ADR-064 /
                 # AC12: a FAST line into a SLOW blind enters at <= 60; a FAST line
                 # into a FAST blind enters at 90, matching the firmware). The
-                # cold-start seed (TSHAPE_START_SPEED = 35) is already below every
+                # cold-start seed (TSHAPE_START_SPEED = 45) is already below every
                 # tier, so only the pass-through branch needs the clamp.
                 # `resolve_chain_speeds` re-clamps into [pwm_min, |cruise|] on top.
                 if pass_through_active:

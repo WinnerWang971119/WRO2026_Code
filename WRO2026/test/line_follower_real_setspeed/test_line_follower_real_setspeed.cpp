@@ -101,12 +101,12 @@ static void setBothEncodersCm(float cm)
 }
 
 // ===========================================================================
-// TC7a — Ramp-down tail reaches the DriveDC mock at +/-PWM_MOVING_MIN (30).
+// TC7a — Ramp-down tail reaches the DriveDC mock at +/-PWM_MOVING_MIN (35).
 // ===========================================================================
 
 static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_forward()
 {
-    TEST_SCOPE("TC7a: forward ramp-down tail dispatches at +PWM_MOVING_MIN (30)");
+    TEST_SCOPE("TC7a: forward ramp-down tail dispatches at +PWM_MOVING_MIN (35)");
 
     resetWorld();
 
@@ -134,8 +134,8 @@ static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_forward()
     // is: defaultRampCm = |60-30|/4.0 = 7.5 cm, clamped into [TSHAPE_RAMP_MIN_CM,
     // TSHAPE_RAMP_MAX_CM] = [5,20] -> stays 7.5. remainingCm (0.1) <= rampDownCm (7.5), so this
     // tick is deep in the ramp-down zone; r = 0.1/7.5 ~= 0.0133, and the lerp's inner
-    // `(int16_t)((start-floor)*r)` truncates to 0 for any r < 1/30 (remaining < 0.25 cm) — so
-    // the lerped cruise is EXACTLY the kinetic floor (30), not merely close to it.
+    // `(int16_t)((start-floor)*r)` truncates to 0 for any r < 1/25 (remaining < 0.3 cm) — so
+    // the lerped cruise is EXACTLY the kinetic floor (35), not merely close to it.
     setBothEncodersCm(29.9f);
 
     LineFollower.update();
@@ -145,7 +145,7 @@ static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_forward()
     ASSERT_EQ(MiniR4.DriveDC.moveCallCount, (uint32_t) 1);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) Config::PWM_MOVING_MIN);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveR, (int16_t) Config::PWM_MOVING_MIN);
-    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) 30);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) 35);
 
     // The distance gate has NOT tripped yet (29.9 < 30 cm target) — controller still enabled,
     // proving this tick's dispatch is a genuine ramp-down sample, not the post-brake Move(0,0).
@@ -154,7 +154,7 @@ static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_forward()
 
 static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_reverse()
 {
-    TEST_SCOPE("TC7a: reverse ramp-down tail dispatches at -PWM_MOVING_MIN (30)");
+    TEST_SCOPE("TC7a: reverse ramp-down tail dispatches at -PWM_MOVING_MIN (35)");
 
     resetWorld();
 
@@ -182,15 +182,16 @@ static void test_TC7a_ramp_down_tail_reaches_driveDC_at_kinetic_floor_reverse()
     ASSERT_EQ(MiniR4.DriveDC.moveCallCount, (uint32_t) 1);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) -Config::PWM_MOVING_MIN);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveR, (int16_t) -Config::PWM_MOVING_MIN);
-    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) -30);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveL, (int16_t) -35);
 }
 
 // ===========================================================================
 // TC7b — Mid-follow correction is clamped to LINE_MAX_CORR and dispatched as
 //        cruise +/- corr. With the current tuning (SLOW cruise 60, LINE_MAX_CORR
-//        20) both wheels stay inside [PWM_MIN_MAGNITUDE, PWM_MAX], so no
-//        deadbandSnap floor/cap engages on the line-follow path. The
-//        kinetic-floor-leak guard for PROFILED moves lives in test_drive_decel_floor.
+//        20) the LOW-side wheel (40) now sits below the retuned PWM_MIN_MAGNITUDE
+//        (45), so deadbandSnap floors it up to the floor; the high side (80) is
+//        unaffected. The kinetic-floor-leak guard for PROFILED moves lives in
+//        test_drive_decel_floor.
 // ===========================================================================
 
 static void test_TC7b_mid_follow_correction_clamped_to_line_max_corr()
@@ -201,7 +202,7 @@ static void test_TC7b_mid_follow_correction_clamped_to_line_max_corr()
 
     // Arm plain line-following: SLOW preset, no ramp-up (instant full cruise), NO distance
     // target at all — so `_useTShapeRampDown && _distanceTargetActive` is false every tick and
-    // `stopFloorMag` never leaves its default `Config::PWM_MIN_MAGNITUDE` (35). This is the
+    // `stopFloorMag` never leaves its default `Config::PWM_MIN_MAGNITUDE` (45). This is the
     // cruise/mid-follow path the ramp-down zone is explicitly NOT part of.
     LineArray.mockSetOnline(true);
     LineArray.mockSetJunctionType(JunctionType::NONE);
@@ -218,22 +219,25 @@ static void test_TC7b_mid_follow_correction_clamped_to_line_max_corr()
 
     LineFollower.update();
 
-    // Dispatched pair is cruise (SLOW preset) +/- the clamped correction:
-    //   L = SPEED_SLOW + LINE_MAX_CORR, R = SPEED_SLOW - LINE_MAX_CORR.
-    // With the current tuning (60 +/- 20 => 80 / 40) both wheels land inside
-    // [PWM_MIN_MAGNITUDE (35), PWM_MAX (95)], so deadbandSnap changes neither — the below-floor
-    // snap path is simply not reachable from the line follower at this cap (min wheel 40 > 35).
+    // Dispatched pair is cruise (SLOW preset) +/- the clamped correction, THEN deadbandSnap:
+    //   L = SPEED_SLOW + LINE_MAX_CORR = 80 (inside [floor, PWM_MAX], no snap).
+    //   R = SPEED_SLOW - LINE_MAX_CORR = 40, which is now BELOW the retuned PWM_MIN_MAGNITUDE
+    //   (45), so deadbandSnap floors the small-side wheel UP to the floor. The PWM_MIN_MAGNITUDE
+    //   35->45 retune (commit 55648f2) crossed this boundary — the earlier note "if a future
+    //   retune pushes SPEED_SLOW - LINE_MAX_CORR below PWM_MIN_MAGNITUDE, restore the floor-snap
+    //   assertions" now applies, so the floor-snap IS exercised on the line-follow dispatch here.
+    const int16_t rawR = (int16_t) (Config::SPEED_SLOW - Config::LINE_MAX_CORR);
     const int16_t expL = (int16_t) (Config::SPEED_SLOW + Config::LINE_MAX_CORR);
-    const int16_t expR = (int16_t) (Config::SPEED_SLOW - Config::LINE_MAX_CORR);
+    const int16_t expR =
+        (rawR < Config::PWM_MIN_MAGNITUDE) ? Config::PWM_MIN_MAGNITUDE : rawR;
     ASSERT_EQ(MiniR4.DriveDC.moveCallCount, (uint32_t) 1);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveL, expL);
     ASSERT_EQ(MiniR4.DriveDC.lastMoveR, expR);
 
-    // Document why the floor never engages here: the small-side wheel stays at/above the static
-    // breakaway floor, so this path cannot exercise (nor leak) the kinetic floor. If a future
-    // retune pushes SPEED_SLOW - LINE_MAX_CORR below PWM_MIN_MAGNITUDE, restore the floor-snap
-    // assertions (and see the kinetic-floor-leak guard in test_drive_decel_floor).
-    ASSERT_TRUE(expR >= Config::PWM_MIN_MAGNITUDE);
+    // The small-side wheel is genuinely below the floor pre-snap, so the deadbandSnap floor path
+    // IS exercised here (unlike the pre-retune tune where 40 >= 35 and no snap engaged).
+    ASSERT_TRUE(rawR < Config::PWM_MIN_MAGNITUDE);
+    ASSERT_EQ(expR, (int16_t) Config::PWM_MIN_MAGNITUDE);
 }
 
 // ===========================================================================

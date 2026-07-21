@@ -342,14 +342,14 @@ namespace Config
      *
      * Intentionally decoupled from the active SpeedPreset so that changing cruise speed never
      * silently alters the CRAWL behavior. At 60 the creep sits just below the NORMAL cruise of 70
-     * and comfortably above the `PWM_MIN_MAGNITUDE = 35` deadband floor — a deliberately chosen
+     * and comfortably above the `PWM_MIN_MAGNITUDE = 45` deadband floor — a deliberately chosen
      * absolute PWM, not a fraction of cruise. Deriving it as e.g. `SPEED_NORMAL / 2` at compile
      * time would re-introduce exactly the coupling this constant exists to avoid, and could land
      * below `PWM_MIN_MAGNITUDE` for a slower active motor profile — silently snapped UP to the
      * floor by `deadbandSnap`. Stating the creep PWM explicitly sidesteps both problems.
      *
      * @note Current values (`ConfigDrive.h` / `ConfigGlobal.h`): SPEED_NORMAL = 70,
-     *       SPEED_SLOW = 60, PWM_MIN_MAGNITUDE = 35 — 60 sits just below NORMAL cruise and
+     *       SPEED_SLOW = 60, PWM_MIN_MAGNITUDE = 45 — 60 sits just below NORMAL cruise and
      *       comfortably above the floor for both presets today. Re-derive this note if any of
      *       those three constants are retuned.
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
