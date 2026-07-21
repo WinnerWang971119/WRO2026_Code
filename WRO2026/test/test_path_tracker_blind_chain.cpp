@@ -21,17 +21,16 @@
  *     `[50, 85]`, so `deadbandSnap` never perturbs it (verified against
  *     `WROMath.h::deadbandSnap`). One `cooperativeTick()` right after dispatch
  *     therefore stamps `MiniR4.DriveDC.lastMoveSyncL/R == startPwm` EXACTLY.
- *   - **Brake vs coast at a hop boundary.** `_updateProfile()`'s DONE branch
- *     always calls `MiniR4.DriveDC.Move(0,0)` then `MiniR4.DriveDC.brake(flag)`
- *     at profile completion — for BOTH a true braked stop (mid-hop `flag` would
- *     be `_profileBrake`, which the dispatch sets `false` for a chained mid-hop
- *     via `.setBrake(false)`) and the "chained end, queue empty" coast-release
- *     path (Drive.cpp finding #13, `MiniR4.DriveDC.brake(false)`). So the
- *     precise TC4 observable for "no inter-hop STOP" is `lastBrake == false`
- *     at every mid-hop boundary (the chained-end path emits `Move(0,0)` then
- *     `brake(false)` — a freewheel RELEASE, not a held setpoint; the chassis
- *     keeps rolling from inertia across the boundary until the next chained hop
- *     re-drives the wheels) and `lastBrake == true` ONLY at the run's FINAL hop.
+ *   - **Cruise-hold vs brake at a hop boundary (ADR-059, Drive finding #13 follow-up).** A
+ *     non-braking chained mid-hop (`setBrake(false)`, endSpeed != 0) that completes while the
+ *     FIFO is still empty NO LONGER calls `Move(0,0)+brake`: `_updateProfile` LEAVES the cruise
+ *     setpoint latched and reports idle so the next chained hop overwrites it seamlessly (a
+ *     bounded `Config::CHAIN_HOLD_TIMEOUT_MS` fail-safe issues the deferred stop only if no
+ *     follow-up arrives -- the mock clock does not advance across a boundary here, so it never
+ *     trips). So the precise TC4 observable for "no inter-hop STOP" is that `brakeCallCount` is
+ *     UNCHANGED across every chained mid-hop boundary (no boundary brake at all), and a brake
+ *     fires (`lastBrake == true`) ONLY at the run's braked FINAL hop. TC5 (chaining disabled)
+ *     brakes for real at every node.
  *   - **Exact end PWM.** `tShapeSpeedAt(traveledCm, totalCm, ramps, start, end)`
  *     is a PURE, already-golden-tested (`test_pivot_trim_policy`-sibling
  *     `chain_speed_freshness` / `tshape_profile_freshness`) production policy —
@@ -438,17 +437,18 @@ void test_main_chain_dispatch()
     ASSERT_EQ(Localization.getCurrentNode(), nA);
     ASSERT_FALSE(PathTracker.hasFault());
 
-    // THE NO-STOP ASSERT (TC4 core claim): a brake call DID fire (Drive's
-    // empty-queue chained-end finalize always calls Move(0,0)+brake(flag) --
-    // Drive.cpp finding #13), but with `flag == false` (coast, not stop) for a
-    // chained mid-hop; TC5 (chaining disabled) brakes for real (flag == true).
-    ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop0);
+    // THE NO-STOP ASSERT (TC4 core claim). ADR-059 cruise-hold (Drive finding #13 follow-up): a
+    // non-braking chained mid-hop completing with an empty FIFO LEAVES the cruise setpoint latched
+    // and issues NO `Move(0,0)+brake` at the boundary (the mock clock does not advance, so the
+    // bounded fail-safe never trips) -- the next hop overwrites it seamlessly. So NO brake fires at
+    // a chained mid-hop boundary (chaining ENABLED); TC5 (chaining disabled) brakes for real.
     if (Config::PATH_BLIND_CHAIN_ENABLED)
     {
-        ASSERT_FALSE(MiniR4.DriveDC.lastBrake);
+        ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop0);
     }
     else
     {
+        ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop0);
         ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
     }
 
@@ -471,13 +471,14 @@ void test_main_chain_dispatch()
     const uint32_t brakeCallsBeforeHop1 = MiniR4.DriveDC.brakeCallCount;
     driveChainHopExact(kMainHopDistCm[1], 0.0f);
     ASSERT_EQ(Localization.getCurrentNode(), nB);
-    ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop1);
+    // Chained mid-hop boundary: cruise-hold, no boundary brake (ENABLED); braked stop (DISABLED).
     if (Config::PATH_BLIND_CHAIN_ENABLED)
     {
-        ASSERT_FALSE(MiniR4.DriveDC.lastBrake);
+        ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop1);
     }
     else
     {
+        ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop1);
         ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
     }
     tickUntilBlindDispatch();
@@ -496,13 +497,14 @@ void test_main_chain_dispatch()
     const uint32_t brakeCallsBeforeHop2 = MiniR4.DriveDC.brakeCallCount;
     driveChainHopExact(kMainHopDistCm[2], 0.0f);
     ASSERT_EQ(Localization.getCurrentNode(), nC);
-    ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop2);
+    // Chained mid-hop boundary: cruise-hold, no boundary brake (ENABLED); braked stop (DISABLED).
     if (Config::PATH_BLIND_CHAIN_ENABLED)
     {
-        ASSERT_FALSE(MiniR4.DriveDC.lastBrake);
+        ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop2);
     }
     else
     {
+        ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeHop2);
         ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
     }
     tickUntilBlindDispatch();
@@ -595,8 +597,8 @@ void test_hop_cap_truncates_and_reforms()
     const uint32_t brakeCallsBeforeMid = MiniR4.DriveDC.brakeCallCount;
     driveChainHopExact(kMainHopDistCm[2], 0.0f);
     ASSERT_EQ(Localization.getCurrentNode(), nC);
-    ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeMid);
-    ASSERT_FALSE(MiniR4.DriveDC.lastBrake);    // mid-hop of the re-formed chain -- coast.
+    // Mid-hop of the re-formed chain: ADR-059 cruise-hold -> no boundary brake (seamless handoff).
+    ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeMid);
     tickUntilBlindDispatch();
 
     driveChainHopExact(kMainHopDistCm[3], 0.0f);
@@ -1021,9 +1023,11 @@ void test_line_to_blind_spanning_run_seeds_captured_cruise()
     ASSERT_EQ(plan[0].startPwm, Config::SPEED_NORMAL);
     ASSERT_TRUE(MiniR4.DriveDC.lastMoveSyncL != Config::TSHAPE_START_SPEED);
 
+    const uint32_t brakeCallsBeforeSpanMid = MiniR4.DriveDC.brakeCallCount;
     driveChainHopExact(hopDist[0], 0.0f);
     ASSERT_EQ(Localization.getCurrentNode(), lpA);
-    ASSERT_FALSE(MiniR4.DriveDC.lastBrake);    // mid-hop of the spanning chain -- coast.
+    // Mid-hop of the spanning chain: ADR-059 cruise-hold -> no boundary brake (seamless handoff).
+    ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeCallsBeforeSpanMid);
     tickUntilBlindDispatch();
 
     driveChainHopExact(hopDist[1], 0.0f);

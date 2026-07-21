@@ -962,6 +962,27 @@ namespace Config
     constexpr int16_t TSHAPE_END_SPEED = 0;
 
     /**
+     * @brief Fail-safe window (ms) for the ADR-059 chained-boundary cruise-hold.
+     *
+     * When a NON-braking chained mid-hop (`setBrake(false)`, endSpeed != 0) completes while the
+     * command FIFO is still empty, `Drive` does not `Move(0,0)` — that would dead-zero the wheels
+     * for the 2–3 cooperative ticks the PathTracker FSM needs to plan and dispatch the next hop,
+     * which reads as a stop-and-go on short hops. Instead the completion leaves the cruise setpoint
+     * latched and reports idle so the next hop's dispatch overwrites it seamlessly. This is the
+     * bound on that latch: if no follow-up move takes the wheels within `CHAIN_HOLD_TIMEOUT_MS`,
+     * `_serviceChainHold()` issues the deferred `Move(0,0)+brake(false)` (a chain that ended without
+     * a braked final hop, or a dispatch that never fired). The runaway guard finding #13's unbounded
+     * "leave cruise latched forever" lacked.
+     *
+     * Sized comfortably above the normal 2–3-tick boundary window (~30 ms at ~10 ms/tick) but small
+     * enough that a genuine dispatch failure coasts only a few cm at cruise before the fail-safe
+     * fires. A too-short value just reverts an occasional boundary to the old coast-release (benign,
+     * since the deferred stop is `brake(false)` = coast, identical to finding #13); a too-long value
+     * lengthens the worst-case runaway. Consumer: `DriveClass::_serviceChainHold`.
+     */
+    constexpr uint32_t CHAIN_HOLD_TIMEOUT_MS = 100;
+
+    /**
      * @brief Hysteresis: if `|cruise - endpointSpeed| < TSHAPE_NO_RAMP_EPSILON_PWM`,
      *        skip the ramp on that side entirely.
      *

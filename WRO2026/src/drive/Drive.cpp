@@ -149,6 +149,8 @@ void DriveClass::update()
                               // stall-terminated PUSH → BACK_OFF → DONE wall re-zero push. REUSES
                               // the stop-at-line no-progress watchdog with the stall meaning
                               // inverted to success.
+    _serviceChainHold();     // ADR-059 — clears a chained-boundary cruise-hold once the next hop
+                              // takes the wheels (seamless), or issues the bounded fail-safe stop.
 
     // -------------------------------------------------------------------------------------
     // Stage 3 — if the chassis is fully idle and a queued command is waiting, dispatch it.
@@ -188,6 +190,7 @@ uint8_t DriveClass::stop(bool brake)
     _turnDone         = true;
     _profileState     = ProfileState::IDLE;        // also abort any in-flight profile
     _turnProfileState = TurnProfileState::IDLE;    // also abort any in-flight turn profile
+    _chainHoldActive  = false;                     // this Move(0,0)+brake supersedes any hold
 
     // Abort any in-flight stopAtLine seek too (ADR-027) — restore the front board so LineFollower
     // and any later read sample the forward-facing sensor. The shared teardown re-issues the same
@@ -844,14 +847,30 @@ void DriveClass::_updateProfile()
             _moveDone = true;
             _turnDone = true;
         }
+        else if (!_profileBrake)
+        {
+            // Chained move ending at endSpeed, NOTHING queued (`_qCount == 0`), NON-braking
+            // (`setBrake(false)`) — exclusively a blind-chain mid-hop (the only `setBrake(false)`
+            // profile-move dispatcher; see PathTracker's chain dispatch). The next chained hop is
+            // expected but the FSM needs 2–3 ticks to plan+dispatch it, so the FIFO is momentarily
+            // empty here. Finding #13 used to `Move(0,0)+brake(false)` in this exact spot, which
+            // dead-zeros the wheels across the boundary — a stop-and-go on short hops. Instead ARM
+            // the ADR-059 cruise-hold: leave the endSpeed setpoint latched (the prior tick's
+            // `_profileSpeedAt(near 1.0)` already issued it) and report idle so the next hop's
+            // dispatch takes the wheels via the `_qCount > 0` seamless branch above. `_serviceChainHold`
+            // bounds the latch — the runaway guard finding #13's rejected UNBOUNDED latch lacked.
+            _chainHoldActive  = true;
+            _chainHoldStartMs = millis();
+            _chainHoldBrake   = _profileBrake;    // false — the deferred fail-safe stop coasts
+            _moveDone         = true;
+            _turnDone         = true;
+        }
         else
         {
-            // Chained move ending at endSpeed but NOTHING is queued (`_qCount == 0`, the same
-            // queue-empty predicate `_dispatchNext` uses). The seamless-handoff optimization
-            // above assumed "the next queued move overwrites the cruise setpoint" — with an empty
-            // queue no such move exists, so latching cruise would leave the wheels driving at the
-            // endSpeed setpoint forever while every state accessor reports idle. Fall through to
-            // the brake/stop path instead. W1 (queue review) — finding #13.
+            // Chained move ending at endSpeed, nothing queued, BRAKED (`setBrake(true)`) — the run's
+            // FINAL hop shedding cruise→floor (endSpeed == ±PWM_MIN_MAGNITUDE, not 0), or any braked
+            // end-at-speed move with an empty queue. Stop for real; brake completes floor→rest.
+            // W1 (queue review) — finding #13, braked variant.
             MiniR4.DriveDC.Move(0, 0);
             MiniR4.DriveDC.brake(_profileBrake);
             _moveDone = true;
@@ -865,6 +884,38 @@ void DriveClass::_updateProfile()
     // emitter (the heading is consulted only in GYRO mode).
     const int16_t spd = _profileSpeedAt(frac);
     _emitContinuous(_profileMode, spd, _profileHeading, _decelTailFloorMag(frac));
+}
+
+void DriveClass::_serviceChainHold()
+{
+    // ADR-059 chained-boundary cruise-hold service (finding #13 follow-up). Runs every `update()`
+    // tick; a no-op unless `_updateProfile` armed the hold on a non-braking chained mid-hop.
+    if (!_chainHoldActive)
+    {
+        return;
+    }
+
+    // A new setpoint owner took the wheels — the next chained hop's profile started (or a turn /
+    // seek / wall push), and its own emit overwrote the held cruise setpoint. That is the seamless
+    // handoff the hold exists to enable: drop the hold with NO motor command.
+    if (_profileState != ProfileState::IDLE || _turnProfileState != TurnProfileState::IDLE
+        || _stopState != StopAtLineState::IDLE || _wallState != WallStopState::IDLE)
+    {
+        _chainHoldActive = false;
+        return;
+    }
+
+    // Fail-safe: a fault latched, or the bounded window elapsed with no follow-up move (a chain that
+    // ended without a braked final hop, or a dispatch that never fired). Issue the deferred stop now
+    // — the exact `Move(0,0)+brake(false)` finding #13 would have issued, just bounded-late — so the
+    // "wheels driving while idle" window can never run away.
+    if (hasFault()
+        || (uint32_t) (millis() - _chainHoldStartMs) >= Config::CHAIN_HOLD_TIMEOUT_MS)
+    {
+        MiniR4.DriveDC.Move(0, 0);
+        MiniR4.DriveDC.brake(_chainHoldBrake);
+        _chainHoldActive = false;
+    }
 }
 
 int16_t DriveClass::_profileSpeedAt(float frac) const

@@ -781,6 +781,23 @@ private:
     int16_t  _profileHeading  = 0;    ///< Heading target for GYRO mode.
 
     // -------------------------------------------------------------------------------------
+    // ADR-059 chained-boundary cruise-hold (finding #13 follow-up). A NON-braking chained
+    // mid-hop (`setBrake(false)`, endSpeed != 0) whose profile completes while the FIFO is still
+    // empty must NOT `Move(0,0)`: that dead-zeros the wheels for the 2–3 ticks the FSM needs to
+    // plan+dispatch the next hop, which reads as a stop-and-go on short hops. `_updateProfile`
+    // instead LEAVES the cruise setpoint latched and reports idle so the next hop overwrites it
+    // seamlessly; `_serviceChainHold` issues the deferred `Move(0,0)+brake` if no follow-up move
+    // takes the wheels within `Config::CHAIN_HOLD_TIMEOUT_MS` (the runaway bound finding #13's
+    // rejected UNBOUNDED latch lacked). Only a `setBrake(false)` profile move — exclusively the
+    // blind-chain mid-hops — can arm this; a braked end-at-speed hop (e.g. the run's FINAL hop)
+    // still stops immediately.
+    // -------------------------------------------------------------------------------------
+    bool     _chainHoldActive  = false; ///< A chained-boundary cruise-hold is latched.
+    uint32_t _chainHoldStartMs = 0;     ///< `millis()` the hold began (fail-safe deadline epoch).
+    bool     _chainHoldBrake   = false; ///< Brake flag the fail-safe applies (== the held hop's
+                                        ///< `_profileBrake`, i.e. false/coast).
+
+    // -------------------------------------------------------------------------------------
     // GYRO heading-hold PD state (ADR-075) — written by `_emitGyroHold` only. Mutually
     // exclusive across the three continuous FSMs (profile / stopAtLine seek / wallStop push):
     // only one GYRO segment is in flight at a time, so a single prev-sample suffices. Keyed to
@@ -1299,13 +1316,32 @@ private:
      * marks the done flags, and returns to `IDLE`. The DONE branch SPLITS by endSpeed:
      *   - `_profileEndSpd == 0` → inline `Move(0,0) + brake(_profileBrake)` (does NOT call
      *     `stop()` because that would `_clearQueue()` and wipe queued follow-ups; W1 fix).
-     *   - `_profileEndSpd != 0` → no motor command at all; the prior tick's setpoint (already
-     *     at endSpeed) holds, and the next queued move's first tick overwrites it. This is
-     *     how chained moves preserve cruise across boundaries.
+     *   - `_profileEndSpd != 0`, queue NON-empty → no motor command at all; the prior tick's
+     *     setpoint (already at endSpeed) holds, and the next queued move's first tick overwrites
+     *     it. This is how chained moves preserve cruise across boundaries.
+     *   - `_profileEndSpd != 0`, queue empty, `!_profileBrake` → arm the ADR-059 cruise-hold: leave
+     *     the cruise setpoint latched and report idle so the FSM can dispatch the next chained hop
+     *     (which the FIFO-non-empty path above then hands off seamlessly). `_serviceChainHold()`
+     *     bounds the latch. This replaces finding #13's immediate `Move(0,0)` for a non-braking hop.
+     *   - `_profileEndSpd != 0`, queue empty, `_profileBrake` → inline `Move(0,0)+brake` (the run's
+     *     braked FINAL hop shedding cruise→floor, or any braked end-at-speed move; unchanged).
      *
      * @note Idempotent when `_profileState == IDLE` — short-circuits immediately.
      */
     void _updateProfile();
+
+    /**
+     * @brief Service the ADR-059 chained-boundary cruise-hold armed by `_updateProfile` (finding
+     *        #13 follow-up). Called once per `update()` tick.
+     *
+     * No-op unless `_chainHoldActive`. Clears the hold with NO motor command the moment a new
+     * setpoint owner takes the wheels (a profile / turn / seek / wall push left `IDLE`) — the
+     * seamless handoff a non-braking chained mid-hop expects. Otherwise, if a fault latched or the
+     * `Config::CHAIN_HOLD_TIMEOUT_MS` window elapsed with no follow-up, issues the deferred
+     * `Move(0,0) + brake(_chainHoldBrake)` — the exact stop finding #13 would have issued, just
+     * bounded-late. Keeps the "wheels driving while idle" window bounded (the runaway guard).
+     */
+    void _serviceChainHold();
 
     /**
      * @brief Cooperative tick for the turn PD controller (ADR-068 — replaces

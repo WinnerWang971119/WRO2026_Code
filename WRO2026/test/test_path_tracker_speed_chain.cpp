@@ -18,10 +18,11 @@
  *
  * The observables are the SAME lower-MCU facts the ADR-059 blind-chain test reads
  * off the real `Drive.cpp` through the `MiniR4.DriveDC` mock:
- *   - **`lastBrake`** at a hop boundary: a chained mid-hop coast-releases
- *     (`brake(false)`); a chain that ENDED at that hop brakes for real
- *     (`brake(true)`). This is the observable for "did the run chain THROUGH this
- *     hop or stop AT it" (see `test_path_tracker_blind_chain.cpp`'s docblock).
+ *   - **Boundary brake** at a hop boundary: a chained mid-hop now holds cruise (ADR-059
+ *     cruise-hold, Drive finding #13 follow-up) -- it issues NO `Move(0,0)+brake` at the
+ *     boundary, so `brakeCallCount` is UNCHANGED across it; a chain that ENDED at that hop
+ *     brakes for real (`brakeCallCount` bumps, `lastBrake == true`). This is the observable for
+ *     "did the run chain THROUGH this hop or stop AT it" (see the blind_chain docblock).
  *   - **`lastMoveSyncL`** for the SYNC cruise magnitude a hop launches / seeks at.
  *
  * TCs (2026-07-14 mode/speed plan, T14host):
@@ -181,14 +182,14 @@ void test_tc10b_same_tier_mode_mix_chains()
     tickUntilMoveInFlight();
 
     // The walk-ahead admits Q1->Q2 (same NORMAL tier; a SYNC<->GYRO mode mix is NOT a
-    // break), so a 2-hop chain forms and Q0->Q1 is a chained MID-hop: it coast-releases
-    // at Q1 (`brake(false)`), NOT a real braked stop.
+    // break), so a 2-hop chain forms and Q0->Q1 is a chained MID-hop. ADR-059 cruise-hold
+    // (Drive finding #13 follow-up): it completes with an empty FIFO and `setBrake(false)`, so
+    // `_updateProfile` LEAVES the cruise setpoint latched and issues NO `Move(0,0)+brake` at the
+    // boundary (the mock clock does not advance, so the bounded fail-safe never trips) -- the next
+    // hop overwrites the setpoint seamlessly.
     const uint32_t brakeBefore = MiniR4.DriveDC.brakeCallCount;
-    ASSERT_EQ(driveBlindHopUntilNodeAdvances(), q1);
-    // A brake WAS emitted at the Q1 boundary (rules out a never-braked / hung path -- the
-    // same coast-release idiom as test_path_tracker_blind_chain.cpp's TC4)...
-    ASSERT_GT(MiniR4.DriveDC.brakeCallCount, brakeBefore);
-    ASSERT_FALSE(MiniR4.DriveDC.lastBrake);    // ...and it was a coast (brake(false)), not a braked stop.
+    ASSERT_EQ(driveBlindHopUntilNodeAdvances(), q1);         // node advanced -> not hung.
+    ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeBefore);   // seamless hold: no boundary brake.
     ASSERT_FALSE(PathTracker.hasFault());
 }
 
