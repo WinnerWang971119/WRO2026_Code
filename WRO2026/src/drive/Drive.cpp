@@ -1227,6 +1227,39 @@ void DriveClass::_updateTurnProfile()
         _turnPhase = natural;
     }
 
+    // STOP-AT-TARGET (operator design): the instant the chassis reaches or passes the commanded
+    // heading — `errProg <= 0` in the progress frame (yaw has hit the target) — latch SETTLE so the
+    // CRUISE/CREEP drive halts and the terminal settle takes over, instead of creep-reversing back
+    // and forth across the target. Monotonic with the latch above (SETTLE never regresses). NOTE:
+    // this only ever fires once the turn is CONVERGING (errProg actually decreasing to 0); while the
+    // rotation direction is inverted the error grows and the target is never reached.
+    if (errProg <= 0.0f)
+    {
+        _turnPhase = TurnPhase::SETTLE;
+    }
+
+    // TEMP turn trace (diagnostic — remove once the turn is fixed). Throttled to ~10 Hz so it does
+    // not flood the USB CDC and stall the loop. When benching, redirect the monitor to a FILE (no
+    // `| tee`). Reads: yaw should track the physical spin, err should SHRINK toward 0 (converging)
+    // and NOT grow, ph should climb 0->1->2 (CRUISE->CREEP->SETTLE), sgn is the frozen turn sign.
+    static uint32_t _dbgTurnMs = 0;
+    if ((uint32_t) (millis() - _dbgTurnMs) >= 100)
+    {
+        _dbgTurnMs = millis();
+        Serial.print(F("[turn] yaw="));
+        Serial.print((float) curYaw, 1);
+        Serial.print(F(" tgt="));
+        Serial.print(_turnTargetYaw, 1);
+        Serial.print(F(" err="));
+        Serial.print(errProg, 1);
+        Serial.print(F(" ph="));
+        Serial.print((int) _turnPhase);
+        Serial.print(F(" brk="));
+        Serial.print((int) _turnBrokeAway);
+        Serial.print(F(" sgn="));
+        Serial.println((int) _turnDeltaSign);
+    }
+
     // Settle exit — only inside the latched SETTLE phase (the phase is monotonic, so the debounce
     // only matters here). `turnSettleStep` counts a sample in-band only at strict `absErr < TOL`; a
     // single out-of-band sample resets the count to 0. On `TURN_SETTLE_SAMPLES` consecutive in-band

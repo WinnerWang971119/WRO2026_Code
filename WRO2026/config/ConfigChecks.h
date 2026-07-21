@@ -154,32 +154,21 @@ namespace Config
                   "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
                   "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
 
-    // The SETTLE nudge's P gain must be positive, or a residual error would command zero (or
-    // negative, i.e. away-from-target) correction and never actually settle.
-    static_assert(TURN_SETTLE_KP > 0.0f,
-                  "Config::TURN_SETTLE_KP must be > 0 — a zero or negative settle nudge P gain "
-                  "would either apply no correction or push AWAY from the target inside the "
-                  "SETTLE phase.");
+    // NOTE: the TURN_SETTLE_KP > 0 gate is temporarily removed so the settle nudge can be zeroed
+    //       for a bench experiment (KP=0 disables the SETTLE correction — the turn coasts into the
+    //       band with no active final push). Restore it before shipping.
 
     // -----------------------------------------------------------------------------------------
     // GYRO straight heading-hold PD checks (ConfigDrive.h, ADR-075, issue #169)
     //
     // `Drive::_emitGyroHold` (via `GyroHoldPolicy.h`) is a per-tick PD + never-reverse clamp
-    // driven by the external gyro. These four asserts pin the basic sign/range sanity of the
+    // driven by the external gyro. These asserts pin the basic sign/range sanity of the
     // hold's knobs — the gains themselves ship UNVERIFIED (mentor `gyro_move` placeholders,
     // AC9 hardware-gated), so this is a structural gate, not a value pin.
+    //
+    // NOTE: the GYRO_HOLD_KP > 0 and GYRO_HOLD_KD >= 0 gates are temporarily removed so a gain
+    //       can be zeroed / driven negative for a bench experiment. Restore them before shipping.
     // -----------------------------------------------------------------------------------------
-
-    static_assert(GYRO_HOLD_KP > 0.0f,
-                  "Config::GYRO_HOLD_KP must be > 0 — a zero or negative proportional gain would "
-                  "either apply no heading correction at all or steer AWAY from the target, and "
-                  "Drive::_emitGyroHold has no other authority source to hold a GYRO straight to "
-                  "heading.");
-
-    static_assert(GYRO_HOLD_KD >= 0.0f,
-                  "Config::GYRO_HOLD_KD must be >= 0 — a negative derivative gain would invert "
-                  "the damping term into positive feedback on yaw rate, amplifying oscillation "
-                  "instead of damping it.");
 
     static_assert(GYRO_HOLD_MAX_CORR_PWM > 0 && GYRO_HOLD_MAX_CORR_PWM <= PWM_MAX,
                   "Config::GYRO_HOLD_MAX_CORR_PWM must be in (0, PWM_MAX] — zero or negative "

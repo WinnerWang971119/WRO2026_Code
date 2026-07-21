@@ -552,7 +552,7 @@ namespace Config
      * @note TODO: tune on real chassis.
      */
 #ifndef TURN_CRUISE_PWM_DEFAULT
-#define TURN_CRUISE_PWM_DEFAULT 50
+#define TURN_CRUISE_PWM_DEFAULT 55
 #endif
     constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
@@ -596,7 +596,7 @@ namespace Config
      *          and must never regress below the measured sustain floor or CREEP stalls.
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 38
+#define TURN_CREEP_PWM_DEFAULT 30
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
@@ -618,7 +618,7 @@ namespace Config
      *       break away on the first ticks.
      */
 #ifndef TURN_BREAKAWAY_PWM_DEFAULT
-#define TURN_BREAKAWAY_PWM_DEFAULT 46
+#define TURN_BREAKAWAY_PWM_DEFAULT 50
 #endif
     constexpr int16_t TURN_BREAKAWAY_PWM = TURN_BREAKAWAY_PWM_DEFAULT;
 
@@ -634,7 +634,7 @@ namespace Config
      *       the IMU noise floor.
      */
 #ifndef TURN_BREAKAWAY_MOTION_DEG_DEFAULT
-#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 1.0f
+#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 2.0f
 #endif
     constexpr float TURN_BREAKAWAY_MOTION_DEG = TURN_BREAKAWAY_MOTION_DEG_DEFAULT;
 
@@ -689,7 +689,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 3.0f;
+    constexpr float TURN_TOLERANCE_DEG = 0.5f;
 
     /**
      * @brief SETTLE-phase P gain for the turn profile's terminal nudge, in PWM per degree
@@ -705,7 +705,7 @@ namespace Config
      * @note TODO: bench-tune (T11).
      */
 #ifndef TURN_SETTLE_KP_DEFAULT
-#define TURN_SETTLE_KP_DEFAULT 4.0f
+#define TURN_SETTLE_KP_DEFAULT 10.0f
 #endif
     constexpr float TURN_SETTLE_KP = TURN_SETTLE_KP_DEFAULT;
 
@@ -746,7 +746,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 500;
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 3000;
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");

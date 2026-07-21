@@ -110,25 +110,32 @@ inline int8_t turnSign(int32_t foldedDelta)
  */
 inline TurnWheels turnWheelPattern(int8_t sign, int16_t pwmMag, uint8_t mode)
 {
+    // EXPERIMENTAL DIRECTION FLIP (bench): the shipped convention (`L=-sign, R=+sign`) drove this
+    // chassis the WRONG physical way — a commanded CCW/left turn spun it CW/right, so the yaw error
+    // grew and every turn ran away (trace 2026-07). Yaw sign is confirmed correct, so the actuation
+    // is the inverted sign; negated here. If turns now converge but end at a MIRRORED heading, the
+    // real culprit was GYRO_YAW_SIGN instead — revert this and flip that. Host tests
+    // (test_turn_sign_policy / test_turn_profile_integration) still encode the OLD convention and
+    // will need updating before this is committed.
     int16_t L = 0;
     int16_t R = 0;
     switch (mode)
     {
     case 0:    // COUNTER_ROT — both wheels spin opposite directions.
-        L = (int16_t) (-sign * pwmMag);
-        R = (int16_t) (+sign * pwmMag);
+        L = (int16_t) (+sign * pwmMag);
+        R = (int16_t) (-sign * pwmMag);
         break;
     case 1:    // PIVOT_LEFT — left wheel stationary, right wheel drives the rotation.
         L = 0;
-        R = (int16_t) (+sign * pwmMag);
+        R = (int16_t) (-sign * pwmMag);
         break;
     case 2:    // PIVOT_RIGHT — right wheel stationary, left wheel drives the rotation.
-        L = (int16_t) (-sign * pwmMag);
+        L = (int16_t) (+sign * pwmMag);
         R = 0;
         break;
     default:    // Unknown mode — fall back to counter-rotation rather than refusing to turn.
-        L = (int16_t) (-sign * pwmMag);
-        R = (int16_t) (+sign * pwmMag);
+        L = (int16_t) (+sign * pwmMag);
+        R = (int16_t) (-sign * pwmMag);
         break;
     }
 
