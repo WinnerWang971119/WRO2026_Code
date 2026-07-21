@@ -40,12 +40,12 @@ namespace Config
     //
     // Default to the front gains so behaviour is unchanged until the rear set is tuned — replace
     // with the tuner's printed REAR values once measured.
-    // ---------------------------------------------------------------------------------------
+    // -------------------------------------------6-------------------------------------------
 
     /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KP_REAR = 5.0;
+    constexpr float LINE_KP_REAR = 6.5f;
     /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KD_REAR = 1.2;
+    constexpr float LINE_KD_REAR = 11.6f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

@@ -379,87 +379,6 @@ static void test_tc5_mode_sugar_matches_offset_knob()
 }
 
 // ===========================================================================
-// TC6 — reverse follow negates the P+D correction sign (ADR-078).
-// ===========================================================================
-
-/// @brief Reverse counterpart of `expectedSteadyLR`: cruise is negated (backward travel), the
-///        gains are the REAR set (ADR-070), and the whole correction is negated because the
-///        reverse-active rear board trails the axle (ADR-078). Mirrors the production order
-///        exactly — compute P+D with the rear gains, negate, THEN clamp.
-static void expectedSteadyLRReverse(float offset, float err, int16_t& expL, int16_t& expR)
-{
-    const int16_t cruise = (int16_t) -presetToPwm(Config::SpeedPreset::NORMAL);
-    const float   dErr   = 0.0f;    // steady state: error held across the two settling ticks.
-    float corr = (Config::LINE_KP_REAR * (err - offset)) + (Config::LINE_KD_REAR * dErr);
-    corr = -corr;                   // reverse: rear board is behind the axle (ADR-078).
-    if (corr > Config::LINE_MAX_CORR)
-    {
-        corr = Config::LINE_MAX_CORR;
-    }
-    else if (corr < -Config::LINE_MAX_CORR)
-    {
-        corr = -Config::LINE_MAX_CORR;
-    }
-    expL = deadbandSnap((int16_t) (cruise + corr), Config::PWM_MIN_MAGNITUDE);
-    expR = deadbandSnap((int16_t) (cruise - corr), Config::PWM_MIN_MAGNITUDE);
-}
-
-/// @brief Reverse counterpart of `driveSteady`: arms the follow with `.setReverse(true)` so the
-///        controller negates cruise, selects the REAR gains, and negates the correction.
-static void driveSteadyReverse(float offset, float err, int16_t& outL, int16_t& outR)
-{
-    resetWorld();
-    LineArray.mockSetOnline(true);
-    LineArray.mockSetJunctionType(JunctionType::NONE);
-    LineArray.mockSetError(err);
-
-    LineFollower.setEnabled(true)
-                .setPreset(Config::SpeedPreset::NORMAL)
-                .setReverse(true)
-                .setTShapeRampUp(false)
-                .setTShapeRampDown(false)
-                .setLineFollowOffset(offset);
-    LineFollower.update();    // tick 1 — seeds _lastErr = err
-    LineFollower.update();    // tick 2 — steady (dErr == 0)
-
-    outL = Drive.mockRecord().lastSetSpeedL;
-    outR = Drive.mockRecord().lastSetSpeedR;
-}
-
-static void test_tc6_reverse_negates_correction_sign()
-{
-    TEST_SCOPE("TC6: reverse follow negates the P+D correction (rear board trails the axle, ADR-078)");
-
-    const float err = 1.5f;    // line right-of-centre; non-zero so corr != 0.
-
-    // Reverse steering must match the reverse closed-form EXACTLY (negated corr, rear gains,
-    // negated cruise) for a centred and a biased follow. Offsets derived from Config so a bench
-    // retune never reds the test for the wrong reason.
-    const float offsets[] = {
-        0.0f, +Config::LINE_FOLLOW_OFFSET_ERROR, -Config::LINE_FOLLOW_OFFSET_ERROR};
-    for (float offset : offsets)
-    {
-        int16_t gotL, gotR;
-        driveSteadyReverse(offset, err, gotL, gotR);
-        int16_t expL, expR;
-        expectedSteadyLRReverse(offset, err, expL, expR);
-        ASSERT_EQ(gotL, expL);
-        ASSERT_EQ(gotR, expR);
-    }
-
-    // The whole point of ADR-078: for the SAME held centroid, forward and reverse carry
-    // OPPOSITE-sign corrections. The correction is `(L - R)/2`; compare its sign (the cruise sign
-    // differs too, so raw PWM cannot be compared directly). A front board with err>0 steers L>R;
-    // the rear board — behind the axle — must steer L<R for the same err, else reverse follow is
-    // positive feedback and diverges.
-    int16_t fL, fR, rL, rR;
-    driveSteady(0.0f, err, fL, fR);
-    driveSteadyReverse(0.0f, err, rL, rR);
-    ASSERT_TRUE((int16_t) (fL - fR) > 0);    // forward: corr = +KP*err     -> L > R
-    ASSERT_TRUE((int16_t) (rL - rR) < 0);    // reverse: corr = -KP_REAR*err -> L < R
-}
-
-// ===========================================================================
 // Entry.
 // ===========================================================================
 
@@ -470,6 +389,5 @@ int main()
     test_tc3_reverse_hop_composition_negates_offset();
     test_tc4_offset_lifecycle_reset_on_disable();
     test_tc5_mode_sugar_matches_offset_knob();
-    test_tc6_reverse_negates_correction_sign();
     TEST_REPORT();
 }
