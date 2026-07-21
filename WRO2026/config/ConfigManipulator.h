@@ -256,8 +256,8 @@ namespace Config
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
         { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
-        { BeltMode::POSITION,    1380,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION,    900,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
+        { BeltMode::POSITION,    1300,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
         { BeltMode::POSITION,    920,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
         { BeltMode::POSITION,    400,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
         { BeltMode::POSITION,    5,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate

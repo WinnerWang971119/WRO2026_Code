@@ -355,7 +355,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 40;
+    constexpr int16_t CRAWL_PWM = 46;
 
     /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.

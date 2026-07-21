@@ -301,7 +301,7 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     //_grabToBin(0);
 
 
-    PathTracker.goTo("MR").setArrivalDirection(Direction::FRONT);
+    /*PathTracker.goTo("MR").setArrivalDirection(Direction::FRONT);
     Drive.turnToYaw(90);
     PathTracker.goTo("MYD").setArrivalDirection(Direction::FRONT);
     Manipulator.dumper.open();
@@ -334,9 +334,15 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     Manipulator.dump();
     _waitMs(500);
     Manipulator.dumpReset();
-    PathTracker.goTo("dump2");
+    PathTracker.goTo("dump2");*/
 
+    
+    
+    
 
+    Manipulator.beltTo(Config::BeltStation::REAR_BOX_CLOSE);
+    Manipulator.beltTo(Config::BeltStation::REAR_BOX_OPEN);
+    Manipulator.beltTo(Config::BeltStation::MID);
     
 
     return true;
@@ -1033,7 +1039,7 @@ namespace
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i3");
-    Drive.turnToYaw(90);
+    Drive.turnDeg(-90);
     return _visionRead();
 }
 
@@ -1109,7 +1115,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     // Enter the wall through the reset node — a direct run at a row node crosses the mosaic.
     // `MR` is a NodeType::RESET node, so arriving squares up, presses the rear into the wall
     // and re-anchors Localization on its own.
-    Manipulator.beltTo(Config::BeltStation::GRAB_MID);
+    Manipulator.beltTo(Config::BeltStation::MID);
     PathTracker.goTo(kMosaicResetNode);
 
     for (uint8_t i = 0; i < tiles; ++i)
@@ -1161,6 +1167,8 @@ bool TasksClass::debries(const TaskArgs& /*args*/)
 
     PathTracker.goTo("CY1").setArrivalDirection(Direction::REAR);
     Manipulator.boxClose();
+    PathTracker.goTo("CY2").setArrivalDirection(Direction::FRONT);
+    Drive.turnDeg(-90);
     PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
     Manipulator.boxOpen();
     return true;
@@ -1169,14 +1177,14 @@ bool TasksClass::debries(const TaskArgs& /*args*/)
 bool TasksClass::dumpMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
-    Manipulator.dumper.open();
-    Manipulator.dumper.close();
+    Manipulator.dump();
+    Manipulator.dumpReset();
     PathTracker.goTo("dump2").setArrivalDirection(Direction::REAR);
-    Manipulator.dumper.open();
-    Manipulator.dumper.close();
+    Manipulator.dump();
+    Manipulator.dumpReset();
     PathTracker.goTo("dump3").setArrivalDirection(Direction::REAR);
-    Manipulator.dumper.open();
-    Manipulator.dumper.close();
+    Manipulator.dump();
+    Manipulator.dumpReset();
     return true;
 }
 

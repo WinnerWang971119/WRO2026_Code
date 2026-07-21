@@ -66,10 +66,10 @@ namespace Config
      * so P+D corrections always result in motion. Zero commands pass through —
      * the caller intended to stop, deadband is irrelevant.
      */
-    constexpr int16_t PWM_MIN_MAGNITUDE = 35;
+    constexpr int16_t PWM_MIN_MAGNITUDE = 45;
 
 #ifndef PWM_MOVING_MIN_DEFAULT
-#define PWM_MOVING_MIN_DEFAULT 30
+#define PWM_MOVING_MIN_DEFAULT 35
 #endif
     /** @brief Kinetic (moving) deadband floor for the tShape/line-stop decel tail.
      *  @warning Load-bearing: consumed by Drive::_updateProfile decel, Drive::setSpeed,
