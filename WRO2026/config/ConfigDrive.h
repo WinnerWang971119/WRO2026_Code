@@ -547,7 +547,7 @@ namespace Config
      * @note TODO: tune on real chassis.
      */
 #ifndef TURN_CRUISE_PWM_DEFAULT
-#define TURN_CRUISE_PWM_DEFAULT 50
+#define TURN_CRUISE_PWM_DEFAULT 60
 #endif
     constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
@@ -564,7 +564,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 1.5f
+#define TURN_KP_DEFAULT 2.0f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -586,7 +586,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 10.0f
+#define TURN_KD_DEFAULT 6.0f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -602,7 +602,7 @@ namespace Config
      * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
      */
 #ifndef TURN_CREEP_THRESH_PWM_DEFAULT
-#define TURN_CREEP_THRESH_PWM_DEFAULT 25
+#define TURN_CREEP_THRESH_PWM_DEFAULT 40
 #endif
     constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
 
@@ -621,7 +621,7 @@ namespace Config
      * which lands on target on this chassis.
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 20
+#define TURN_CREEP_PWM_DEFAULT 35
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
@@ -643,7 +643,7 @@ namespace Config
      *       break away on the first ticks.
      */
 #ifndef TURN_BREAKAWAY_PWM_DEFAULT
-#define TURN_BREAKAWAY_PWM_DEFAULT 46
+#define TURN_BREAKAWAY_PWM_DEFAULT 50
 #endif
     constexpr int16_t TURN_BREAKAWAY_PWM = TURN_BREAKAWAY_PWM_DEFAULT;
 
@@ -659,7 +659,7 @@ namespace Config
      *       the IMU noise floor.
      */
 #ifndef TURN_BREAKAWAY_MOTION_DEG_DEFAULT
-#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 1.0f
+#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 2.0f
 #endif
     constexpr float TURN_BREAKAWAY_MOTION_DEG = TURN_BREAKAWAY_MOTION_DEG_DEFAULT;
 
@@ -732,7 +732,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 3.0f;
+    constexpr float TURN_TOLERANCE_DEG = 0.8f;
 
     /**
      * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
@@ -770,7 +770,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 500;
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 3000;
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");
