@@ -1036,6 +1036,90 @@ static void test_TC21_classify_bad_code_before_sta_gate()
 }
 
 // ===========================================================================
+// T15 — fakeRead(): latch a caller-supplied mosaic with NO camera read.
+//   * getColor(cell) returns the injected colour for every cell (UNKNOWN included).
+//   * banded colours (YELLOW/GREEN/BLUE) get a representative hue that classifies back
+//     to the same colour; achromatic/bandless colours (WHITE/RED) and UNKNOWN latch the
+//     VISION_RAW_HUE_NONE sentinel.
+//   * return value is true, _hasRead flips (getColor no longer returns the pre-read
+//     sentinel), and a pre-existing fault is cleared.
+//   * the braced-inline call form (fakeRead({...})) compiles and latches.
+// ===========================================================================
+static void test_T15_fakeRead_latches_and_clears_fault()
+{
+    TEST_SCOPE("T15: fakeRead latches injected mosaic, coherent hues, clears fault");
+
+    resetWorld();
+
+    // First latch a BAD_CELL fault via a real (mock) read so we can prove fakeRead clears it. An
+    // all-device-Black frame classifies EVERY cell UNKNOWN regardless of the hue bands or the mask
+    // config, so this faults deterministically (strict guard OR over-budget mask -> BAD_CELL).
+    std::vector<uint8_t> blackFrames;
+    for (int i = 0; i < 3; ++i)
+    {
+        const std::vector<uint8_t> one = buildUniformFrame(kHueBlack, kStaHigh);
+        blackFrames.insert(blackFrames.end(), one.begin(), one.end());
+    }
+    stageInjection(blackFrames);
+    Vision.setTickCallback(injectTickCallback);
+    ASSERT_FALSE(Vision.readMosaic());
+    ASSERT_TRUE(Vision.hasFault());
+    Vision.setTickCallback(nullptr);
+
+    // Inject a mixed mosaic: banded + bandless + UNKNOWN so both raw-hue paths are exercised.
+    const Config::Color pattern[Config::VISION_CELL_COUNT] = {
+        Config::Color::YELLOW, Config::Color::GREEN,  Config::Color::BLUE,
+        Config::Color::WHITE,  Config::Color::RED,    Config::Color::UNKNOWN,
+        Config::Color::YELLOW, Config::Color::GREEN,  Config::Color::BLUE,
+        Config::Color::WHITE,  Config::Color::RED,    Config::Color::YELLOW,
+    };
+
+    const bool ok = Vision.fakeRead(pattern);
+
+    ASSERT_TRUE(ok);
+    ASSERT_FALSE(Vision.hasFault());    // the prior BAD_CELL fault is cleared by the injection
+    ASSERT_TRUE(Vision.getFault().kind == VisionClass::Fault::NONE);
+
+    for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
+    {
+        // getColor is authoritative — exactly what we injected, even for the UNKNOWN cell.
+        ASSERT_TRUE(Vision.getColor(cell) == pattern[cell]);
+
+        const uint8_t raw = Vision.getRawHue(cell);
+        if (pattern[cell] == Config::Color::YELLOW || pattern[cell] == Config::Color::GREEN
+            || pattern[cell] == Config::Color::BLUE)
+        {
+            // Banded colour: the representative hue round-trips through classifyHue back to the
+            // same colour. Asserted this way (not against a hardcoded midpoint) so re-tuning the
+            // bands never breaks the test.
+            ASSERT_TRUE(raw != Config::VISION_RAW_HUE_NONE);
+            ASSERT_TRUE(VisionFrame::classifyHue(raw, kStaHigh) == pattern[cell]);
+        }
+        else
+        {
+            // WHITE (achromatic), RED (no band yet), UNKNOWN: no representative hue -> sentinel.
+            ASSERT_EQ(raw, Config::VISION_RAW_HUE_NONE);
+        }
+    }
+
+    // Out-of-range indices still return the documented safe sentinels after a fake read.
+    ASSERT_TRUE(Vision.getColor(Config::VISION_CELL_COUNT) == Config::Color::UNKNOWN);
+    ASSERT_EQ(Vision.getRawHue(Config::VISION_CELL_COUNT), Config::VISION_RAW_HUE_NONE);
+
+    // The braced-inline call form the operator uses compiles and latches (too-few would zero-fill,
+    // too-many is a hard compile error — so the count is checked at build time).
+    Vision.fakeRead({
+        Config::Color::RED, Config::Color::RED, Config::Color::RED, Config::Color::RED,
+        Config::Color::RED, Config::Color::RED, Config::Color::RED, Config::Color::RED,
+        Config::Color::RED, Config::Color::RED, Config::Color::RED, Config::Color::RED,
+    });
+    for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
+    {
+        ASSERT_TRUE(Vision.getColor(cell) == Config::Color::RED);
+    }
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -1075,6 +1159,9 @@ int main()
 
     // Unit — precedence.
     test_TC21_classify_bad_code_before_sta_gate();
+
+    // Injection seam — fakeRead().
+    test_T15_fakeRead_latches_and_clears_fault();
 
     TEST_REPORT();
 }

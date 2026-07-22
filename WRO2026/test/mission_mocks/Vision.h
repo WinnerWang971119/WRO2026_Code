@@ -59,6 +59,20 @@ public:
     bool readMosaic() { return true; }
 
     /**
+     * @brief Latch a caller-supplied mosaic as if a read succeeded (mirrors the real `fakeRead`).
+     * @param colors Source array of exactly `Config::VISION_CELL_COUNT` colours.
+     * @return `true` always (an explicit injection cannot fail).
+     */
+    bool fakeRead(const Config::Color (&colors)[Config::VISION_CELL_COUNT])
+    {
+        for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
+        {
+            _colors[i] = colors[i];
+        }
+        return true;
+    }
+
+    /**
      * @brief Latched colour for cell @p cell (UNKNOWN until injected via `_setInjectedColors`).
      * @return `Config::Color::UNKNOWN` for an out-of-range index (mirrors the real sentinel).
      */

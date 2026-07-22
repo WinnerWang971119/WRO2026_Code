@@ -124,6 +124,25 @@ public:
         return success;
     }
 
+    /**
+     * @brief Latch a caller-supplied mosaic as if a read succeeded (mirrors the real `fakeRead`).
+     *
+     * Copies the colours into the mock's latch and returns `true`. Records NO `read_mosaic` op —
+     * `fakeRead()` is a non-camera injection, distinct from `readMosaic()`, so it does not touch
+     * the call counter or the CTPS op log.
+     *
+     * @param colors Source array of exactly `Config::VISION_CELL_COUNT` colours.
+     * @return `true` always (an explicit injection cannot fail).
+     */
+    bool fakeRead(const Config::Color (&colors)[Config::VISION_CELL_COUNT])
+    {
+        for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
+        {
+            _colors[i] = colors[i];
+        }
+        return true;
+    }
+
     // -----------------------------------------------------------------------------------------
     // Getters (pure, safe-sentinel — mirror the real bounds-checking contract)
     // -----------------------------------------------------------------------------------------

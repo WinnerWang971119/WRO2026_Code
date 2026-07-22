@@ -578,6 +578,49 @@ bool VisionClass::_readMosaic(bool diagnostic)
 }
 
 // -----------------------------------------------------------------------------------------
+// Injection (bench-test / camera-failure fallback seam)
+// -----------------------------------------------------------------------------------------
+
+uint8_t VisionClass::_canonicalHue(Config::Color color)
+{
+    // Representative hue for a FAKE cell: the midpoint of the colour's HUE_BANDS entry, so
+    // getRawHue() stays consistent with classifyHue() for the banded colours. Colours with no
+    // chromatic band (achromatic WHITE, bench-TODO RED, UNKNOWN) have no representative hue and
+    // fall through to the no-data sentinel. No WHITE-macro guard needed — this TU never includes
+    // MatrixMiniR4.h, so nothing #defines WHITE (we also never name the enumerator here).
+    for (const Config::HueBand& band : Config::HUE_BANDS)
+    {
+        if (band.color == color)
+        {
+            return static_cast<uint8_t>(
+                (static_cast<uint16_t>(band.lo) + static_cast<uint16_t>(band.hi)) / 2u);
+        }
+    }
+    return Config::VISION_RAW_HUE_NONE;
+}
+
+bool VisionClass::fakeRead(const Config::Color (&colors)[Config::VISION_CELL_COUNT])
+{
+    // Latch the caller-supplied frame exactly as a successful readMosaic() would, minus the UART.
+    // No strict UNKNOWN guard: an explicit injection trusts the caller, so an injected UNKNOWN cell
+    // is latched and reported honestly (getColor() stays truthful) rather than faulting.
+    for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
+    {
+        _colors[c] = colors[c];
+        _rawHue[c] = _canonicalHue(colors[c]);
+    }
+    _hasRead = true;
+
+    // Clear any latched fault so the injected frame presents cleanly — mirrors the success path in
+    // _readMosaic() (Step 4). getColor() / getRawHue() now return the injected values.
+    _fault.kind         = Fault::NONE;
+    _fault.firstBadCell = 0xFF;
+    _fault.rawValue     = 0;
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------
 // Getters (pure, bounds-checked, safe-sentinel — AC3)
 // -----------------------------------------------------------------------------------------
 
