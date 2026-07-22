@@ -922,12 +922,13 @@ private:
      *
      * The resolved mode is threaded DIRECTLY into the `LINE_FOLLOW_INTERSECTION` and
      * `PROJECTION_FOLLOW` builder chains via
-     * `.setLineFollowOffset(sign * lineFollowModeToSetpoint(mode))`, where
-     * `sign = decision.reverse ? -1 : +1` composes the reverse-hop flip
-     * (`WROMath.h::lineFollowModeToSetpoint` owns the forward-frame magnitude). It is
+     * `.setLineFollowOffset(lineFollowModeToSetpoint(mode))` — the same value for FRONT and
+     * REAR hops, with NO direction-conditioned sign: the 180°-rotated rear board already
+     * reads travel-frame, so the mapped setpoint is travel-relative on both boards (ADR-069
+     * amendment; a software flip double-mirrors). It is
      * deliberately NOT a field of `EdgeDispatchQuery`/`EdgeDispatchDecision`, whose frozen
      * 7-field decision + truth table stay untouched. The parity stream records this resolved
-     * mode (PRE-reverse-sign) as the `follow_mode` wire field.
+     * mode as the `follow_mode` wire field.
      *
      * @param edge The directed edge being dispatched (`getEdge(cur, _nextHop)`).
      * @return The resolved concrete mode (`MIDDLE`, `LEFT`, or `RIGHT`; never `DEFAULT`).

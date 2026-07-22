@@ -188,8 +188,9 @@ public:
     /** @brief Last `on` value passed to `setOvershootMode(...)`. Default `false`. */
     bool lastOvershootMode = false;
     /** @brief Last `offset` value passed to `setLineFollowOffset(...)` (issue #156). Default
-     *         `0.0f` (centred). PathTracker composes `sign * lineFollowModeToSetpoint(mode)`, so
-     *         this is the signed, reverse-frame-corrected setpoint the biased leg threads in. */
+     *         `0.0f` (centred). PathTracker threads `lineFollowModeToSetpoint(mode)` unchanged
+     *         for FRONT and REAR hops (ADR-069 amendment: the rotated rear board already reads
+     *         travel-frame, so no reverse sign is composed). */
     float lastLineFollowOffset = 0.0f;
     /** @brief Last `predictedCm` value passed to `setApproachTarget(...)`. Default `0.0f`. */
     float lastApproachTarget = 0.0f;

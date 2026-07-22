@@ -244,7 +244,7 @@ namespace
 
     /// Spell a RESOLVED `Routes::LineFollowMode` for the parity `follow_mode` wire key
     /// (issue #156). The value is the LineFollowMode member name (MIDDLE/LEFT/RIGHT) — the MODE,
-    /// recorded PRE-reverse-sign, never the signed float offset. `_resolveLineFollowMode` resolves
+    /// never the mapped float offset. `_resolveLineFollowMode` resolves
     /// DEFAULT->MIDDLE upstream, so DEFAULT is never reached here (defensive fallback to MIDDLE).
     const char* _ptFollowModeName(Routes::LineFollowMode m)
     {
@@ -275,7 +275,7 @@ namespace
     /// `line_follow` — {reverse, speed, follow_mode} (parity v3, issue #156). `speed` is the
     /// resolved SpeedTier member name — RENAMED from the historically-misnamed `line_mode`, which
     /// always held the speed tier. `follow_mode` is the RESOLVED LineFollowMode member name
-    /// (MIDDLE/LEFT/RIGHT) — the MODE, recorded PRE-reverse-sign, never the signed float offset.
+    /// (MIDDLE/LEFT/RIGHT) — the MODE, never the mapped float offset.
     void _ptEmitLineFollow(bool reverse, Routes::SpeedTier speed, Routes::LineFollowMode followMode)
     {
         char line[256];
@@ -300,8 +300,8 @@ namespace
     /// `projection_follow` — {reverse, speed, follow_mode, dist_cm, pass_through,
     /// reanchor:"ON_DEAD_RECKONED_ADVANCE"} (parity v3, issue #156). `speed` is the resolved
     /// SpeedTier member name — RENAMED from the historically-misnamed `line_mode`. `follow_mode`
-    /// is the RESOLVED LineFollowMode member name (MIDDLE/LEFT/RIGHT) — the MODE, recorded
-    /// PRE-reverse-sign, never the signed float offset.
+    /// is the RESOLVED LineFollowMode member name (MIDDLE/LEFT/RIGHT) — the MODE, never the
+    /// mapped float offset.
     void _ptEmitProjectionFollow(bool reverse, Routes::SpeedTier speed,
                                  Routes::LineFollowMode followMode, float distCm, bool passThrough)
     {
@@ -3024,13 +3024,16 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // hits the already-enabled fast-path (no ramp-up reseed); see ADR-023.
             (void) Intersection.isAtIntersection();
             const Config::SpeedPreset preset = speedTierToPreset(q.speed);
-            // issue #156: resolve the per-edge lateral follow MODE and compose the reverse-hop
-            // sign flip (LEFT stays left-of-TRAVEL on a rear-board hop). LineFollower stays
-            // nav-agnostic — it takes the signed float, not the enum. `mode` is also read by the
-            // parity-trace emit below, so it is resolved unconditionally.
+            // issue #156: resolve the per-edge lateral follow MODE. NO reverse-hop sign flip:
+            // the rear board is mounted rotated 180°, so its centroid error is already
+            // travel-frame (that same rotation is what keeps the reverse P+D stable with no
+            // error negation) — the forward-frame setpoint is travel-relative on BOTH boards,
+            // and a software flip would double-mirror (bench-confirmed, ADR-069 amendment).
+            // LineFollower stays nav-agnostic — it takes the signed float, not the enum.
+            // `mode` is also read by the parity-trace emit below, so it is resolved
+            // unconditionally.
             const Routes::LineFollowMode mode             = _resolveLineFollowMode(edge);
-            const float                  sign             = decision.reverse ? -1.0f : 1.0f;
-            const float                  lineFollowOffset = sign * lineFollowModeToSetpoint(mode);
+            const float                  lineFollowOffset = lineFollowModeToSetpoint(mode);
 
             // F3 — evaluate-once pass-through hoist. Decide HERE (at dispatch) whether
             // this hop terminates at `_nextHop` or passes collinearly through it, and
@@ -3101,11 +3104,11 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // trace; the dispatched `effectiveDistCm` is what the parity stream records.
             (void) Intersection.isAtIntersection();
             const Config::SpeedPreset preset = speedTierToPreset(q.speed);
-            // issue #156: resolve the per-edge lateral follow MODE and compose the reverse-hop
-            // sign flip, exactly as the LINE_FOLLOW_INTERSECTION path. LineFollower takes the
-            // signed float; the parity stream records the resolved mode (PRE-reverse-sign).
+            // issue #156: resolve the per-edge lateral follow MODE. No reverse-hop sign flip —
+            // the rotated rear board already reads travel-frame, exactly as the
+            // LINE_FOLLOW_INTERSECTION path above. LineFollower takes the signed float; the
+            // parity stream records the resolved mode.
             const Routes::LineFollowMode mode = _resolveLineFollowMode(edge);
-            const float                  sign = decision.reverse ? -1.0f : 1.0f;
             _projPassThrough            = q.projPassThrough;
             const float effectiveDistCm = _pivotTrimDistance(edge);
             LineFollower.setEnabled(true)
@@ -3115,7 +3118,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         .setTShapeRampDown(!_projPassThrough)
                         .setBrakeOnGate(decision.brakeOnGate)
                         .setDistanceTarget(effectiveDistCm)
-                        .setLineFollowOffset(sign * lineFollowModeToSetpoint(mode));
+                        .setLineFollowOffset(lineFollowModeToSetpoint(mode));
 #ifdef PT_PARITY_TRACE
             _ptEmitProjectionFollow(decision.reverse, q.speed, mode, effectiveDistCm,
                                     _projPassThrough);

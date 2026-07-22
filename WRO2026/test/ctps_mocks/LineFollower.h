@@ -218,10 +218,10 @@ public:
      * mocks — whose `setLineFollowOffset(float)` is a no-op that would silently
      * DROP the builder knob — this one stores the offset so the destructor emits
      * it as the `lineFollowDist` record's `follow_offset`. The offset is the
-     * nav-agnostic signed centroid-index bias PathTracker composes
-     * (`sign * lineFollowModeToSetpoint(mode)`); the CTPS Python layer maps it to
-     * an on-screen lateral nudge via its own display constant, never touching the
-     * parity-locked sim pose.
+     * nav-agnostic signed centroid-index bias PathTracker resolves
+     * (`lineFollowModeToSetpoint(mode)`, direction-independent — ADR-069 amendment);
+     * the CTPS Python layer maps it to an on-screen lateral nudge via its own
+     * display constant, never touching the parity-locked sim pose.
      */
     LineFollowerEnableBuilder& setLineFollowOffset(float offset)
     {
@@ -236,7 +236,7 @@ public:
      * A no-op that only keeps the mock builder a superset of the real one for the two drift
      * guards (the C++ `test_ctps_mock_conformance` chain + the Python name-superset test). It does
      * NOT record: every CTPS-rendered biased follow reaches the recorder through
-     * `setLineFollowOffset(...)` — PathTracker composes `sign * lineFollowModeToSetpoint(mode)` and
+     * `setLineFollowOffset(...)` — PathTracker resolves `lineFollowModeToSetpoint(mode)` and
      * calls the float knob — so nothing dispatches the mode enum through this mock. Mapping it here
      * would need the full `Routes::LineFollowMode` definition, which cannot be included without
      * double-defining `namespace Routes` in the conformance TU.

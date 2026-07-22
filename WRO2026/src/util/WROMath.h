@@ -30,7 +30,7 @@
  *   - `turnImuReadStalled`     — persistent-IMU-fault watchdog timeout for the turn profile
  *                                (Drive `_updateTurnProfile` + host test).
  *   - `lineFollowModeToSetpoint` — `Routes::LineFollowMode` (per-edge, generated) -> signed
- *                                   forward-frame lateral setpoint offset (PathTracker edge
+ *                                   travel-frame lateral setpoint offset (PathTracker edge
  *                                   dispatch, issue #156).
  *
  * @note The stopAtLine predicates are extracted from `Drive::_updateStopAtLine()` purely so the
@@ -385,13 +385,14 @@ inline bool turnImuReadStalled(uint32_t nowMs, uint32_t lastGoodReadMs, uint32_t
 // =============================================================================================
 
 /**
- * @brief Map a per-edge `Routes::LineFollowMode` to its signed FORWARD-frame lateral setpoint
+ * @brief Map a per-edge `Routes::LineFollowMode` to its signed TRAVEL-frame lateral setpoint
  *        offset.
  *
  * Single source of truth for the LEFT/RIGHT/MIDDLE/DEFAULT -> setpoint magnitude mapping. The
- * sign returned here is for a hop driven in the forward direction; `PathTracker` composes the
- * reverse-hop sign flip on top of this value (this function stays direction-unaware on purpose —
- * see `Routes::LineFollowMode` and the direction-override precedent in `NavTypes.h`).
+ * sign returned here is travel-relative on BOTH boards and needs no direction-conditioned flip:
+ * the rear board is mounted rotated 180°, so its centroid error is already travel-frame — the
+ * same rotation that keeps the reverse P+D stable with no error negation. Composing a software
+ * `reverse ? -1 : +1` on top double-mirrors the bias (bench-confirmed; ADR-069 amendment).
  *
  * @param mode Per-edge line-follow mode resolved for the current hop.
  * @return `+Config::LINE_FOLLOW_OFFSET_ERROR` for `LineFollowMode::LEFT`;
@@ -400,8 +401,8 @@ inline bool turnImuReadStalled(uint32_t nowMs, uint32_t lastGoodReadMs, uint32_t
  *         value (defensive default, mirroring `presetToPwm` / `speedTierToPreset`).
  *
  * @note Consumed by `PathTracker` edge dispatch via
- *       `.setLineFollowOffset(sign * lineFollowModeToSetpoint(mode))`, where `sign` carries the
- *       reverse-hop flip.
+ *       `.setLineFollowOffset(lineFollowModeToSetpoint(mode))` — the value is dispatched
+ *       unchanged for FRONT and REAR hops alike.
  */
 inline float lineFollowModeToSetpoint(Routes::LineFollowMode mode)
 {

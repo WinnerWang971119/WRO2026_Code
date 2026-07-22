@@ -44,7 +44,7 @@ namespace Config
     /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). */
     constexpr float LINE_KP_REAR = 6.8f;
     /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). */
-    constexpr float LINE_KD_REAR = 12.5f;
+    constexpr float LINE_KD_REAR = 12.8f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

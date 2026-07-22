@@ -195,7 +195,7 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
     # `line_mode` is RENAMED to `speed` (its value has always been the resolved
     # SpeedTier tier name — only the key was misnamed) and a new `follow_mode`
     # (the RESOLVED LineFollowMode member name MIDDLE/LEFT/RIGHT — the MODE, not
-    # the signed offset, recorded PRE-reverse-sign) is added right after it. The
+    # the mapped float offset) is added right after it. The
     # field ORDER here mirrors the C++ `_ptEmitLineFollow` / `_ptEmitProjectionFollow`
     # serialization byte-for-byte (the strict loader keys on the field SET, but the
     # order is kept in lockstep so both sides read identically).
@@ -405,8 +405,8 @@ def _follow_mode_name(mode: LineFollowMode) -> str:
     ``_ptFollowModeName`` does (issue #156 / ADR-069 parity v3).
 
     The value is the LineFollowMode member name (``MIDDLE`` / ``LEFT`` / ``RIGHT``)
-    for the ``follow_mode`` wire key — the MODE, recorded PRE-reverse-sign, never
-    the signed float offset the follower ultimately applies.
+    for the ``follow_mode`` wire key — the MODE, never the mapped float offset the
+    follower ultimately applies.
     :func:`~tools.path_planner.sim.runtime.resolve_line_follow_mode` resolves
     ``DEFAULT`` -> ``MIDDLE`` upstream, so ``DEFAULT`` is never reached here; the
     fallback to ``"MIDDLE"`` mirrors the C++ defensive default arm.
@@ -942,9 +942,9 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
       ``resolve_line_follow_mode(edge, cfg)`` for that hop's edge, stringified to
       the RESOLVED :class:`~tools.path_planner.pipeline_config.LineFollowMode`
       member name (``MIDDLE`` / ``LEFT`` / ``RIGHT``, never ``DEFAULT``) — the MODE,
-      recorded PRE-reverse-sign (issue #156 / ADR-069). The reverse-board sign the
-      firmware composes downstream is deliberately NOT applied here (this is the
-      mode, not the signed offset).
+      not the mapped float offset (issue #156 / ADR-069, amended: the firmware
+      dispatches ``lineFollowModeToSetpoint(mode)`` unchanged for FRONT and REAR
+      hops — no reverse sign exists anywhere).
     * ``drive_mode`` + ``overshoot_cm`` (seek / dead-reckon) — the sim's own
       :func:`resolve_edge_dispatch` decision for that hop.
 
