@@ -309,7 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    
+    /*
     PathTracker.goTo("i2");
     Drive.turnToYaw(Localization.toImuYaw(90));
     PathTracker.goTo("MWD");
@@ -320,12 +320,12 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     Manipulator.dumper.home();
     PathTracker.goTo("Start");
     Drive.turnToYaw(Localization.toImuYaw(270));
-    
-   /*
+    */
+   
    PathTracker.goTo("i3");
    Localization.declarePosition("MWU");
    PathTracker.goTo("i2");
-   */ 
+    
    return true;
 }
 
@@ -1079,17 +1079,28 @@ bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i3");
     Drive.turnToYaw(Localization.toImuYaw(90));
+    _waitStationaryMs(200);
     LineFollower.setEnabled(true).setPreset(Config::SpeedPreset::SLOW).setReverse(false);
     LineFollower.waitUntilIntersection();
     LineFollower.setEnabled(false);
     Drive.stop();
+
+    //Read
+    bool success = true;
     _waitStationaryMs(200);
-    if (!_visionRead()){
+    if (_visionRead()){
+        _signalSuccess();
+        success = true;
+    } else {
         _signalFail();
-        return false;
+        success = false;
     }
-    _signalSuccess();
-    return true;
+    
+    //Back to i3
+    Drive.driveDist(7).setMode(DriveMode::GYRO).setPower(-50);
+    _waitStationaryMs(100);
+    Localization.declarePosition("i3");
+    return success;
 }
 
 bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)

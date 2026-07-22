@@ -183,13 +183,13 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 60;
+    constexpr int16_t SPEED_SLOW = 50;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 70;
+    constexpr int16_t SPEED_NORMAL = 65;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
-    constexpr int16_t SPEED_FAST = 90;
+    constexpr int16_t SPEED_FAST = 80;
 
     // ---------------------------------------------------------------------------------------
     // Turn defaults
@@ -242,7 +242,7 @@ namespace Config
      *
      * @note TODO: measure on real chassis.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 11.0f;
 
     /**
      * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
