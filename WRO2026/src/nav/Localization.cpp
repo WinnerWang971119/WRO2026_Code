@@ -397,8 +397,14 @@ void LocalizationClass::update()
         return;
     }
 
-    // Gate closed (PathTracker driving a hop, or pre-zero): do NOT accumulate and do NOT read the
-    // IMU. Baselines are re-established at the reopen edge above, so there is no per-tick read here.
+    // Gate closed (PathTracker driving a hop, or pre-zero): do NOT accumulate operator offset.
+    // Once zeroed, refresh only the world-heading cache from YawSource's tick-scoped sample so
+    // telemetry stays current during long autonomous moves without changing offset baselines.
+    if (_zeroed)
+    {
+        float heading = 0.0f;
+        (void) _readWorldHeading(heading);
+    }
     _gateWasOpen = false;
 }
 

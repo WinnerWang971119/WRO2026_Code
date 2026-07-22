@@ -17,7 +17,7 @@
 //                  axes with the correct signs (cosf/sinf split, not just magnitude).
 //   TC6  (#5)   — a failed IMU read mid-drive deposits nothing (no stale-heading
 //                  corruption); the motion carries to the next good-read tick.
-//   TC7  (#3)   — no live IMU read while the nav gate is closed (mission hot path).
+//   TC7  (#3)   — navActive refreshes heading telemetry without accumulating offset.
 //   TC8  (P2)   — an idle re-zero while the gate is already open resets the integrator
 //                  and resumes accumulation in the fresh frame.
 //   TC9  (AC7)  — declarePosition(node) sets the current node AND clears the offset
@@ -331,12 +331,14 @@ int main()
     }
 
     // -------------------------------------------------------------------------------------
-    // TC7 (#3 hot-path) — while PathTracker is driving a hop (gate closed), update() issues NO
-    // live IMU read. This is the per-tick blocking read removed from the mission hot path; the
-    // baseline is re-established once at the gate-reopen edge instead.
+    // TC7 (#3 hot-path) — while PathTracker is driving a hop (gate closed), update() refreshes
+    // the heading cache but keeps operator-offset integration disabled. Production has already
+    // refreshed YawSource at tick start, so this consumes the tick-scoped sample instead of adding
+    // a device transaction; the unit test drives Localization directly and proves the observable
+    // cache contract.
     //
-    // Setup: zero (one read), then close the gate (navActive) and tick several times while the
-    // wheels turn. The mock IMU's call counter must not advance across those closed ticks.
+    // Setup: zero, then close the gate (navActive), advance time and change yaw while the wheels
+    // turn. The cache must show the new world heading and timestamp while offset stays zero.
     // -------------------------------------------------------------------------------------
     {
         resetWorld();
@@ -345,15 +347,21 @@ int main()
         check(Localization.zeroHeadingFromCurrent(), "TC7: zeroHeadingFromCurrent succeeds");
         Localization.setNavActive(true);    // PathTracker driving -> gate closed.
 
-        const uint32_t readsBefore = mmL.getImuEulerCallCount;
         const int32_t  hopDeg      = (int32_t) cmToEncDeg(25.0f);
-        for (int i = 0; i < 5; ++i)
-        {
-            Drive.mockAdvanceEncoders(hopDeg, hopDeg);
-            Localization.update();    // closed gate: must not read the IMU.
-        }
-        check(mmL.getImuEulerCallCount == readsBefore,
-              "TC7: no IMU read while the nav gate is closed (mission hot path)");
+          mockAdvanceMillis(100);
+          mmL.mockYawDeg = -35.0;    // world heading is +35 degrees after zeroing at 0.
+          Drive.mockAdvanceEncoders(hopDeg, hopDeg);
+          Localization.update();
+
+          check(approx(Localization.getLastHeadingDeg(), 35.0f, 0.5f),
+              "TC7: navActive refreshes the cached world heading");
+          check(Localization.getLastHeadingUpdateMs() == 100,
+              "TC7: navActive refreshes the heading-cache timestamp");
+          const Offset2D off = Localization.getOffsetFromNode();
+          check(approx(offsetMag(off), 0.0f, 1e-4f),
+              "TC7: navActive still suppresses offset accumulation during a hop");
+          check(approx(off.thetaDeg, 0.0f, 1e-4f),
+              "TC7: navActive still suppresses offset rotation during a hop");
     }
 
     // -------------------------------------------------------------------------------------
