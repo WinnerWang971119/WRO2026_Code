@@ -453,7 +453,9 @@ bool TasksClass::_grabToBin(uint8_t bin)
 {
     Manipulator.sortTo(bin).async();
     Manipulator.release().rampMs(1);
-    Manipulator.grab().rampMs(1);
+    // grab() stages its own rates (instant open -> slow lift to home -> instant close), so it needs
+    // no per-move ramp override here — an override would just slow the initial instant jump.
+    Manipulator.grab();
     return true;
 }
 

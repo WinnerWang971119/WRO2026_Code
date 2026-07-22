@@ -668,47 +668,39 @@ static void test_TC10_blocking_grab_drains_until_done()
 }
 
 // ===========================================================================
-// TC11 (AC7) — async grab() fires the home->close stroke and update() advances it.
+// TC11 (AC7) — async grab() fires the open pose first, then update() stages the rest.
 //
-// grab() now runs the grabber's two-stop capture stroke: HOME fires immediately, and the close
-// follow-up is QUEUED (fired by update() once home settles). async() gates the wait, not the
-// firing, so right after the async returns the grabber channel holds the home pose and isDone()
-// is false (a follow-up is pending). Advancing the clock + update() fires the queued close; the
-// stroke is done only once THAT settles.
+// grab() now runs a THREE-stop capture stroke: jump to openForWhiteDeg INSTANTLY, ramp up to
+// homeDeg (the queued slow lift), then snap to closeDeg. async() gates the wait, not the firing,
+// so right after the async returns the grabber channel holds the open pose and isDone() is false
+// (follow-up stops are queued). Driving the clock + update() advances the lift and the close; the
+// stroke is done only once the FINAL close settles.
 // ===========================================================================
 
-static void test_TC11_async_grab_sequences_home_then_close()
+static void test_TC11_async_grab_sequences_open_lift_close()
 {
-    TEST_SCOPE("TC11: grab().async() fires home first, then update() advances to close (AC7)");
+    TEST_SCOPE("TC11: grab().async() fires the open pose first, then update() advances to close (AC7)");
 
     resetWorld();
     clearTickCallback();
 
-    Manipulator.grab().async();    // fires HOME now, queues close; does NOT drain
+    Manipulator.grab().async();    // fires the open pose now, queues lift+close; does NOT drain
 
-    // Async gates the wait, not the firing: the FIRST stop (home) was issued immediately. After
-    // begin() the grabber sits at homeDeg, so the home stop's delta is 0 and it commands homeDeg in
-    // one write regardless of the grabber's configured ramp rate.
-    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.homeDeg);
-    // Not done — a queued close follow-up is pending, so isDone() is false regardless of the timer.
+    // Async gates the wait, not the firing: the FIRST stop (openForWhiteDeg) is issued immediately,
+    // and it is an instant stop so the channel holds it in one write.
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.openForWhiteDeg);
+    // Not done — the lift + close stops are queued, so isDone() is false regardless of the timer.
     ASSERT_FALSE(Manipulator.grabber.isDone());
 
-    // Advance past the home stop's settle, then tick: update() fires the queued close (arms it).
-    // The home move's delta is 0, so its budget is just settleMs.
-    mockAdvanceMillis(Config::GRABBER.settleMs);
-    Manipulator.update();
-
-    // The close stop is now in flight; still not done until it lands + settles. Under a slow
-    // (stepMs > 0) grabber the close crawls one degree per step, so drive the ramp to completion
-    // before asserting the final pose — the loop is a fast pass-through when the grabber is instant.
-    ASSERT_FALSE(Manipulator.grabber.isDone());
+    // Drive the whole stroke to completion: the slow lift crawls one degree per step, then the
+    // instant close lands. The loop advances the clock and ticks the servo until it settles.
     for (int i = 0; i < 100000 && !Manipulator.grabber.isDone(); ++i)
     {
         mockAdvanceMillis(2);
         Manipulator.update();
     }
 
-    // The SECOND stop (close) is the final commanded pose, and the whole stroke is now done.
+    // The final stop (close) is the last commanded pose, and the whole stroke is now done.
     ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
     ASSERT_TRUE(Manipulator.grabber.isDone());
 }
@@ -895,27 +887,76 @@ static void test_TCR2_setangle_override_rate()
     ASSERT_EQ(s.commandedAngle(), (uint16_t) 122);
 }
 
-static void test_TCR3_builder_instant_override_reaches_both_stops()
+static void test_TCR3_movewaypoints_mixes_per_stop_rates()
 {
-    TEST_SCOPE("TCR3: grab().instant() overrides the grabber's slow default across the whole stroke");
+    TEST_SCOPE("TCR3: moveWaypoints runs each stop at its own rate (instant / slow / instant)");
 
     resetWorld();
     clearTickCallback();
 
-    // GRABBER ships stepMs > 0 (slow). .instant() must run BOTH stops of the home->close stroke at
-    // full speed: the override reaches the servo through _applyStepMs -> setStepMs and persists to
-    // the queued close.
-    Manipulator.grab().instant().async();
+    ManipServo s(RAMP_CFG);
+    s.begin();    // homes to 90
 
-    // Home stop: delta 0 from the post-begin home pose, so home is (re)written immediately.
-    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.homeDeg);
-    ASSERT_FALSE(Manipulator.grabber.isDone());    // close still queued
+    // Stroke: 90 -> 100 INSTANT, 100 -> 130 SLOW (15 ms/deg), 130 -> 120 INSTANT.
+    const ManipServo::Waypoint stroke[3] = { { 100, 0 }, { 130, 15 }, { 120, 0 } };
+    s.moveWaypoints(stroke, 3);
 
-    // Fire the queued close; with the instant override it lands in a single write (no crawl),
-    // proving the override carried across to the second stop.
-    mockAdvanceMillis(Config::GRABBER.settleMs);
-    Manipulator.update();
+    // Stop 1 is instant: it lands in one write. Stops 2,3 are still queued, so not done.
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 100);
+    ASSERT_FALSE(s.isDone());
+
+    // Drive until the servo moves off stop 1 — i.e. stop 2 (the slow ramp) has begun. The first
+    // move off 100 must be a SINGLE degree toward 130 (a crawl), not a jump to 130.
+    int guard = 0;
+    while (s.commandedAngle() == 100 && guard++ < 100000)
+    {
+        mockAdvanceMillis(2);
+        s.update();
+    }
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 101);
+
+    // Drive the rest to completion; the final stop (120) is instant.
+    while (!s.isDone() && guard++ < 300000)
+    {
+        mockAdvanceMillis(2);
+        s.update();
+    }
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 120);
+    ASSERT_TRUE(s.isDone());
+}
+
+static void test_TCR4_grab_stages_instant_open_slow_lift_instant_close()
+{
+    TEST_SCOPE("TCR4: grab() jumps to the open pose instantly, lifts to home slowly, closes instantly");
+
+    resetWorld();
+    clearTickCallback();
+
+    Manipulator.grab().async();    // fire the stroke, don't drain
+
+    // Stop 1 (openForWhiteDeg) is instant: the channel holds the open pose right away.
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.openForWhiteDeg);
+    ASSERT_FALSE(Manipulator.grabber.isDone());    // lift + close still queued
+
+    // Drive until the servo moves off the open pose — the lift (stop 2) has begun. The lift is a
+    // SLOW ramp, so the first move off the open pose is a single degree toward home (homeDeg >
+    // openForWhiteDeg here), NOT a jump straight to home.
+    int guard = 0;
+    while (Manipulator.grabber.commandedAngle() == Config::GRABBER.openForWhiteDeg && guard++ < 100000)
+    {
+        mockAdvanceMillis(2);
+        Manipulator.update();
+    }
+    ASSERT_EQ(Manipulator.grabber.commandedAngle(), (uint16_t) (Config::GRABBER.openForWhiteDeg + 1));
+
+    // Drive to completion; the final close is instant and the stroke ends done.
+    while (!Manipulator.grabber.isDone() && guard++ < 300000)
+    {
+        mockAdvanceMillis(2);
+        Manipulator.update();
+    }
     ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
+    ASSERT_TRUE(Manipulator.grabber.isDone());
 }
 
 // ===========================================================================
@@ -939,12 +980,13 @@ int main()
     test_TC8_belt_home_resets_settles_then_moves_to_mid();
     test_TC9_belt_position_watchdog_fires();
     test_TC10_blocking_grab_drains_until_done();
-    test_TC11_async_grab_sequences_home_then_close();
+    test_TC11_async_grab_sequences_open_lift_close();
     test_TC12_reset_homes_all_servos_and_belt();
     test_TC15_begin_homes_all_and_zeroes_belt_once();
     test_TC16_beltto_verb_delegates_to_belt();
     test_TCR1_ramp_steps_one_degree_per_interval();
     test_TCR2_setangle_override_rate();
-    test_TCR3_builder_instant_override_reaches_both_stops();
+    test_TCR3_movewaypoints_mixes_per_stop_rates();
+    test_TCR4_grab_stages_instant_open_slow_lift_instant_close();
     TEST_REPORT();
 }

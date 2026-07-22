@@ -258,15 +258,19 @@ public:
     // -------------------------------------------------------------------------------------
 
     /**
-     * @brief Capture an object: open the grabber fully to home, then close.
+     * @brief Capture an object with a staged three-stop stroke: instant open, slow lift, instant close.
      *
-     * Runs the grabber's `homeThenClose()` two-stop stroke — the jaw opens to its home pose first,
-     * then clamps closed once home settles — so a grab always performs the full open->close
+     * Runs the grabber through `ManipServo::moveWaypoints`: jump to `GRABBER.openForWhiteDeg`
+     * INSTANTLY, ramp up to `GRABBER.homeDeg` SLOWLY (the controlled "get up", paced by
+     * `Config::GRABBER_LIFT_STEP_MS`), then snap to `GRABBER.closeDeg` INSTANTLY. Only the lift is
+     * ramped, so the grab is controlled without dragging. Self-contained — performs the full stroke
      * regardless of the grabber's prior position (no preceding `release()` needed).
      *
-     * @return A `ManipAction`. Blocking by default: waits for the WHOLE home->close stroke to
-     *         settle (the grabber's `isDone()` stays false until the close completes). Chain
-     *         `.async()` to return immediately — `update()` then advances the queued close.
+     * @return A `ManipAction`. Blocking by default: waits for the WHOLE stroke to settle (the
+     *         grabber's `isDone()` stays false until the final close completes). Chain `.async()` to
+     *         return immediately — `update()` then advances the queued stops.
+     * @note The stroke stages its own per-stop rates, so a `.rampMs()` override is not the way to
+     *       tune it — adjust `Config::GRABBER_LIFT_STEP_MS` (and the grabber's poses) instead.
      */
     ManipAction grab();
 

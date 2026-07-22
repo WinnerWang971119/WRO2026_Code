@@ -88,13 +88,19 @@ ManipulatorClass::ManipulatorClass()
 
 ManipAction ManipulatorClass::grab()
 {
-    // Open fully to home first, THEN close — a self-contained capture stroke, so a grab always
-    // runs the full open->close regardless of the grabber's prior pose. The two moves are a
-    // fire-and-forget two-stop sequence (ManipServo::homeThenClose): home fires now, close is
-    // queued and fired by update() once home settles. The returned action drains on M_GRAB, whose
-    // isDone() stays false until the SECOND move settles — so a blocking grab() waits for the whole
-    // stroke, and grab().async() returns immediately while update() advances it.
-    grabber.homeThenClose();
+    // Three-stop capture stroke with mixed rates (ManipServo::moveWaypoints): jump to the open pose
+    // INSTANTLY, ramp UP to home SLOWLY (the controlled "get up", paced by GRABBER_LIFT_STEP_MS),
+    // then snap to close INSTANTLY. Making the big lift the only slow phase avoids the whole grab
+    // dragging while still controlling the approach. Self-contained — runs the full stroke
+    // regardless of the grabber's prior pose. The returned action drains on M_GRAB, whose isDone()
+    // stays false until the LAST stop settles, so a blocking grab() waits for the whole stroke and
+    // grab().async() returns immediately while update() advances it.
+    const ManipServo::Waypoint stroke[3] = {
+        { Config::GRABBER.openForWhiteDeg, 0 },                            // 1) instant jump to open pose
+        { Config::GRABBER.homeDeg, Config::GRABBER_LIFT_STEP_MS },         // 2) slow lift up to home
+        { Config::GRABBER.closeDeg, 0 },                                  // 3) instant close
+    };
+    grabber.moveWaypoints(stroke, 3);
     return _action(M_GRAB);
 }
 
