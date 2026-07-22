@@ -113,6 +113,30 @@ public:
     ManipAction& async();
 
     /**
+     * @brief Override the servo step rate (ms per 1° step) for THIS action's servo move(s).
+     *
+     * The verb already armed the move at the servo's default rate; this retargets its pacing
+     * before the drain runs. A bigger @p ms is slower; `0` = instant. Applies to every servo the
+     * verb touched (grabber / sorter / dumper as named by the action mask) and, on a two-stop
+     * stroke like `grab()`, to BOTH stops. No effect on a belt-only action (`beltTo` / `boxOpen` /
+     * `boxClose`) — the belt has its own speed configuration.
+     *
+     * @param ms Milliseconds per 1° step for this move. Bigger = slower; `0` = instant.
+     * @return `*this` for chaining (e.g. `Manipulator.grab().rampMs(20).async()`).
+     */
+    ManipAction& rampMs(uint16_t ms);
+
+    /**
+     * @brief Run THIS action's servo move(s) at full speed (write the target in one command).
+     *
+     * Convenience for `rampMs(0)` — overrides a slow per-servo default (e.g. the grabber's) for a
+     * single move. Same mask / two-stop semantics as `rampMs()`.
+     *
+     * @return `*this` for chaining.
+     */
+    ManipAction& instant();
+
+    /**
      * @brief Destructor — RAII wait. Drains the involved actuators unless `.async()` was set.
      *
      * Fires at end-of-statement. If still responsible (`!_executed`) and blocking, calls
@@ -359,6 +383,18 @@ private:
      * @return A blocking-by-default action bound to this facade.
      */
     ManipAction _action(uint8_t mask);
+
+    /**
+     * @brief Apply a per-move step rate to every SERVO named in @p mask. The `.rampMs()` hook.
+     *
+     * Called by `ManipAction::rampMs()` after the verb has armed the move but before the drain, so
+     * the retarget takes effect on the very first ramp step. Belt bits in the mask are ignored (the
+     * belt is not step-paced this way). Defined in `Manipulator.cpp`.
+     *
+     * @param mask  Involved-actuator bitmask (only the servo bits matter here).
+     * @param stepMs Milliseconds per 1° step; `0` = instant.
+     */
+    void _applyStepMs(uint8_t mask, uint16_t stepMs);
 
     /**
      * @brief Block (spin) until every actuator named in @p mask reports done, or the action

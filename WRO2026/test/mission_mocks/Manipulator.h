@@ -42,6 +42,8 @@ public:
     void     close() {}
     void     home() {}
     void     setAngle(uint16_t deg) { _shadow = deg; }
+    void     setAngle(uint16_t deg, uint16_t /*stepMs*/) { _shadow = deg; }
+    void     setStepMs(uint16_t /*stepMs*/) {}
     bool     isDone() const { return true; }
     uint16_t commandedAngle() const { return _shadow; }
 
@@ -86,6 +88,8 @@ public:
     ManipAction& operator=(ManipAction&&)      = delete;
 
     ManipAction& async() { return *this; }
+    ManipAction& rampMs(uint16_t /*ms*/) { return *this; }
+    ManipAction& instant() { return *this; }
 };
 
 /**

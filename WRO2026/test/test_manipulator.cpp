@@ -140,7 +140,9 @@ static void test_TC1_grabber_setangle_clamps_to_180()
     resetWorld();
     clearTickCallback();
 
-    Manipulator.grabber.setAngle(200);
+    // Force the instant path (stepMs = 0) so this clamp check is independent of the grabber's
+    // configured default ramp rate — a stepMs > 0 default would defer the write to update().
+    Manipulator.grabber.setAngle(200, 0);
 
     // Commanded shadow is the clamped value (no software reverse transform).
     ASSERT_EQ(Manipulator.grabber.commandedAngle(), (uint16_t) 180);
@@ -165,10 +167,12 @@ static void test_TC1b_dumper_open_for_white_uses_dedicated_pose()
 }
 
 // ===========================================================================
-// TC2 / TC3 — timer-based completion crosses the slew+settle budget.
+// TC2 / TC3 — INSTANT-move timer-based completion crosses the slew+settle budget.
 //
+// These pin the msPerDeg completion estimate for an instant (stepMs = 0) move, so they call the
+// explicit-rate setAngle(deg, 0) overload — independent of the grabber's configured default rate.
 // Estimate from cfg: |target - prevShadow| * msPerDeg + settleMs.
-// grabber home shadow = GRABBER.homeDeg (post-begin). setAngle(180):
+// grabber home shadow = GRABBER.homeDeg (post-begin). setAngle(180, 0):
 //   est = |180 - homeDeg| * GRABBER.msPerDeg + GRABBER.settleMs.
 // ===========================================================================
 
@@ -188,7 +192,7 @@ static void test_TC2_grabber_not_done_below_estimate()
     resetWorld();
     clearTickCallback();
 
-    Manipulator.grabber.setAngle(180);    // shadow homeDeg -> 180
+    Manipulator.grabber.setAngle(180, 0);    // instant: shadow homeDeg -> 180
 
     const uint32_t est = grabberSetAngle180Est();
     // Advance to just BELOW the estimate.
@@ -203,7 +207,7 @@ static void test_TC3_grabber_done_at_estimate()
     resetWorld();
     clearTickCallback();
 
-    Manipulator.grabber.setAngle(180);    // shadow homeDeg -> 180
+    Manipulator.grabber.setAngle(180, 0);    // instant: shadow homeDeg -> 180
 
     const uint32_t est = grabberSetAngle180Est();
     // Advance to exactly the estimate (>= path).
@@ -682,27 +686,30 @@ static void test_TC11_async_grab_sequences_home_then_close()
 
     Manipulator.grab().async();    // fires HOME now, queues close; does NOT drain
 
-    // Async gates the wait, not the firing: the FIRST stop (home) was issued immediately.
+    // Async gates the wait, not the firing: the FIRST stop (home) was issued immediately. After
+    // begin() the grabber sits at homeDeg, so the home stop's delta is 0 and it commands homeDeg in
+    // one write regardless of the grabber's configured ramp rate.
     ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.homeDeg);
     // Not done — a queued close follow-up is pending, so isDone() is false regardless of the timer.
     ASSERT_FALSE(Manipulator.grabber.isDone());
 
-    // Advance past the home stop's slew+settle budget, then tick: update() fires the queued close.
-    // The grabber shadow == homeDeg after begin(), so the home move's delta is 0 and its budget is
-    // just settleMs.
+    // Advance past the home stop's settle, then tick: update() fires the queued close (arms it).
+    // The home move's delta is 0, so its budget is just settleMs.
     mockAdvanceMillis(Config::GRABBER.settleMs);
     Manipulator.update();
 
-    // The SECOND stop (close) is now commanded; still not done until it settles.
-    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
+    // The close stop is now in flight; still not done until it lands + settles. Under a slow
+    // (stepMs > 0) grabber the close crawls one degree per step, so drive the ramp to completion
+    // before asserting the final pose — the loop is a fast pass-through when the grabber is instant.
     ASSERT_FALSE(Manipulator.grabber.isDone());
+    for (int i = 0; i < 100000 && !Manipulator.grabber.isDone(); ++i)
+    {
+        mockAdvanceMillis(2);
+        Manipulator.update();
+    }
 
-    // Advance past the close stop's slew+settle budget; the whole stroke is now done.
-    const uint32_t closeEst =
-        (uint32_t) (fabs((float) Config::GRABBER.closeDeg - (float) Config::GRABBER.homeDeg)
-                    * Config::GRABBER.msPerDeg)
-        + Config::GRABBER.settleMs;
-    mockAdvanceMillis(closeEst);
+    // The SECOND stop (close) is the final commanded pose, and the whole stroke is now done.
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
     ASSERT_TRUE(Manipulator.grabber.isDone());
 }
 
@@ -717,14 +724,26 @@ static void test_TC12_reset_homes_all_servos_and_belt()
     resetWorld();
     clearTickCallback();
 
-    // Move every servo OFF home first so the home writes are observable.
-    Manipulator.grabber.setAngle(10);
-    Manipulator.sorter.setAngle(10);
-    Manipulator.dumper.setAngle(10);
+    // Move every servo OFF home first so the home writes are observable. Force the instant path
+    // (stepMs = 0) so a servo with a slow default rate actually lands at 10 here rather than
+    // deferring the write to update().
+    Manipulator.grabber.setAngle(10, 0);
+    Manipulator.sorter.setAngle(10, 0);
+    Manipulator.dumper.setAngle(10, 0);
 
     const uint32_t beltResetsBefore = MiniR4.M1.resetCounterCallCount;
 
     Manipulator.reset().async();    // homes 3 servos + belt.home(); async so no drain
+
+    // The grabber homes via a ramp (its configured stepMs > 0 and it was moved far off home), so
+    // its home write is deferred to update(); sorter/dumper are instant. reset() used .async(), so
+    // advance the grabber ramp by hand before asserting its home pose. The belt is driven
+    // separately below, so tick only the grabber here.
+    for (int i = 0; i < 100000 && !Manipulator.grabber.isDone(); ++i)
+    {
+        mockAdvanceMillis(2);
+        Manipulator.grabber.update();
+    }
 
     // Each servo commanded back to its configured home angle (raw, no SW reverse), asserted
     // on each servo's configured channel.
@@ -803,6 +822,103 @@ static void test_TC15_begin_homes_all_and_zeroes_belt_once()
 }
 
 // ===========================================================================
+// TCR1 / TCR2 — stepped-ramp speed control (stepMs > 0).
+//
+// Exercise the ramp on a LOCAL ServoCfg fixture with stepMs > 0, so the behaviour is asserted
+// directly and independent of whatever rate the production servos ship with. The fixture is wired
+// to a real RC channel (id 2) so _writeAngle() dispatches through the mock; assertions read the
+// crawling shadow via commandedAngle().
+// ===========================================================================
+
+// home 90 / close 180 / msPerDeg 5 / settle 20 / stepMs 10 (10 ms per 1° step).
+static constexpr Config::ServoCfg RAMP_CFG = { /*rcId*/ 2,     /*home*/ 90,  /*open*/ 0,
+                                               /*openWhite*/ 0, /*close*/ 180, /*msPerDeg*/ 5.0f,
+                                               /*settle*/ 20,   /*reverse*/ false, /*stepMs*/ 10 };
+
+static void test_TCR1_ramp_steps_one_degree_per_interval()
+{
+    TEST_SCOPE("TCR1: a stepMs>0 servo crawls one degree per step interval, done after settle");
+
+    resetWorld();
+    clearTickCallback();
+
+    ManipServo s(RAMP_CFG);
+    s.begin();    // homes to 90 (delta 0 -> instant)
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 90);
+
+    s.setAngle(95);    // arm a ramp 90 -> 95 at the default rate (10 ms/deg)
+
+    // The ramp is deferred to update(): nothing is written yet, and it is NOT done.
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 90);
+    ASSERT_FALSE(s.isDone());
+
+    // Each 10 ms interval advances the commanded angle by exactly one degree.
+    for (uint16_t expected = 91; expected <= 95; ++expected)
+    {
+        mockAdvanceMillis(10);
+        s.update();
+        ASSERT_EQ(s.commandedAngle(), expected);
+    }
+
+    // Target reached, but still settling — not done until the settle dwell elapses.
+    ASSERT_FALSE(s.isDone());
+    mockAdvanceMillis(RAMP_CFG.settleMs);
+    ASSERT_TRUE(s.isDone());
+}
+
+static void test_TCR2_setangle_override_rate()
+{
+    TEST_SCOPE("TCR2: setAngle(deg, stepMs) overrides the per-move step rate (0 = instant)");
+
+    resetWorld();
+    clearTickCallback();
+
+    ManipServo s(RAMP_CFG);
+    s.begin();    // at 90
+
+    // Explicit instant override: the full target is written immediately, no crawl.
+    s.setAngle(120, 0);
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 120);
+
+    // Explicit slow override for the next move: deferred, then one degree per 25 ms.
+    s.setAngle(130, 25);
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 120);    // deferred to update()
+    mockAdvanceMillis(25);
+    s.update();
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 121);
+    mockAdvanceMillis(25);
+    s.update();
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 122);
+
+    // A subsequent default-rate move restores the servo's configured rate (one-shot override).
+    s.setAngle(122);    // delta 0 from current shadow -> instant, settles on the timer
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 122);
+}
+
+static void test_TCR3_builder_instant_override_reaches_both_stops()
+{
+    TEST_SCOPE("TCR3: grab().instant() overrides the grabber's slow default across the whole stroke");
+
+    resetWorld();
+    clearTickCallback();
+
+    // GRABBER ships stepMs > 0 (slow). .instant() must run BOTH stops of the home->close stroke at
+    // full speed: the override reaches the servo through _applyStepMs -> setStepMs and persists to
+    // the queued close.
+    Manipulator.grab().instant().async();
+
+    // Home stop: delta 0 from the post-begin home pose, so home is (re)written immediately.
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.homeDeg);
+    ASSERT_FALSE(Manipulator.grabber.isDone());    // close still queued
+
+    // Fire the queued close; with the instant override it lands in a single write (no crawl),
+    // proving the override carried across to the second stop.
+    mockAdvanceMillis(Config::GRABBER.settleMs);
+    Manipulator.update();
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -827,5 +943,8 @@ int main()
     test_TC12_reset_homes_all_servos_and_belt();
     test_TC15_begin_homes_all_and_zeroes_belt_once();
     test_TC16_beltto_verb_delegates_to_belt();
+    test_TCR1_ramp_steps_one_degree_per_interval();
+    test_TCR2_setangle_override_rate();
+    test_TCR3_builder_instant_override_reaches_both_stops();
     TEST_REPORT();
 }

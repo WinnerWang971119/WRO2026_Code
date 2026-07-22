@@ -59,6 +59,8 @@ public:
     void     close() {}
     void     home() {}
     void     setAngle(uint16_t deg) { _shadow = deg; }
+    void     setAngle(uint16_t deg, uint16_t /*stepMs*/) { _shadow = deg; }
+    void     setStepMs(uint16_t /*stepMs*/) {}
     bool     isDone() const { return true; }
     uint16_t commandedAngle() const { return _shadow; }
 
@@ -105,6 +107,10 @@ public:
 
     /** @brief Gate the (mock) wait — no-op; the verb already recorded. */
     ManipAction& async() { return *this; }
+    /** @brief Override the (mock) servo step rate — no-op; the verb already recorded. */
+    ManipAction& rampMs(uint16_t /*ms*/) { return *this; }
+    /** @brief Run the (mock) move at full speed — no-op; the verb already recorded. */
+    ManipAction& instant() { return *this; }
 };
 
 /**
