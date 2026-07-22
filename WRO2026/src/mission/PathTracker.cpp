@@ -3363,7 +3363,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // holds its planned exit speed (no brake, run continues), a final hop
                 // crawls the residual at its low planned entry speed into the ordinary
                 // brake. RAW_FLAT never chains, so only SYNC/GYRO reach this.
-                const int16_t stubPwm = chainMid ? chainEndPwm : signedStartSpeed;
+                // ADR-079 stub-guard: a chain FINAL hop shrunk below TSHAPE_MIN_MOVE_CM by the
+                // measured-carry subtraction crawls at the motor FLOOR (then brakes floor->rest),
+                // NOT at the plan start PWM (~67) which would brake from speed into the overshoot.
+                // A mid-hop stub still holds its planned exit (chainEndPwm). Dispatch-only: the
+                // PT_PARITY_TRACE emit below still records the plan endpoints, so the trace is
+                // unchanged.
+                const int16_t floorPwm = decision.reverse ? (int16_t) -Config::PWM_MIN_MAGNITUDE
+                                                          : (int16_t) Config::PWM_MIN_MAGNITUDE;
+                const int16_t stubPwm  = chainMid ? chainEndPwm : floorPwm;
                 Serial.print(F("[PathTracker] ADR-059: chained hop shrunk to "));
                 Serial.print(dispatchCm);
                 Serial.println(F(" cm (below profile floor); dispatching flat at plan PWM"));
