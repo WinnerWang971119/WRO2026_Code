@@ -889,37 +889,8 @@ private:
      * real pre-edge turn firing mid-run (`_dispatchTurnIfNeeded` — the chassis stops, so
      * the chained speed plan is void), a divergent dispatch (defensive), and the run's
      * own FINAL-hop dispatch (the ordinary braked stop completes the run).
-     *
-     * @note ADR-079: `_chainReset()` deliberately does NOT touch the generalized
-     *       braked-blind carry members (`_brakedBlindCarryActive` / `_brakedBlindEncSum`
-     *       / `_brakedBlindCmdCm` / `_brakedBlindReverse`) — they are independent of the
-     *       `_chain` lifecycle so a chain-final braked hop can telescope into a following
-     *       non-chain braked blind hop (the chain-retire ordering pin).
      */
     void _chainReset();
-
-    /**
-     * @brief Measured inter-hop boundary carry (cm, >= 0) since a braked-blind dispatch
-     *        baseline (ADR-079) — the SINGLE source of the carry arithmetic.
-     *
-     * Between a baseline braked blind hop's profile completing and the current dispatch the
-     * chassis keeps rolling (Drive's empty-queue chained-end path releases the brake and
-     * coasts for the ~2-3 FSM ticks of the BLIND_FORWARD -> PLAN_NEXT_HOP -> dispatch
-     * boundary), landing BEFORE this move's encoder baseline. This returns that measured
-     * overshoot: travel since @p baselineEncSum minus @p baselineCmdCm. A negative
-     * measurement (host mocks with parked encoders; an under-traveled move) clamps to 0 —
-     * never LENGTHEN a hop, and the parity harness (encoders parked) then records the
-     * planned distances exactly like the sim.
-     *
-     * BOTH the in-`_chain.active` AC9 path and the generalized braked-blind path call this
-     * one method so the two carry computations cannot drift
-     * (`gotcha-drive-constant-retune-fanout` family).
-     *
-     * @param baselineEncSum The `getEncL()+getEncR()` snapshot at the baseline hop's dispatch.
-     * @param baselineCmdCm  The distance commanded at that baseline hop.
-     * @return The measured boundary carry in cm, floored at 0.
-     */
-    float _measuredBoundaryCarryCm(int32_t baselineEncSum, float baselineCmdCm) const;
 
     /**
      * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
@@ -1281,37 +1252,6 @@ private:
         float             dispatchCmdCm  = 0.0f;
     };
     ChainRun _chain;
-
-    /// @brief ADR-079 generalized braked-blind boundary-carry baseline — INDEPENDENT of the
-    ///        `_chain` lifecycle (`_chainReset()` MUST NOT touch these four members).
-    ///
-    /// Generalizes the ADR-059 in-chain measured carry (which lived only inside
-    /// `if (_chain.active)`) to ALL consecutive braked blind dead-reckon hops, chaining ON
-    /// or OFF. A BRAKED blind dispatch — a non-chain profiled hop OR the chain-FINAL braked
-    /// hop (mid-chain flow-through hops brake=false, so they do NOT snapshot) — records this
-    /// baseline; the next braked blind hop of the SAME direction subtracts the measured
-    /// boundary carry (`_measuredBoundaryCarryCm`) from its commanded distance so the run
-    /// telescopes and the final node lands on-node with no accumulation over N hops. The
-    /// baseline is INVALIDATED (`_brakedBlindCarryActive = false`) by any non-braked dispatch
-    /// (mid-chain flow-through, RAW_FLAT), a turn, a non-blind hop (LINE/PROJECTION/seek),
-    /// a wall/line re-anchor, a fault, a return to IDLE, and a fresh-goTo origin bind; a
-    /// direction flip re-arms it for the new direction (carry 0 for that hop). It survives
-    /// `_chainReset()` (the chain-retire ordering pin) so a post-chain braked hop telescopes
-    /// off the chain-final baseline. See ADR-079.
-    bool    _brakedBlindCarryActive = false;  ///< a prior braked blind hop is a valid carry baseline
-    int32_t _brakedBlindEncSum      = 0;      ///< encoder sum snapshot at that hop's dispatch
-    float   _brakedBlindCmdCm       = 0.0f;   ///< distance commanded at that hop's dispatch
-    bool    _brakedBlindReverse     = false;  ///< resolved direction of that hop (front/rear)
-
-    /// @brief True only on the FIRST `_onPlanNextHop()` of a fresh goTo (ADR-079 origin bind).
-    ///
-    /// Set at DEQUEUE (leaving IDLE to start a new goTo) and consumed/cleared on the first
-    /// `_onPlanNextHop()`. Gates the fresh-goTo carry reset so a stale baseline from the
-    /// PREVIOUS goTo's last braked blind hop is never applied to this goTo's first hop — WITHOUT
-    /// resetting on the per-hop BLIND_FORWARD -> PLAN_NEXT_HOP continuation re-entries (those
-    /// keep the carry so a single goTo's consecutive braked blind hops telescope, AC2). Never
-    /// keyed off the `_onPlanNextHop` call itself (which fires once per hop). See ADR-079.
-    bool    _firstHopOfGoTo = false;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;
