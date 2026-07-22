@@ -207,7 +207,8 @@ namespace Config
 
     /**
      * @brief When true, a mosaic read TOLERATES a few UNKNOWN cells instead of failing outright,
-     *        and the mosaic planner injects `VISION_MASK_FALLBACK_COLOR` for each UNKNOWN cell.
+     *        and the mosaic planner substitutes the wall colour with the most spare stock for
+     *        each UNKNOWN cell (see `Tasks.cpp::mosaicSpareStation`).
      *
      * Scoring rationale: a tile placed in ANY bin scores (5 pts) versus 0 for an un-built cell, so
      * masking a handful of unreadable / surprise-colour cells and placing a fallback tile is a net
@@ -223,21 +224,6 @@ namespace Config
 #define VISION_MASK_UNKNOWN_ENABLED_DEFAULT false
 #endif
     constexpr bool VISION_MASK_UNKNOWN_ENABLED = VISION_MASK_UNKNOWN_ENABLED_DEFAULT;
-
-    /**
-     * @brief Colour the mosaic planner substitutes for an UNKNOWN cell while masking is on.
-     *
-     * MUST be one of the four wall-supplied station colours (YELLOW / BLUE / GREEN / WHITE) so a
-     * real tile can actually be fetched for it — enforced in `ConfigChecks.h`.
-     *
-     * @note `WHITE` collides with MiniR4OLED.h's `#define WHITE SSD1306_WHITE` in any TU that
-     *       includes `<MatrixMiniR4.h>` before this header, so guard the reference to the
-     *       enumerator by name exactly as the `enum class Color` declaration above does.
-     */
-#pragma push_macro("WHITE")
-#undef WHITE
-    constexpr Color VISION_MASK_FALLBACK_COLOR = Color::GREEN;   // must be a wall station colour
-#pragma pop_macro("WHITE")
 
     /**
      * @brief Maximum UNKNOWN cells a masked read tolerates. Above this the frame is a genuine

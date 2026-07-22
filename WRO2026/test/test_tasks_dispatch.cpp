@@ -86,11 +86,12 @@ static char mosaicTagOf(Config::Color c)
 }
 
 // Diego's reference pattern (4 columns x 3 rows, row-major), used for the
-// happy-path case. Y=3, B=5, G=2, W=2 — all within the wall's 6-per-colour stock.
+// happy-path case. Y=3, B=4, G=2, W=3 — all within the wall's 4-per-colour
+// REACHABLE stock (rows hold 3 tiles but the LEFT one cannot be grabbed).
 static const Config::Color kMosaicRefPattern[Config::VISION_CELL_COUNT] = {
     Config::Color::YELLOW, Config::Color::BLUE,   Config::Color::GREEN,  Config::Color::BLUE,
     Config::Color::WHITE,  Config::Color::YELLOW, Config::Color::GREEN,  Config::Color::WHITE,
-    Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::YELLOW, Config::Color::BLUE,
+    Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::YELLOW, Config::Color::WHITE,
 };
 #pragma pop_macro("WHITE")
 
@@ -175,13 +176,15 @@ static void test_mosaic_rejects_uncoloured_cell()
     ASSERT_TRUE(Serial.captured().find("has no station colour") != std::string::npos);
 }
 
-static void test_mosaic_rejects_pattern_beyond_wall_stock()
+static void test_mosaic_substitutes_beyond_wall_stock()
 {
-    TEST_SCOPE("mosaic: a colour needed more times than the wall holds aborts the task");
+    TEST_SCOPE("mosaic: a colour needed beyond the 4 reachable tiles is rebalanced, not aborted");
     Tasks.begin();
     Serial.clearCapture();
 
-    // Seven BLUE against a wall that stocks six of each colour.
+    // Seven BLUE + five GREEN against a wall that reaches only four tiles per colour.
+    // Both colours are over stock, so four cells must be recoloured to the spare
+    // stations (YELLOW / WHITE) and the build still completes in full.
     Config::Color pattern[Config::VISION_CELL_COUNT];
     for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
     {
@@ -190,8 +193,45 @@ static void test_mosaic_rejects_pattern_beyond_wall_stock()
     Vision._setInjectedColors(pattern);
 
     TaskArgs args{};
-    ASSERT_FALSE(Tasks.runTask("mosaic", args));
-    ASSERT_TRUE(Serial.captured().find("wall holds") != std::string::npos);
+    ASSERT_TRUE(Tasks.runTask("mosaic", args));
+    ASSERT_TRUE(Serial.captured().find("over wall stock -> substituted") != std::string::npos);
+
+    char    tags[Config::VISION_CELL_COUNT];
+    uint8_t bins[Config::VISION_CELL_COUNT];
+    const size_t n = mosaicParsePlan(Serial.captured(), tags, bins, Config::VISION_CELL_COUNT);
+
+    // The plan still covers every cell: no colour exceeds the reachable stock, the two
+    // over-stock colours are pinned exactly AT stock, and every bin fills 3 deep.
+    ASSERT_EQ((int)Config::VISION_CELL_COUNT, (int)n);
+
+    uint8_t depth[4]   = { 0, 0, 0, 0 };
+    int     tagCount[4] = { 0, 0, 0, 0 };   // Y B G W
+    for (size_t i = 0; i < n; ++i)
+    {
+        ASSERT_TRUE(bins[i] < 4);
+        if (bins[i] < 4)
+        {
+            ++depth[bins[i]];
+        }
+        switch (tags[i])
+        {
+        case 'Y': ++tagCount[0]; break;
+        case 'B': ++tagCount[1]; break;
+        case 'G': ++tagCount[2]; break;
+        case 'W': ++tagCount[3]; break;
+        default: ASSERT_TRUE(false); break;
+        }
+    }
+    for (uint8_t bin = 0; bin < 4; ++bin)
+    {
+        ASSERT_EQ(3, (int)depth[bin]);
+    }
+    ASSERT_EQ(4, tagCount[1]);   // BLUE capped at the wall's reachable stock
+    ASSERT_EQ(4, tagCount[2]);   // GREEN capped at the wall's reachable stock
+    for (uint8_t c = 0; c < 4; ++c)
+    {
+        ASSERT_TRUE(tagCount[c] <= 4);
+    }
 }
 
 // ===========================================================================
@@ -389,7 +429,7 @@ int main()
     test_run_task_idle_wait_rejects_motion();
     test_mosaic_fills_bins_in_row_order();
     test_mosaic_rejects_uncoloured_cell();
-    test_mosaic_rejects_pattern_beyond_wall_stock();
+    test_mosaic_substitutes_beyond_wall_stock();
 
     TEST_REPORT();
 }

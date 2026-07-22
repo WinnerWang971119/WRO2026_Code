@@ -309,7 +309,9 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    _grabToBin(3);
+    Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
+    Drive.holdYaw();
+    Drive.driveDist(6.4).setMode(DriveMode::GYRO);
     
    return true;
 }
@@ -884,14 +886,17 @@ namespace
     // Wall supply model
     //
     // Each colour occupies two rows of the M wall — a lower node (`MxD`) and an
-    // upper node (`MxU`) — and each row holds `kMosaicTilesPerRow` tiles that the
-    // belt reaches without the chassis moving. So one colour supplies
-    // 2 * kMosaicTilesPerRow tiles in total.
+    // upper node (`MxU`). A row physically holds three tiles, but the belt cannot
+    // reach the LEFT one (bench-proven: the GRAB_LEFT pose sits against the HOME
+    // end-stop), so only `kMosaicReachablePerRow` tiles per row are collectable.
+    // One colour therefore supplies `kMosaicWallStock` tiles in total, and a
+    // pattern needing more of a colour is rebalanced in `_mosaicAlgo`.
     // -------------------------------------------------------------------------
 
-    constexpr uint8_t kMosaicTilesPerRow = 3;
-    constexpr uint8_t kMosaicRowLower    = 0;
-    constexpr uint8_t kMosaicRowUpper    = 1;
+    constexpr uint8_t kMosaicReachablePerRow = 2;
+    constexpr uint8_t kMosaicWallStock       = (uint8_t)(2 * kMosaicReachablePerRow);
+    constexpr uint8_t kMosaicRowLower        = 0;
+    constexpr uint8_t kMosaicRowUpper        = 1;
 
     /**
      * @brief One row node of the M wall.
@@ -916,16 +921,16 @@ namespace
     };
 
     /**
-     * @brief Belt positions reaching the three tiles of one wall row, in take order.
+     * @brief Belt positions reaching the collectable tiles of one wall row, in take order.
      *
      * The order sweeps monotonically from the HOME end toward the far-end travel pose
-     * (`GRAB_LEFT` -> `GRAB_MID` -> `GRAB_RIGHT` — see `Config::BeltStation`), so no grab
-     * backtracks across the belt. The belt still parks at `MID` before every drive; since
-     * `GRAB_RIGHT` is the reach position nearest that pose, the RETURN to `MID` after the
-     * last grab costs almost no belt move.
+     * (`GRAB_MID` -> `GRAB_RIGHT` — see `Config::BeltStation`), so no grab backtracks
+     * across the belt. `GRAB_LEFT` is deliberately absent: the belt cannot physically
+     * reach the LEFT tile, so each row supplies only its MID and RIGHT tiles. The belt
+     * still parks before every drive; since `GRAB_RIGHT` is the reach position nearest
+     * that pose, the RETURN after the last grab costs almost no belt move.
      */
-    constexpr Config::BeltStation kMosaicGrabOrder[kMosaicTilesPerRow] = {
-        Config::BeltStation::GRAB_LEFT,
+    constexpr Config::BeltStation kMosaicGrabOrder[kMosaicReachablePerRow] = {
         Config::BeltStation::GRAB_MID,
         Config::BeltStation::GRAB_RIGHT,
     };
@@ -963,6 +968,36 @@ namespace
     uint8_t mosaicChainGap(uint8_t a, uint8_t b)
     {
         return (uint8_t)((a > b) ? (a - b) : (b - a));
+    }
+
+    /**
+     * @brief Station with the most spare wall stock, given @p needed tiles already claimed.
+     *
+     * Used for every planner-side substitution — UNKNOWN-cell masking and over-stock
+     * rebalancing — so no substitution can itself push a colour past `kMosaicWallStock`.
+     *
+     * @param needed Tiles already claimed per station (`kMosaicColorCount` entries).
+     * @return Station index with the largest remaining stock, or `0xFF` when every station
+     *         is fully claimed. Ties break to the lowest index, keeping plans deterministic.
+     */
+    uint8_t mosaicSpareStation(const uint8_t needed[])
+    {
+        uint8_t best      = 0xFF;
+        uint8_t bestSpare = 0;
+        for (uint8_t s = 0; s < kMosaicColorCount; ++s)
+        {
+            if (needed[s] >= kMosaicWallStock)
+            {
+                continue;
+            }
+            const uint8_t spare = (uint8_t)(kMosaicWallStock - needed[s]);
+            if (spare > bestSpare)
+            {
+                bestSpare = spare;
+                best      = s;
+            }
+        }
+        return best;
     }
 
     // -------------------------------------------------------------------------
@@ -1160,12 +1195,13 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     }
     Serial.println();
 
-    // Tiles still on the wall, indexed [station][row]. Both rows start full.
+    // Collectable tiles still on the wall, indexed [station][row]. Both rows start with
+    // their two reachable tiles (the LEFT tile exists but the belt cannot take it).
     uint8_t stock[kMosaicColorCount][2];
     for (uint8_t c = 0; c < kMosaicColorCount; ++c)
     {
-        stock[c][kMosaicRowLower] = kMosaicTilesPerRow;
-        stock[c][kMosaicRowUpper] = kMosaicTilesPerRow;
+        stock[c][kMosaicRowLower] = kMosaicReachablePerRow;
+        stock[c][kMosaicRowUpper] = kMosaicReachablePerRow;
     }
 
     // Row node the chassis is parked at; 0xFF until the first drive. `chainPos` starts at the
@@ -1177,9 +1213,10 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     // Enter the wall through the reset node — a direct run at a row node crosses the mosaic.
     // `MR` is a NodeType::RESET node, so arriving squares up, presses the rear into the wall
     // and re-anchors Localization on its own.
-    Manipulator.beltTo(Config::BeltStation::MID);
+    Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
     PathTracker.goTo(kMosaicResetNode);
     Drive.turnToYaw(Localization.toImuYaw(90));
+    _waitStationaryMs(200);
 
     for (uint8_t i = 0; i < tiles; ++i)
     {
@@ -1198,7 +1235,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         if (station != parkedColor || row != parkedRow)
         {
             // Retract before every chassis move — an extended belt throws the centre of mass too far off to drive on.
-            Manipulator.beltTo(Config::BeltStation::MID);
+            Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
             PathTracker.goTo(kMosaicRowNodes[station][row].node);
 
             parkedColor = station;
@@ -1211,7 +1248,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         _setLeds(kMosaicStationLed[station]);
 
         // Tiles come off a row in take order, so the slot index is how many are gone.
-        const uint8_t slot = (uint8_t)(kMosaicTilesPerRow - stock[station][row]);
+        const uint8_t slot = (uint8_t)(kMosaicReachablePerRow - stock[station][row]);
         Manipulator.beltTo(kMosaicGrabOrder[slot]);
         _grabToBin(bin);
         --stock[station][row];
@@ -1300,18 +1337,19 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
     // ---- Read the pattern as station indices -------------------------------------------
     uint8_t cellIndex[Config::VISION_CELL_COUNT];
     uint8_t needed[kMosaicColorCount] = { 0, 0, 0, 0 };
-    uint8_t maskedCells               = 0;   // cells substituted with the fallback (masking ON)
+    uint8_t maskedCells               = 0;   // cells with no station colour (masking ON)
 
     for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
     {
-        uint8_t station = mosaicColorIndex(Vision.getColor(cell));
+        const uint8_t station = mosaicColorIndex(Vision.getColor(cell));
         if (station >= kMosaicColorCount)
         {
             // UNKNOWN (uncalibrated / surprise hue, or no successful read) or RED — no wall station
-            // supplies it. With masking ON (Config::VISION_MASK_UNKNOWN_ENABLED) substitute the
-            // fallback station so the tile is still placed (scores 5 pts) rather than aborting the
-            // whole build. With masking OFF it is a genuine failure — name the cell rather than
-            // silently planning a partial route.
+            // supplies it. With masking ON (Config::VISION_MASK_UNKNOWN_ENABLED) substitute a wall
+            // colour so the tile is still placed (scores 5 pts) rather than aborting the whole
+            // build; the colour is chosen AFTER the count below, so the masked cell takes whichever
+            // station has the most spare stock instead of a fixed fallback. With masking OFF it is
+            // a genuine failure — name the cell rather than silently planning a partial route.
             if (!Config::VISION_MASK_UNKNOWN_ENABLED)
             {
                 Serial.print(F("[Tasks] mosaic: cell "));
@@ -1319,18 +1357,9 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
                 Serial.println(F(" has no station colour"));
                 return 0;
             }
-            // Count the substitution and enforce the cap HERE, at the point of use — do NOT trust
-            // that the read already bounded it. The diagnostic `Vision::readMosaicRaw()` (VISION
-            // VIEW / VISION TEST) writes the same latch with NO cap, and a failed mission
-            // `readMosaic()` leaves whatever the latch already held in place, so the frame reaching
-            // this line is not guaranteed to have passed Config::VISION_MASK_MAX_UNKNOWN_CELLS. The
-            // over-cap check below bounds the number of fabricated tiles regardless of provenance.
-            station = mosaicColorIndex(Config::VISION_MASK_FALLBACK_COLOR);
+            cellIndex[cell] = 0xFF;
             ++maskedCells;
-            Serial.print(F("[Tasks] mosaic: cell "));
-            Serial.print(cell);
-            Serial.print(F(" UNKNOWN -> masked to "));
-            Serial.println(kMosaicColorTag[station]);
+            continue;
         }
         cellIndex[cell] = station;
         ++needed[station];
@@ -1339,8 +1368,11 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
     if (maskedCells > Config::VISION_MASK_MAX_UNKNOWN_CELLS)
     {
         // Over the mask budget: the latch is not a clean capped read (a stale diagnostic read, or a
-        // failed mission read that left an old frame behind). Abort rather than build a mostly
-        // invented mosaic — this is the point-of-use half of the cap the read enforces on its side.
+        // failed mission read that left an old frame behind). Enforce the cap HERE, at the point of
+        // use — do NOT trust that the read already bounded it: the diagnostic
+        // `Vision::readMosaicRaw()` (VISION VIEW / VISION TEST) writes the same latch with NO cap,
+        // and a failed mission `readMosaic()` leaves whatever the latch already held in place.
+        // Abort rather than build a mostly invented mosaic.
         Serial.print(F("[Tasks] mosaic: "));
         Serial.print(maskedCells);
         Serial.print(F(" masked cells over cap "));
@@ -1348,16 +1380,63 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
         return 0;
     }
 
+    // Masked cells take the colour with the most spare wall stock, so masking alone can
+    // never push a colour past what the wall supplies.
+    for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
+    {
+        if (cellIndex[cell] != 0xFF)
+        {
+            continue;
+        }
+        const uint8_t station = mosaicSpareStation(needed);
+        if (station >= kMosaicColorCount)
+        {
+            Serial.println(F("[Tasks] mosaic: no spare stock for masked cell"));
+            return 0;
+        }
+        cellIndex[cell] = station;
+        ++needed[station];
+        Serial.print(F("[Tasks] mosaic: cell "));
+        Serial.print(cell);
+        Serial.print(F(" UNKNOWN -> masked to "));
+        Serial.println(kMosaicColorTag[station]);
+    }
+
+    // ---- Rebalance colours the wall cannot supply ---------------------------------------
+    // The wall reaches only kMosaicWallStock (4) tiles per colour, so a pattern needing 5+
+    // of one colour cannot be built true to the read. Recolour the excess cells — top rows
+    // first, keeping the bottom rows faithful — to the station with the most spare stock: a
+    // complete mosaic with a few wrong-coloured tiles still scores those placements, where
+    // aborting scores nothing (same trade as the UNKNOWN masking above). 12 cells against
+    // 16 reachable tiles means a full rebalance always exists.
     for (uint8_t station = 0; station < kMosaicColorCount; ++station)
     {
-        if (needed[station] > (uint8_t)(2 * kMosaicTilesPerRow))
+        while (needed[station] > kMosaicWallStock)
         {
-            Serial.print(F("[Tasks] mosaic: pattern needs "));
-            Serial.print(needed[station]);
+            uint8_t cell = 0xFF;
+            for (int8_t c = (int8_t)Config::VISION_CELL_COUNT - 1; c >= 0; --c)
+            {
+                if (cellIndex[(uint8_t)c] == station)
+                {
+                    cell = (uint8_t)c;
+                    break;
+                }
+            }
+            const uint8_t to = mosaicSpareStation(needed);
+            if (cell == 0xFF || to >= kMosaicColorCount)
+            {
+                Serial.println(F("[Tasks] mosaic: no spare stock to rebalance"));
+                return 0;
+            }
+            cellIndex[cell] = to;
+            --needed[station];
+            ++needed[to];
+            Serial.print(F("[Tasks] mosaic: cell "));
+            Serial.print(cell);
+            Serial.print(F(" needs "));
             Serial.print(kMosaicColorTag[station]);
-            Serial.print(F(", wall holds "));
-            Serial.println((uint8_t)(2 * kMosaicTilesPerRow));
-            return 0;
+            Serial.print(F(" over wall stock -> substituted "));
+            Serial.println(kMosaicColorTag[to]);
         }
     }
 

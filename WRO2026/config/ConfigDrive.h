@@ -790,7 +790,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KD_DEFAULT
-#define GYRO_HOLD_KD_DEFAULT 3.2f
+#define GYRO_HOLD_KD_DEFAULT 0.25f
 #endif
     constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
 

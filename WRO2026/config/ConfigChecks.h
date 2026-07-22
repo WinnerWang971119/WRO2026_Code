@@ -217,15 +217,6 @@ namespace Config
     static_assert(VISION_WHITE_STA_MAX <= 15,
                   "Config::VISION_WHITE_STA_MAX must be <= 15 (sta field is 0..15).");
 
-    // The UNKNOWN-cell mask substitutes VISION_MASK_FALLBACK_COLOR for an unreadable cell, and the
-    // mosaic planner must be able to fetch a real tile for it — so it must be one of the four wall
-    // station colours (YELLOW/BLUE/GREEN/WHITE), i.e. neither UNKNOWN nor RED (which no wall
-    // station supplies). This is the config-side half of the contract Tasks.cpp's mosaic model owns.
-    static_assert(VISION_MASK_FALLBACK_COLOR != Color::UNKNOWN &&
-                      VISION_MASK_FALLBACK_COLOR != Color::RED,
-                  "Config::VISION_MASK_FALLBACK_COLOR must be a wall station colour "
-                  "(YELLOW/BLUE/GREEN/WHITE), never UNKNOWN or RED.");
-
     // A masked read cannot tolerate more UNKNOWN cells than exist.
     static_assert(VISION_MASK_MAX_UNKNOWN_CELLS <= VISION_CELL_COUNT,
                   "Config::VISION_MASK_MAX_UNKNOWN_CELLS must be <= VISION_CELL_COUNT.");

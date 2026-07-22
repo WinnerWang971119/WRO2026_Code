@@ -472,6 +472,11 @@ private:
      * the sorter bin it must be dropped into — the sorter holds one bin per mosaic row so the
      * dumped rows come out identical to the pattern that was read.
      *
+     * The wall supplies at most FOUR reachable tiles per colour (the LEFT tile of each row
+     * is physically unreachable). A pattern needing 5+ of one colour — and any UNKNOWN cell
+     * while masking is on — is recoloured at plan time to the station with the most spare
+     * stock, so the build always completes with at worst a few wrong-coloured tiles.
+     *
      * @param picks    Receives one entry per tile, in collection order. Must hold at least
      *                 @p maxPicks entries.
      * @param maxPicks Capacity of @p picks. `Config::VISION_CELL_COUNT` is always enough —

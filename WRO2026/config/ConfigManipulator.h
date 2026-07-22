@@ -283,9 +283,9 @@ namespace Config
      *       centre of mass too far off.
      */
     enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4,
-                                       GRAB_RIGHT = 5, GRAB_MID = 6, GRAB_LEFT = 7 };  // TODO finalize
+                                       GRAB_RIGHT = 5, GRAB_MID = 6, GRAB_LEFT = 7, MOVE_STRAIGHT = 8 };  // TODO finalize
     /** @brief Number of belt stations (length of `BELT_STATIONS`). */
-    constexpr uint8_t BELT_STATION_COUNT = 8;
+    constexpr uint8_t BELT_STATION_COUNT = 9;
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
@@ -295,7 +295,8 @@ namespace Config
         { BeltMode::POSITION,    1300,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
         { BeltMode::POSITION,    920,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
         { BeltMode::POSITION,    400,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
-        { BeltMode::POSITION,    5,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
+        { BeltMode::POSITION,    1,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
+        { BeltMode::POSITION, 1100, 0, BELT_MOVE_SPEED}, //Helps us balance center of mass
     };
 }    // namespace Config
 

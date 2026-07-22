@@ -62,9 +62,16 @@ public:
      * @brief Latch a caller-supplied mosaic as if a read succeeded (mirrors the real `fakeRead`).
      * @param colors Source array of exactly `Config::VISION_CELL_COUNT` colours.
      * @return `true` always (an explicit injection cannot fail).
+     * @note A no-op after `_setInjectedColors` — the bench `fakeRead` hard-coded inside the
+     *       `mosaic` task body must not overwrite the pattern a test case injected, or every
+     *       case would silently plan against the same bench pattern.
      */
     bool fakeRead(const Config::Color (&colors)[Config::VISION_CELL_COUNT])
     {
+        if (_pinned)
+        {
+            return true;
+        }
         for (uint8_t i = 0; i < Config::VISION_CELL_COUNT; ++i)
         {
             _colors[i] = colors[i];
@@ -103,6 +110,8 @@ public:
     /**
      * @brief Inject the per-cell colours returned by `getColor()` (fixture-only hook).
      * @param colors Source array of exactly `Config::VISION_CELL_COUNT` colours.
+     * @note Also PINS the latch: any later `fakeRead` (e.g. the bench injection inside the
+     *       `mosaic` task body) becomes a no-op, so the test's pattern stays authoritative.
      */
     void _setInjectedColors(const Config::Color colors[Config::VISION_CELL_COUNT])
     {
@@ -110,10 +119,12 @@ public:
         {
             _colors[i] = colors[i];
         }
+        _pinned = true;
     }
 
 private:
     Config::Color _colors[Config::VISION_CELL_COUNT] = {};   ///< Injected per-cell colour latch (UNKNOWN by default).
+    bool          _pinned = false;   ///< Set by `_setInjectedColors`; makes `fakeRead` a no-op.
 };
 
 /**
