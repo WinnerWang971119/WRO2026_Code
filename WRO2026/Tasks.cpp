@@ -1113,10 +1113,17 @@ bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
 
 bool TasksClass::pot(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("PotGet").setArrivalDirection(Direction::REAR);
+    PathTracker.goTo("i3");
+    Drive.turnToYaw(Localization.toImuYaw(90));
+    _waitStationaryMs(200);
+    Drive.driveDist(4).setMode(DriveMode::GYRO).setPower(-38).flat();
+    _waitStationaryMs(50);
     Manipulator.boxClose();
-    PathTracker.goTo("shovel2Get").setArrivalDirection(Direction::REAR);
-    PathTracker.goTo("PotPut") ;
+
+    Drive.driveDist(5).setMode(DriveMode::GYRO).setPower(38).flat();
+    _waitStationaryMs(200);
+    Localization.declarePosition("i3");
+    PathTracker.goTo("PotPut").setRouteDirection(Direction::REAR);
     Manipulator.boxOpen();
     return true;
 }

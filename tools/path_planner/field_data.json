@@ -397,7 +397,8 @@
       "type": "LINE",
       "u": "i3",
       "v": "shovel1Get",
-      "speed": "SLOW"
+      "speed": "SLOW",
+      "mode": "RIGHT"
     },
     {
       "type": "BLIND",
@@ -500,6 +501,62 @@
       "u": "PotPut",
       "v": "p1",
       "stop_at_line": "on"
+    },
+    {
+      "type": "LINE",
+      "u": "i1",
+      "v": "shovel1Get",
+      "speed": "SLOW",
+      "mode": "RIGHT"
+    },
+    {
+      "type": "LINE",
+      "u": "shovel1Get",
+      "v": "i1",
+      "speed": "SLOW",
+      "mode": "LEFT"
+    },
+    {
+      "type": "LINE",
+      "u": "shovel1Get",
+      "v": "i3",
+      "speed": "SLOW",
+      "mode": "RIGHT"
+    },
+    {
+      "type": "LINE",
+      "u": "i3",
+      "v": "shovel2Get",
+      "speed": "SLOW",
+      "mode": "RIGHT"
+    },
+    {
+      "type": "LINE",
+      "u": "shovel2Get",
+      "v": "i3",
+      "speed": "SLOW",
+      "mode": "LEFT"
+    },
+    {
+      "type": "LINE",
+      "u": "shovel2Get",
+      "v": "p1",
+      "speed": "SLOW",
+      "mode": "RIGHT"
+    },
+    {
+      "type": "LINE",
+      "u": "C",
+      "v": "p1",
+      "speed": "SLOW",
+      "mode": "LEFT"
+    },
+    {
+      "type": "LINE",
+      "u": "p1",
+      "v": "shovel2Get",
+      "speed": "SLOW",
+      "mode": "LEFT"
     }
   ],
   "OBSTACLES": [

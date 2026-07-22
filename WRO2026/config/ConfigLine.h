@@ -71,7 +71,7 @@ namespace Config
      * to a fixed distance without sensor pitch/height/line-width; measured on the mat.
      * @note TODO: bench-tune. LEFT = +, RIGHT = -.
      */
-    constexpr float LINE_FOLLOW_OFFSET_ERROR = 1.5f;
+    constexpr float LINE_FOLLOW_OFFSET_ERROR = 2.5f;
 
     // ---------------------------------------------------------------------------------------
     // 8-channel custom line sensor (WROLineArray)
