@@ -704,9 +704,8 @@ namespace Config
      *          contains a collinear blind run. Re-verify AC7 (TC5: chaining disabled stops at
      *          every node) before shipping a default flip.
      */
-// DIAGNOSTIC (temp): chaining off for clean per-hop instrumentation. Revert to true.
 #ifndef PATH_BLIND_CHAIN_ENABLED_DEFAULT
-#define PATH_BLIND_CHAIN_ENABLED_DEFAULT false
+#define PATH_BLIND_CHAIN_ENABLED_DEFAULT true
 #endif
     constexpr bool PATH_BLIND_CHAIN_ENABLED = PATH_BLIND_CHAIN_ENABLED_DEFAULT;
 
