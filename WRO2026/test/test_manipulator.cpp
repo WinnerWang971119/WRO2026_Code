@@ -149,6 +149,20 @@ static void test_TC1_grabber_setangle_clamps_to_180()
     ASSERT_EQ(rcFor(Config::GRABBER.rcId).setAngleCallCount, (uint32_t) 1);
 }
 
+static void test_TC1b_dumper_open_for_white_uses_open_pose()
+{
+    TEST_SCOPE("TC1b: dumper.openForWhite() commands the configured open pose");
+
+    resetWorld();
+    clearTickCallback();
+
+    Manipulator.dumper.openForWhite();
+
+    ASSERT_EQ(Manipulator.dumper.commandedAngle(), (uint16_t) Config::DUMPER.openDeg);
+    ASSERT_EQ(rcFor(Config::DUMPER.rcId).lastAngle, (uint16_t) Config::DUMPER.openDeg);
+    ASSERT_EQ(rcFor(Config::DUMPER.rcId).setAngleCallCount, (uint32_t) 1);
+}
+
 // ===========================================================================
 // TC2 / TC3 — timer-based completion crosses the slew+settle budget.
 //
@@ -794,6 +808,7 @@ static void test_TC15_begin_homes_all_and_zeroes_belt_once()
 int main()
 {
     test_TC1_grabber_setangle_clamps_to_180();
+    test_TC1b_dumper_open_for_white_uses_open_pose();
     test_TC2_grabber_not_done_below_estimate();
     test_TC3_grabber_done_at_estimate();
     test_TC4_sortto_valid_bin_commands_sorter();

@@ -178,6 +178,13 @@ public:
     void open() { setAngle(_cfg.openDeg); }
 
     /**
+     * @brief Move the dumper to the named white-payload open pose.
+     * @note This pose currently aliases the configured open angle (`cfg.openDeg`).
+     * @note Fire-and-forget — poll `isDone()` for completion. See `setAngle()`.
+     */
+    void openForWhite() { open(); }
+
+    /**
      * @brief Move to the configured "close" pose (`cfg.closeDeg`).
      * @note Fire-and-forget — poll `isDone()` for completion. See `setAngle()`.
      */
