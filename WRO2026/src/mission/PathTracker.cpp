@@ -486,6 +486,12 @@ bool PathTrackerClass::begin()
     _resetPivotLatch();
     // ADR-059: no blind-chain run in flight at boot.
     _chainReset();
+    // ADR-079: no generalized braked-blind carry baseline at boot.
+    _brakedBlindCarryActive  = false;
+    _brakedBlindEncSum       = 0;
+    _brakedBlindCmdCm        = 0.0f;
+    _brakedBlindReverse      = false;
+    _firstHopOfGoTo          = false;
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
     _activeStopAtLine        = StopAtLine::AUTO;
@@ -570,6 +576,10 @@ void PathTrackerClass::abort()
     // ADR-059: drop any in-flight blind-chain run — the chassis was hard-stopped, so the
     // chained speed plan (and its boundary-carry baseline) is void.
     _chainReset();
+    // ADR-079: a hard-cancel returns to IDLE — drop the generalized braked-blind carry baseline
+    // so a later goal cannot inherit a stale carry.
+    _brakedBlindCarryActive = false;
+    _firstHopOfGoTo         = false;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
@@ -805,6 +815,10 @@ void PathTrackerClass::_stepFsm()
             // (a START reset node, or a zero-hop goTo(R) while already on R). Cleared on the
             // first plan below. Matches the sim, which only checks for a reset node after a hop.
             _planIsFirstAfterDequeue = true;
+            // ADR-079: mark the fresh goTo's origin bind so `_onPlanNextHop` resets the
+            // generalized braked-blind carry exactly once, on this goal's first plan (NOT on the
+            // per-hop continuation re-entries).
+            _firstHopOfGoTo          = true;
             // ADR-036: each goal starts with a clean pivot latch. A pivot whose
             // FINAL hop was the previous goal's last hop left `_pendingPivot`
             // active with no following hop to consume it — clear all three here
@@ -1396,6 +1410,10 @@ void PathTrackerClass::_stepFsm()
                 return;
             }
 
+            // ADR-079: a wall re-anchor re-zeros belief at the wall — any prior braked-blind carry
+            // baseline (encoder-referenced) is now meaningless. Invalidate it.
+            _brakedBlindCarryActive = false;
+
 #ifdef PT_PARITY_TRACE
             _ptEmitWall("wall_reanchor", cur, info->axis, "wall_coord", info->wall_coord);
 #endif
@@ -1529,6 +1547,10 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     // ADR-059: a fault stops the chassis — drop any in-flight blind-chain run so a stale
     // speed plan cannot bleed into a post-clearFault() goal's first blind dispatch.
     _chainReset();
+    // ADR-079: a fault aborts the in-flight goal — drop the generalized braked-blind carry
+    // baseline so it cannot bleed into a post-clearFault() goal's first blind dispatch.
+    _brakedBlindCarryActive = false;
+    _firstHopOfGoTo         = false;
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -1895,6 +1917,10 @@ void PathTrackerClass::_maybeHeadingReset(uint8_t cur, bool firstPlan,
 
     if (bound)
     {
+        // ADR-079: a line-arrival heading re-anchor invalidates any braked-blind carry baseline
+        // (the pass-through arrival is a line re-anchor, not a braked blind hop continuation).
+        _brakedBlindCarryActive = false;
+
         // FIRE: one Serial line (node / kind / bound heading / pre-bind delta) + one fixed OLED
         // push. The push is a FIXED string literal (static storage) per the wall precedent —
         // EventTrace may store the pointer, so never hand it a stack buffer.
@@ -1949,6 +1975,17 @@ void PathTrackerClass::_onPlanNextHop()
     // and no hop has moved the chassis) — see `_planIsFirstAfterDequeue`.
     const bool firstPlan     = _planIsFirstAfterDequeue;
     _planIsFirstAfterDequeue = false;
+
+    // ADR-079 origin bind: a fresh goTo resets the generalized braked-blind carry so a stale
+    // baseline from the PREVIOUS goTo's last braked blind hop is never applied to this goTo's
+    // first hop. Gated on `_firstHopOfGoTo` (set at DEQUEUE), NOT on every `_onPlanNextHop` — a
+    // within-goTo continuation (BLIND_FORWARD -> PLAN_NEXT_HOP) must KEEP the carry so a single
+    // goTo's consecutive braked blind hops telescope (AC2).
+    if (_firstHopOfGoTo)
+    {
+        _brakedBlindCarryActive = false;
+        _firstHopOfGoTo         = false;
+    }
 
     // Wall-zero reset hook (PR2, AC9): if the just-arrived node is a RESET node and its
     // interlude has not yet run, divert into the wall-stop / re-anchor interlude BEFORE
@@ -2391,6 +2428,11 @@ bool PathTrackerClass::_dispatchTurnIfNeeded(float bodyHeadingWorld, uint8_t tur
     // the chassis. (PR#35 findings #32 / #90.)
     _passThrough = false;
 
+    // ADR-079: a real pre-edge turn stops the chassis and breaks the collinear braked-blind run —
+    // drop the generalized carry baseline so the post-turn braked blind hop commands its full
+    // distance (a stale carry across a stop-and-turn would under-drive it).
+    _brakedBlindCarryActive = false;
+
     // ADR-059: same rule for a blind-chain run. The walk-ahead classified the joints on EDGE
     // headings, but this live check compares the IMU heading — if drift has opened a real
     // delta mid-run, the turn takes the wheels and the chassis stops, so the chained speed
@@ -2653,7 +2695,34 @@ void PathTrackerClass::_chainReset()
 {
     // ADR-059: value-initialize the whole run buffer back to the inactive state.
     // `active == false` gates every read, so the array wipe is hygiene, not correctness.
+    // ADR-079: the generalized braked-blind carry members (`_brakedBlindCarryActive` /
+    // `_brakedBlindEncSum` / `_brakedBlindCmdCm` / `_brakedBlindReverse`) are INTENTIONALLY
+    // independent of the `_chain` lifecycle and are deliberately NOT reset here — a chain-final
+    // braked hop snapshots the carry baseline and this retire must LEAVE it intact so a following
+    // non-chain braked blind hop telescopes off it. Those members are invalidated only at their
+    // own sites (turn / non-blind / re-anchor / fault / origin bind / non-braked dispatch).
     _chain = ChainRun{};
+}
+
+float PathTrackerClass::_measuredBoundaryCarryCm(int32_t baselineEncSum,
+                                                 float   baselineCmdCm) const
+{
+    // ADR-079 shared carry arithmetic — the SINGLE source both the in-`_chain.active` AC9 path
+    // and the generalized braked-blind path call, so the two computations cannot drift. Between
+    // the baseline hop's profile completing and this dispatch the chassis keeps rolling (Drive's
+    // empty-queue chained-end path releases the brake and coasts), landing BEFORE this move's
+    // encoder baseline. Return that measured overshoot: travel since the baseline dispatch minus
+    // the baseline's commanded distance. A negative measurement (host mocks with parked encoders;
+    // an under-traveled move) clamps to 0 — never LENGTHEN a hop, and the parity harness (encoders
+    // parked) then records the planned distances exactly like the sim.
+    const int32_t encSum     = Drive.getEncL() + Drive.getEncR();
+    const float   traveledCm = fabsf(encDegToCm((encSum - baselineEncSum) / 2));
+    float         carryCm    = traveledCm - baselineCmdCm;
+    if (carryCm < 0.0f)
+    {
+        carryCm = 0.0f;
+    }
+    return carryCm;
 }
 
 void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMode hop0Mode,
@@ -3052,6 +3121,9 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 #ifdef PT_PARITY_TRACE
             _ptEmitLineFollow(decision.reverse, q.speed, mode);
 #endif
+            // ADR-079: a non-blind (LINE follow) hop breaks the braked-blind run — invalidate the
+            // generalized carry baseline so a later braked blind hop commands its full distance.
+            _brakedBlindCarryActive = false;
             _state       = State::LINE_FOLLOW;
             _passThrough = false;    // consumed
             break;
@@ -3094,6 +3166,9 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             _ptEmitProjectionFollow(decision.reverse, q.speed, mode, effectiveDistCm,
                                     _projPassThrough);
 #endif
+            // ADR-079: a non-blind (PROJECTION follow) hop breaks the braked-blind run —
+            // invalidate the generalized carry baseline.
+            _brakedBlindCarryActive = false;
             _state       = State::PROJECTION_FOLLOW;
             _passThrough = false;    // consumed
             break;
@@ -3161,6 +3236,9 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             _ptEmitStopAtLineSeek(decision.reverse, decision.driveMode,
                                   decision.commandedDistanceCm, decision.overshootCm);
 #endif
+            // ADR-079: a STOP_AT_LINE / seek arrival re-anchors on the line — invalidate the
+            // generalized braked-blind carry baseline so a later braked blind hop is un-adjusted.
+            _brakedBlindCarryActive = false;
             _state       = State::STOP_AT_LINE;
             _passThrough = false;    // consumed
             break;
@@ -3230,9 +3308,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //       below is UNTOUCHED (AC12; TC5: PATH_BLIND_CHAIN_ENABLED=false is
             //       byte-identical to today's stop-at-every-node behavior).
             // ---------------------------------------------------------------------------
-            float   dispatchCm  = effectiveDistCm;
-            bool    chainMid    = false;    // dispatch with chained endPwm + setBrake(false)
-            int16_t chainEndPwm = 0;
+            float   dispatchCm   = effectiveDistCm;
+            bool    chainMid     = false;    // dispatch with chained endPwm + setBrake(false)
+            bool    inChainMatch = false;    // ADR-079: in-`_chain.active` match hop owns its carry
+            int16_t chainEndPwm  = 0;
 
             if (_chain.active)
             {
@@ -3260,19 +3339,18 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // encoders; an under-traveled move) clamps to 0 — never LENGTHEN a
                     // hop, and the parity harness (encoders parked) then records the
                     // planned distances exactly like the sim.
-                    const int32_t encSum = Drive.getEncL() + Drive.getEncR();
-                    const float   traveledCm =
-                        fabsf(encDegToCm((encSum - _chain.dispatchEncSum) / 2));
-                    float carryCm = traveledCm - _chain.dispatchCmdCm;
-                    if (carryCm < 0.0f)
-                    {
-                        carryCm = 0.0f;
-                    }
+                    const float carryCm =
+                        _measuredBoundaryCarryCm(_chain.dispatchEncSum, _chain.dispatchCmdCm);
                     dispatchCm = effectiveDistCm - carryCm;
                     if (dispatchCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
                     {
                         dispatchCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
                     }
+                    // ADR-079: this in-chain hop subtracted its OWN carry above via the shared
+                    // helper; the `!inChainMatch` interlock in the generalized READ below then
+                    // skips a second subtraction (the sole double-subtract guard). The SNAPSHOT
+                    // still runs at the end of the case for a braked (chain-final) match hop.
+                    inChainMatch = true;
 
                     _chain.hopIndex  = k;
                     signedStartSpeed = _chain.speed[k].startPwm;
@@ -3298,6 +3376,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                           "abandoning run"));
                     const int16_t heldPwm = _chain.speed[_chain.hopIndex].endPwm;
                     _chainReset();
+                    // ADR-079: the abandoned run's carry baseline is stale — invalidate it
+                    // EXPLICITLY here (NOT via `_chainReset`, which deliberately leaves the
+                    // generalized members alone), BEFORE the same-invocation generalized braked
+                    // READ below, so this fallback braked hop commands its full distance and then
+                    // re-snapshots a fresh baseline (TC7).
+                    _brakedBlindCarryActive = false;
                     if (heldPwm != 0 && ((heldPwm < 0) == (cruisePwm < 0)))
                     {
                         signedStartSpeed = heldPwm;
@@ -3320,6 +3404,51 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         chainMid    = true;
                         chainEndPwm = _chain.speed[0].endPwm;
                     }
+                }
+            }
+
+            // ADR-079 generalized braked-blind carry (READ + SUBTRACT / DIRECTION-FLIP). A BRAKED
+            // blind hop is one that stops at rest: NOT a mid-chain flow-through hop (brake=false)
+            // and NOT a RAW_FLAT open-loop move. Only a braked hop carries a boundary overshoot
+            // into the next hop, so only a braked hop reads/subtracts one here. The `!inChainMatch`
+            // guard is the SOLE double-subtract interlock: an in-`_chain.active` match hop already
+            // subtracted its own carry (via the shared helper above), so the generalized READ is
+            // skipped on it while the SNAPSHOT at the end of the case still runs. A fresh chain's
+            // hop 0 and RAW_FLAT are non-braked, so `brakedBlindHop` is false and they take no
+            // carry. This subtraction is what generalizes ADR-059's in-chain compensation to the
+            // chaining-OFF / chain-ineligible per-hop path and the chain->non-chain handoff.
+            const bool brakedBlindHop =
+                !chainMid && (decision.driveMode != Routes::BlindMode::RAW_FLAT);
+            if (brakedBlindHop && !inChainMatch && _brakedBlindCarryActive)
+            {
+                if (_brakedBlindReverse == decision.reverse)
+                {
+                    // Same direction as the baseline hop — subtract the MEASURED boundary carry
+                    // (identical arithmetic to the in-chain path, via the shared helper) so this
+                    // hop telescopes onto the previous braked blind hop's overshoot and the run's
+                    // final node lands on-node with no accumulation over N hops. Floor to
+                    // PIVOT_TRIM_MIN_DRIVE_CM so a large carry can never command a non-positive
+                    // drive (which `Drive.driveDist` would reject).
+                    const float carryCm =
+                        _measuredBoundaryCarryCm(_brakedBlindEncSum, _brakedBlindCmdCm);
+                    dispatchCm -= carryCm;
+                    if (dispatchCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
+                    {
+                        dispatchCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
+                    }
+                }
+                else
+                {
+                    // DIRECTION FLIP (e.g. a REAR braked blind hop after a FRONT one with no turn):
+                    // carry = 0 for this hop (do NOT subtract, do NOT sign-flip / lengthen) — a
+                    // forward overshoot is structurally near-cancelled by the reverse hop's own
+                    // braking, leaving <= one carry of single-hop error that the next re-anchor
+                    // zeroes; a sign-aware add would reintroduce a 2x-carry failure mode for
+                    // negligible gain. Re-arm the baseline for the new direction so the flipped hop
+                    // begins a fresh telescoping run (the end-of-case SNAPSHOT re-affirms it).
+                    _brakedBlindReverse = decision.reverse;
+                    _brakedBlindEncSum  = Drive.getEncL() + Drive.getEncR();
+                    _brakedBlindCmdCm   = dispatchCm;
                 }
             }
 
@@ -3559,6 +3688,28 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     _chainReset();
                 }
             }
+
+            // ADR-079 generalized braked-blind carry SNAPSHOT / INVALIDATE. A BRAKED blind
+            // dispatch (a non-chain profiled hop OR the chain-FINAL braked hop — including its
+            // degraded stub) becomes the carry baseline the NEXT braked blind hop telescopes off,
+            // so a post-chain braked hop reads the chain-final baseline. This runs alongside the
+            // `if (chainHop)` snapshot above AND for the non-chain braked path; on a chain-final
+            // hop it runs AFTER `_chainReset()` retired the run, which leaves these members intact
+            // (the chain-retire ordering pin). A NON-braked dispatch (a mid-chain flow-through hop
+            // or a RAW_FLAT open-loop move) has no boundary carry to hand on and INVALIDATES the
+            // baseline. `brakedBlindHop` is the same brake predicate the READ above used.
+            if (brakedBlindHop)
+            {
+                _brakedBlindEncSum      = Drive.getEncL() + Drive.getEncR();
+                _brakedBlindCmdCm       = dispatchCm;
+                _brakedBlindReverse     = decision.reverse;
+                _brakedBlindCarryActive = true;
+            }
+            else
+            {
+                _brakedBlindCarryActive = false;
+            }
+
             _state       = State::BLIND_FORWARD;
             _passThrough = false;    // consumed
             break;
