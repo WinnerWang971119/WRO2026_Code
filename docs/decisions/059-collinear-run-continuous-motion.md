@@ -1,6 +1,6 @@
 # ADR-059: Collinear runs chain velocity across hops instead of stopping at every node
 
-**Status:** Implemented
+**Status:** Implemented (amended by ADR-079)
 **Date decided:** 2026-07 (phase)
 
 ## Rule
@@ -122,7 +122,10 @@ pass through cleanly is to straighten the field, not add a second knob.
   gap on pass-through.
 - Run-coalescing's rejected tradeoff shifts — e.g. a mid-move distance
   observer becomes cheap for another reason — reopen the coalescing decision
-  against the parity-granularity cost recorded here.
+  against the parity-granularity cost recorded here. ADR-079 now records the
+  bench-gated fallback ordering for this trigger: a `ChainSpeedPolicy`
+  terminal brake-to-rest reserve is tried first, and coalescing (Option A)
+  is reopened only if that reserve also fails bench.
 - Bench testing shows a blind chain that ends directly into a
   `Drive.stopAtLine()` seek drifts past that seek's `STOP_AT_LINE_ARM_WINDOW_CM`
   arm window. `PATH_BLIND_CHAIN_MAX_CM` was deliberately decoupled from the
