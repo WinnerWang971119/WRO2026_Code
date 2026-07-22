@@ -250,15 +250,10 @@ bool MissionClass::declarePosition(const char* name)
     }
 
     // Low-level re-anchor: set node + zero offset (heading offset untouched).
+    // Under CTPS_RECORD this call also records the declare_position op — the
+    // recording Localization mock's declarePosition(uint8_t) funnel is the
+    // single seam, so no separate hook is needed here.
     Localization.declarePosition(id);
-
-#ifdef CTPS_RECORD
-    // Success-path-only hook (issue #130, task T8): both guards above have
-    // already passed and the re-anchor has already been applied, so this
-    // declare is one the firmware actually took. Recording it any earlier
-    // would put a declare in the trace the firmware never applied.
-    ctps::recordDeclarePosition(name);
-#endif
 
     // Clear any latched fault as the "clears the fault" half of the recovery, and it lives HERE
     // (Mission layer) because Localization can't reach up into PathTracker. `clearFault()` resets
