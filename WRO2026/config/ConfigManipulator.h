@@ -95,7 +95,7 @@ namespace Config
      *         `grab()` capture stroke stages its own rates (jump to `openForWhiteDeg`, slow lift to
      *         `homeDeg` at `GRABBER_LIFT_STEP_MS`, snap to `closeDeg`); other grabber moves
      *         (`release`/`reset`) stay instant unless overridden with `.rampMs()`. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 70, 97, 7.0f, 80, false, 0 };
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 5, 120, 97, 7.0f, 80, false, 0 };
     /** @brief Dumper servo calibration. TODO calibrate. `stepMs = 0` = instant. */
     constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false, 0 };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
@@ -109,7 +109,7 @@ namespace Config
      * `GRABBER.homeDeg` at this rate (the lift), then snap to `GRABBER.closeDeg` INSTANTLY. Bigger
      * = slower; the effective rate is floored by the ~8 ms cooperative tick. TODO tune at bring-up.
      */
-    constexpr uint16_t GRABBER_LIFT_STEP_MS = 6;
+    constexpr uint16_t GRABBER_LIFT_STEP_MS = 8;
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          

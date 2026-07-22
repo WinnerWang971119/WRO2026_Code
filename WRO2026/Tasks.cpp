@@ -309,7 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    _grabToBin(1);
+    _grabToBin(3);
     
    return true;
 }
