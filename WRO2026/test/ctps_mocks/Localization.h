@@ -1,6 +1,6 @@
 /**
  * @file Localization.h (CTPS HOST MOCK)
- * @brief No-op recording mock of the Localization singleton for the CTPS dump.
+ * @brief Recording mock of the Localization singleton for the CTPS dump.
  * @author WRO 2026
  *
  * @details
@@ -9,11 +9,18 @@
  * header no-ops if reached afterwards.
  *
  * `Mission.cpp` calls `Localization.declarePosition(id)` from its immediate
- * `declarePosition(name)` recovery verb. The CTPS dump records the COMMAND STREAM
- * (drive ops / waits / beeps / leds), not localization state, so the re-anchor is
- * a no-op here. Mirroring the precedent set by the `Drive` / `PathTracker` /
- * `EventTrace` mocks, this keeps the real `Localization.cpp` (and its Drive /
- * MatrixMiniR4 / IMU chain) out of the dump link.
+ * `declarePosition(name)` recovery verb, on the success path only (after the
+ * PathTracker-busy and unknown-node guards have both passed). This mock is the
+ * SINGLE recording seam for that re-anchor: the `uint8_t` overload resolves the
+ * id back to a node name via `FieldMap` and appends a `declare_position` op to
+ * the shared CTPS log (mirroring how `goto` is recorded by the `PathTracker.goTo`
+ * mock only, not by a `Mission.cpp` hook). The `const char*` overload delegates
+ * to it after resolving the name to an id, so a caller using either overload is
+ * captured exactly once. An out-of-range id or an unknown name records nothing.
+ *
+ * Mirroring the precedent set by the `Drive` / `PathTracker` / `EventTrace`
+ * mocks, this keeps the real `Localization.cpp` (and its Drive / MatrixMiniR4 /
+ * IMU chain) out of the dump link.
  *
  * Only the surface `Mission.cpp` touches is provided. If a later Mission change
  * references more of `Localization`, extend this shadow rather than dragging in
@@ -25,17 +32,50 @@
 
 #include <stdint.h>
 
+#include "ctps_record.h"
+#include "src/nav/FieldMap.h"
+
 /**
- * @brief No-op recording mock of `LocalizationClass`.
+ * @brief Recording mock of `LocalizationClass`.
  *
- * Exposes only `declarePosition` — the single method `Mission.cpp` invokes on the
- * global. The dump captures no localization state, so the call does nothing.
+ * Exposes both `declarePosition` overloads the production class does. The
+ * `uint8_t` overload is the single recording funnel: it resolves @p nodeId to
+ * a node name via `FieldMap::getNode` and appends one `declare_position` op to
+ * the shared CTPS log, but only when @p nodeId is in range — an out-of-range
+ * id records nothing, matching the production class's silent no-op there.
  */
 class LocalizationClass
 {
 public:
-    /** @brief No-op re-anchor — the dump does not model graph position. */
-    void declarePosition(uint8_t /*nodeId*/) {}
+    /**
+     * @brief Record a re-anchor to @p nodeId as a `declare_position` op.
+     * @param nodeId Target node index. Recorded only when `nodeId < Routes::N_NODES`;
+     *               an out-of-range id is a silent no-op, same as production.
+     */
+    void declarePosition(uint8_t nodeId)
+    {
+        if (nodeId < Routes::N_NODES)
+        {
+            ctps::recordDeclarePosition(FieldMap::getNode(nodeId).name);
+        }
+    }
+
+    /**
+     * @brief Resolve @p nodeName and delegate to the `uint8_t` recording funnel.
+     * @param nodeName Target node name.
+     * @return `true` if the name resolved and the declare was recorded; `false`
+     *         on an unknown name (nothing is recorded).
+     */
+    bool declarePosition(const char* nodeName)
+    {
+        const uint8_t id = FieldMap::findNodeByName(nodeName);
+        if (id == FieldMap::NODE_NONE)
+        {
+            return false;
+        }
+        declarePosition(id);
+        return true;
+    }
 };
 
 /** @brief Single global instance — defined in ctps_record.cpp. */
