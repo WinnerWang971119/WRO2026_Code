@@ -584,7 +584,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 6.0f
+#define TURN_KD_DEFAULT 6.5f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -671,7 +671,7 @@ namespace Config
      * @note TODO: bench-tune (T11) — down-tune until the initial kick no longer slips on Lofaix.
      */
 #ifndef TURN_SLEW_PWM_PER_TICK_DEFAULT
-#define TURN_SLEW_PWM_PER_TICK_DEFAULT 10
+#define TURN_SLEW_PWM_PER_TICK_DEFAULT 3
 #endif
     constexpr int16_t TURN_SLEW_PWM_PER_TICK = TURN_SLEW_PWM_PER_TICK_DEFAULT;
 
@@ -768,7 +768,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KP_DEFAULT
-#define GYRO_HOLD_KP_DEFAULT 3.0f
+#define GYRO_HOLD_KP_DEFAULT 8.0f
 #endif
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 
@@ -790,7 +790,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KD_DEFAULT
-#define GYRO_HOLD_KD_DEFAULT 0.07f
+#define GYRO_HOLD_KD_DEFAULT 2.8f
 #endif
     constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
 

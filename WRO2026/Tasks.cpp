@@ -311,9 +311,14 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i2");
     Drive.turnToYaw(Localization.toImuYaw(90));
+    PathTracker.goTo("MWD");
     Manipulator.dumper.openForWhite();
     _waitStationaryMs(200);
     PathTracker.goTo("MWU");
+    PathTracker.goTo("i2");
+    Manipulator.dumper.home();
+    PathTracker.goTo("Start");
+    Drive.turnToYaw(Localization.toImuYaw(270));
     return true;
 }
 
