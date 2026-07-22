@@ -90,16 +90,16 @@
  *                          self-disables the follower. Any failed gate condition
  *                          falls back to the normal stop-at-B per-hop path.
  *  - `BLIND_FORWARD`     — waits for `Drive.isIdle()` after a dead-reckoned
- *                          forward move. ADR-059 blind-chain: when a collinear
- *                          run of BLIND dead-reckon hops is in flight (the
- *                          `_chain` run buffer is active), each NON-final hop
- *                          was dispatched with chained `setStartSpeed` /
- *                          `setEndSpeed` + `setBrake(false)` so the chassis
- *                          never brakes to rest at the intermediate node; this
- *                          state still stamps `onDeadReckonedAdvance` exactly
- *                          once per node (blind nodes have no positional
- *                          re-anchor). The run's FINAL hop is an ordinary
- *                          braked stop and retires the run at dispatch.
+ *                          forward move. ADR-080 blind-run coalescing: a single
+ *                          hop stamps `onDeadReckonedAdvance(_nextHop)` and
+ *                          settles. When a coalesced run is active (the `_chain`
+ *                          buffer holds node[0..hopCount] and the ONE combined
+ *                          braked move just retired here), this state advances
+ *                          Localization through EVERY node of the run in order
+ *                          (node[1..hopCount]) — blind nodes have no positional
+ *                          re-anchor — emitting a `blind_pass` for each
+ *                          intermediate node, then retires the run
+ *                          (`_chainReset`) and settles at the final node.
  *  - `STOP_AT_LINE`      — waits for `Drive.isIdle()` after a
  *                          `Drive.stopAtLine(...)` dispatch on a BLIND hop
  *                          resolved to stop-at-line. On success re-anchors
@@ -165,7 +165,6 @@
 #include <stdint.h>
 
 #include "../../Config.h"
-#include "../drive/ChainSpeedPolicy.h"
 #include "../nav/FieldMap.h"
 #include "../nav/NavTypes.h"
 #include "../nav/routes.h"
@@ -822,64 +821,55 @@ private:
     bool _evaluateLineFollowPassThrough() const;
 
     /**
-     * @brief ADR-059 blind-chain walk-ahead: try to fold the BLIND dead-reckon hop being
-     *        dispatched (hop 0: `cur -> _nextHop`) plus the collinear BLIND hops beyond it
-     *        into ONE chained run, filling the fixed `_chain` run buffer.
+     * @brief ADR-080 blind-run coalescing walk-ahead: try to fold the BLIND dead-reckon hop
+     *        being dispatched (hop 0: `cur -> _nextHop`) plus the collinear BLIND hops beyond
+     *        it into ONE combined run, filling the fixed `_chain` run buffer.
      *
      * Called from `_dispatchEdgeAfterTurn`'s `BLIND_DEAD_RECKON` arm when no run is in
      * flight and `Config::PATH_BLIND_CHAIN_ENABLED` is set. Walks `NEXT_HOP` forward from
      * `_nextHop` toward `_destinationNode`, admitting each candidate hop only when ALL of
-     * the eligibility guards hold (AC7 / Error Handling — any miss ends the chain BEFORE
-     * the unsafe hop, which then dispatches as a normal braked hop):
+     * the eligibility guards hold (any miss ends the run BEFORE the unsafe hop, which then
+     * dispatches as a normal single braked hop):
      *
      *   - the walked node is not the goal and not a `NodeType::RESET` node (the wall-zero
      *     interlude requires a stop);
      *   - the outbound edge exists, is `EdgeType::BLIND`, resolves to a plain dead-reckon
-     *     (a `resolveStopAtLine(...)` seek is chain-ineligible) under a PROFILED bundle
-     *     (`SYNC_TSHAPE` / `GYRO_TSHAPE` — `RAW_FLAT` has no ramps to chain);
+     *     (a `resolveStopAtLine(...)` seek is coalesce-ineligible) under a PROFILED bundle
+     *     (`SYNC_TSHAPE` / `GYRO_TSHAPE` — `RAW_FLAT` has no ramp and is ineligible);
      *   - no `Routes::PivotTurn` latches at the joint or onto the hop's destination
      *     (defensive — a validator-passed pivot is never collinear);
      *   - the hop is collinear + same-direction per the PURE
      *     `passThroughHeadingEligible(...)` predicate (a direction flip or a bend ends
-     *     the chain);
-     *   - the hop is `>= Config::TSHAPE_MIN_MOVE_CM` (below it the Drive builder silently
-     *     degrades the profile);
+     *     the run);
+     *   - the hop is `>= Config::TSHAPE_MIN_MOVE_CM` and shares hop 0's `SpeedTier`;
      *   - the run stays within the caps: `<= Config::MAX_CHAIN_HOPS` hops and a summed
      *     commanded distance `<= Config::PATH_BLIND_CHAIN_MAX_CM`. A CAP truncation of an
      *     otherwise-eligible hop is LOGGED over Serial (never silent); the ineligibility
-     *     guards above are ordinary chain ends and stay quiet.
+     *     guards above are ordinary run ends and stay quiet.
      *
-     * A walk yielding fewer than 2 hops is NOT a chain — `_chain` stays inactive and the
-     * caller takes the ordinary single-hop path (AC12: non-chain hops are byte-identical
-     * to pre-ADR-059). Otherwise the per-hop `(startPwm, endPwm, brake)` plan is resolved
-     * by the pure two-pass `resolveChainSpeeds(...)` (ChainSpeedPolicy.h) with @p entryPwm
-     * as the seed and the run is activated (`_chain.hopIndex = 0`).
+     * A walk yielding fewer than 2 hops is NOT a run — `_chain` stays inactive and the
+     * caller takes the ordinary single-hop path (AC6: non-run hops are byte-identical to
+     * the pre-coalescing per-node behavior). Otherwise the run is activated with its node
+     * sequence (`node[0..hopCount]`) and summed distance (`totalCm`); the caller dispatches
+     * ONE braked move over `totalCm` and `BLIND_FORWARD` advances Localization through every
+     * node at arrival. No per-hop velocity plan is resolved — the combined braked move has
+     * the whole run as deceleration runway (ADR-080 supersedes the ADR-059 chained speeds).
      *
      * @param cur        The hop-0 departure node (`Localization.getCurrentNode()`).
-     * @param reverse    Hop 0's resolved `decision.reverse` — latched into the run so a
-     *                   mid-run direction flip is detected as a divergence.
-     * @param hop0Mode   Hop 0's resolved motion bundle (`decision.driveMode`).
-     * @param hop0Speed  Hop 0's resolved `SpeedTier` (`_resolveSpeed(edge)`) — latched into
-     *                   the run so a later hop of a DIFFERENT tier ends the chain (the run
-     *                   shares one cruise; issue #97). SPEED only: a same-tier SYNC<->GYRO
-     *                   mode mix still chains.
+     * @param hop0Mode   Hop 0's resolved motion bundle (`decision.driveMode`). The combined
+     *                   move uses this mode for the whole run (blind runs are GYRO on this
+     *                   chassis; SYNC is unused — crossed encoder cables).
+     * @param hop0Speed  Hop 0's resolved `SpeedTier` (`_resolveSpeed(edge)`) — a later hop of
+     *                   a DIFFERENT tier ends the run (the run shares one cruise; issue #97).
      * @param hop0DistCm Hop 0's COMMANDED distance (`decision.commandedDistanceCm` — the
-     *                   pivot-trimmed value actually dispatched, so the speed plan is
-     *                   resolved over the distances really driven).
-     * @param cruisePwm  The signed run cruise (±the hop's resolved `SpeedTier` PWM by
-     *                   direction; NORMAL == the former `Config::SPEED_NORMAL`).
-     * @param entryPwm   The signed PWM the chassis is physically at when the run begins:
-     *                   the ADR-023 captured LineFollower cruise after a LINE/projection
-     *                   pass-through, else ±`Config::TSHAPE_START_SPEED` (AC5 — seeding
-     *                   the floor after a pass-through would re-dip and lurch).
+     *                   pivot-trimmed value actually dispatched), the first term of `totalCm`.
      *
      * @note Also requires hop 0 itself to be profiled, `>= TSHAPE_MIN_MOVE_CM`, and NOT
      *       driving into an approaching pivot (`_approachingPivot` active means the
      *       chassis must stop δ short of `_nextHop` and pivot there).
      */
-    void _chainTryStart(uint8_t cur, bool reverse, Routes::BlindMode hop0Mode,
-                        Routes::SpeedTier hop0Speed, float hop0DistCm, int16_t cruisePwm,
-                        int16_t entryPwm);
+    void _chainTryStart(uint8_t cur, Routes::BlindMode hop0Mode, Routes::SpeedTier hop0Speed,
+                        float hop0DistCm);
 
     /**
      * @brief Reset the ADR-059 blind-chain run buffer to the inactive state.
@@ -1206,50 +1196,34 @@ private:
     PivotRef _departingPivot;
     PivotRef _approachingPivot;
 
-    /// @brief ADR-059 blind-chain run buffer — FIXED-SIZE, no heap (Data Model).
+    /// @brief ADR-080 blind-run coalescing buffer — FIXED-SIZE, no heap (Data Model).
     ///
-    /// Filled once per run by `_chainTryStart` (the walk-ahead) and consumed hop-by-hop
-    /// by `_dispatchEdgeAfterTurn`'s `BLIND_DEAD_RECKON` arm as each hop of the run
-    /// re-enters the NORMAL per-hop FSM cycle (PLAN_NEXT_HOP -> dispatch ->
-    /// BLIND_FORWARD -> stamp node). The buffer is the ONLY cross-hop state the feature
-    /// adds, and it lives here in PathTracker — never in `LineFollower`/`Drive`
-    /// (ADR-050/ADR-059 scope rule).
+    /// Filled once per run by `_chainTryStart` (the walk-ahead) and consumed by the
+    /// `BLIND_DEAD_RECKON` dispatch (which drives ONE braked move over `totalCm`) and by
+    /// `BLIND_FORWARD` (which advances Localization through `node[1..hopCount]` at arrival).
+    /// The buffer is the ONLY cross-hop state the feature adds, and it lives here in
+    /// PathTracker — never in `LineFollower`/`Drive` (ADR-050 scope rule).
     ///
-    ///  - `node[0..hopCount]`     — the walked node ids (`node[0]` = run start).
-    ///  - `hopDistCm[k]`          — hop k's walk-time COMMANDED distance (hop 0 is the
-    ///                              pivot-trimmed dispatch value; later hops carry the
-    ///                              raw edge length — no pivots exist mid-run).
-    ///  - `speed[k]`              — the `resolveChainSpeeds` plan: signed
-    ///                              `(startPwm, endPwm)` + `brake` (true only on the
-    ///                              final hop).
-    ///  - `hopIndex`              — the hop most recently DISPATCHED (in flight).
-    ///  - `reverse`               — hop 0's resolved direction, for divergence detection.
-    ///  - `speedTier`             — hop 0's resolved `SpeedTier`; the walk-ahead admits a
-    ///                              hop only when its resolved tier matches (issue #97), and
-    ///                              the dispatch re-check drops the run on a divergent tier.
-    ///  - `dispatchEncSum`        — `Drive.getEncL() + getEncR()` snapshotted at the
-    ///                              in-flight hop's dispatch; with `dispatchCmdCm` it
-    ///                              yields the MEASURED inter-hop boundary carry that is
-    ///                              subtracted from the next hop's commanded distance
-    ///                              (AC9 — measured, never an assumed constant).
-    ///  - `dispatchCmdCm`         — the distance actually commanded for the in-flight
-    ///                              hop (post carry-subtraction).
+    ///  - `node[0..hopCount]` — the walked node ids (`node[0]` = run start, `node[hopCount]`
+    ///                          = the run's final node, where the combined move brakes).
+    ///  - `hopCount`          — number of hops in the run (>= 2; == number of node advances
+    ///                          at arrival, node[1..hopCount]).
+    ///  - `totalCm`           — summed COMMANDED distance of the run (hop 0 is the
+    ///                          pivot-trimmed dispatch value; later hops carry the raw edge
+    ///                          length — no pivots exist mid-run). Dispatched as ONE braked
+    ///                          `driveDist(totalCm)` with the whole run as ramp room.
     ///
-    /// `active == false` gates every read, so stale array contents are harmless. The
-    /// run retires at its FINAL hop's dispatch (that hop is an ordinary braked stop); a
-    /// fresh run may re-form on the far side (cap overflow is not a fault).
+    /// `active == false` gates every read, so stale array contents are harmless. The run is
+    /// activated at dispatch and stays active until `BLIND_FORWARD` advances every node and
+    /// calls `_chainReset()`; a fresh run may re-form on the far side (cap overflow is not a
+    /// fault). ADR-080 dropped the ADR-059 per-hop `(startPwm, endPwm, brake)` velocity plan
+    /// and the measured inter-hop carry: one braked move needs neither.
     struct ChainRun
     {
-        bool              active         = false;
-        bool              reverse        = false;
-        Routes::SpeedTier speedTier      = Routes::SpeedTier::DEFAULT;
-        uint8_t           hopCount       = 0;
-        uint8_t           hopIndex       = 0;
-        uint8_t           node[Config::MAX_CHAIN_HOPS + 1]  = {};
-        float             hopDistCm[Config::MAX_CHAIN_HOPS] = {};
-        ChainHopSpeed     speed[Config::MAX_CHAIN_HOPS]     = {};
-        int32_t           dispatchEncSum = 0;
-        float             dispatchCmdCm  = 0.0f;
+        bool    active   = false;
+        uint8_t hopCount = 0;
+        uint8_t node[Config::MAX_CHAIN_HOPS + 1] = {};
+        float   totalCm  = 0.0f;
     };
     ChainRun _chain;
 
