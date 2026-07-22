@@ -165,5 +165,11 @@ int main()
     // successful link) of the call, not a runtime assertion.
     ctps::recordDeclarePosition("N1");
 
+    // TC7 anti-drift: exercise BOTH Localization mock overloads so a future
+    // real-vs-mock signature drift on either declarePosition breaks the build.
+    Localization.declarePosition((uint8_t)0);
+    bool declOk = Localization.declarePosition("N1");
+    (void)declOk;
+
     return 0;
 }

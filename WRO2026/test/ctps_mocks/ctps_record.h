@@ -25,6 +25,10 @@
  *     small `#ifdef CTPS_RECORD` hook inside `Mission.cpp`.
  *   - `goto` is recorded by the recording `PathTracker.goTo` mock (single seam;
  *     Mission.cpp must NOT also record it or it would double-count).
+ *   - `declare_position` is recorded by the recording `Localization` mock's
+ *     `declarePosition(uint8_t)` funnel (single seam; Mission.cpp must NOT
+ *     also record it or it would double-count), mirroring how `goto` is
+ *     recorded by the `PathTracker.goTo` mock only.
  *   - Raw `drive` moves (`driveDist` / `stopAtLine` / `wallStop` /
  *     `lineFollowDist`) are recorded by the recording `Drive` and
  *     `LineFollower` builder mocks through the unified
@@ -179,8 +183,9 @@ namespace ctps
     void recordGoto(const char* target, const char* arrival, const char* route);
 
     /**
-     * @brief Record a Mission `declarePosition(name)` re-anchor op (Mission.cpp
-     *        hook, success path only — after the PathTracker-busy and
+     * @brief Record a Mission `declarePosition(name)` re-anchor op (invoked by
+     *        the recording `Localization` mock's `declarePosition(uint8_t)`
+     *        funnel, success path only — after the PathTracker-busy and
      *        unknown-node guards have both passed).
      * @param name Target node name. `nullptr` is stored as an empty string.
      */
