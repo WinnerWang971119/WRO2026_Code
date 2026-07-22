@@ -18,6 +18,8 @@ void buildMission()
         .task("rectangleShovel")
         .task("triangleShovel")
         .task("debries");*/
-        .task("testOne");
+        //.task("testOne");
+        .task("pot")
+        .task("triangleShovel");
     Mission.start();
 }

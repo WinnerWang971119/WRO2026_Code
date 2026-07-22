@@ -43,9 +43,9 @@ namespace Config
     // -------------------------------------------6-------------------------------------------
 
     /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KP_REAR = 6.5f;
+    constexpr float LINE_KP_REAR = 6.8f;
     /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KD_REAR = 12.0f;
+    constexpr float LINE_KD_REAR = 12.5f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

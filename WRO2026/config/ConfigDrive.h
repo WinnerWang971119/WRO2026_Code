@@ -257,7 +257,7 @@ namespace Config
      * @note TODO: measure on real chassis. Defaults to the front offset until the rear
      *       board is wired (T5); override once the two distances are known to differ.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 6.0f;
 
     /**
      * @brief Floor (cm) for a pivot-trimmed dead-reckon drive / LINE overshoot advance (ADR-036).
@@ -422,7 +422,7 @@ namespace Config
      *
      * @note Must be non-negative — enforced by a `ConfigChecks.h` static_assert.
      */
-    constexpr float LINE_APPROACH_MARGIN_CM = 5.0f;
+    constexpr float LINE_APPROACH_MARGIN_CM = 6.0f;
 
     /**
      * @brief Overrun bound (cm) PAST the predicted line crossing before the bounded
@@ -564,7 +564,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 2.0f
+#define TURN_KP_DEFAULT 2.6f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -602,7 +602,7 @@ namespace Config
      * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
      */
 #ifndef TURN_CREEP_THRESH_PWM_DEFAULT
-#define TURN_CREEP_THRESH_PWM_DEFAULT 40
+#define TURN_CREEP_THRESH_PWM_DEFAULT 45
 #endif
     constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
 
@@ -621,7 +621,7 @@ namespace Config
      * which lands on target on this chassis.
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 35
+#define TURN_CREEP_PWM_DEFAULT 40
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
