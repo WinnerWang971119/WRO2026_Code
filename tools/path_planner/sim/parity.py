@@ -1120,13 +1120,16 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             hop_idx += 1
 
         elif tag == ACT_BLIND_PASS:
-            # (tag, node) — ADR-059 blind-chain NON-braking mid-hop boundary
-            # marker. It carries NO motion of its own (the chained
-            # ACT_FORWARD/ACT_BLIND_REVERSE hop already advanced onto `node` and
-            # advanced `hop_idx`), so this records `blind_pass` WITHOUT touching
-            # `hop_idx`. Sits between the two adjacent hops' `blind_dead_reckon`
-            # records, mirroring the firmware `_ptEmitBlindPass` stream order.
+            # (tag, node) — ADR-080 coalesced-run intermediate-node marker. The
+            # ONE combined ACT_FORWARD/ACT_BLIND_REVERSE record advanced `hop_idx`
+            # by 1 (for hop 0); each intermediate node the run passed is ANOTHER
+            # hop consumed, so this advances `hop_idx` too. Over a run of `N` hops
+            # that is 1 (the combined record) + (N-1) passes == N, keeping `hop_idx`
+            # aligned with `hops[]` for the record AFTER the run. Carries no motion
+            # of its own; sits after the run's `blind_dead_reckon`, mirroring the
+            # firmware `_ptEmitBlindPass` stream order.
             records.append(_make_blind_pass(prim[1]))
+            hop_idx += 1
 
         elif tag == ACT_WALL_STOP:
             # (tag, node, axis_idx, wall_coord)
@@ -1334,12 +1337,15 @@ def integrate_pose(
             # non-reset pass-through node).
             pass
         elif kind == "blind_pass":
-            # ADR-059: a blind-chain NON-braking boundary marker. The chained
-            # `blind_dead_reckon` hop that precedes it already advanced onto (and
-            # re-anchored at) this node, so the pass marker is a pose NO-OP — like
-            # `heading_reset`, it changes nothing in (x, y, heading) and does NOT
-            # advance the hop cursor (it is a boundary, not a hop).
-            pass
+            # ADR-080: a coalesced-run intermediate-node marker. The ONE combined
+            # `blind_dead_reckon` already forwarded the chassis the whole run
+            # distance (landing at the final node) and advanced `hop_cursor` by 1
+            # for hop 0, so this marker is a pose NO-OP — like `heading_reset`, it
+            # changes nothing in (x, y, heading). But each intermediate node the run
+            # passed is ANOTHER hop in the per-hop `node_sequence`, so it DOES
+            # advance the cursor: 1 (combined record) + (N-1) passes == N, keeping
+            # `hop_cursor` aligned for any snap-consuming record after the run.
+            hop_cursor += 1
         else:
             raise ParitySchemaError(
                 f"integrate_pose: unhandled record kind {kind!r}"
