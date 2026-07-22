@@ -38,6 +38,19 @@ ManipAction& ManipAction::async()
     return *this;
 }
 
+ManipAction& ManipAction::rampMs(uint16_t ms)
+{
+    // The verb already armed the move at the servo default rate; retarget the pacing of every
+    // servo in the mask before the end-of-statement drain (no update() fires in between).
+    _m._applyStepMs(_mask, ms);
+    return *this;
+}
+
+ManipAction& ManipAction::instant()
+{
+    return rampMs(0);
+}
+
 ManipAction::~ManipAction()
 {
     if (_executed)
@@ -75,13 +88,19 @@ ManipulatorClass::ManipulatorClass()
 
 ManipAction ManipulatorClass::grab()
 {
-    // Open fully to home first, THEN close — a self-contained capture stroke, so a grab always
-    // runs the full open->close regardless of the grabber's prior pose. The two moves are a
-    // fire-and-forget two-stop sequence (ManipServo::homeThenClose): home fires now, close is
-    // queued and fired by update() once home settles. The returned action drains on M_GRAB, whose
-    // isDone() stays false until the SECOND move settles — so a blocking grab() waits for the whole
-    // stroke, and grab().async() returns immediately while update() advances it.
-    grabber.homeThenClose();
+    // Three-stop capture stroke with mixed rates (ManipServo::moveWaypoints): jump to the open pose
+    // INSTANTLY, ramp UP to home SLOWLY (the controlled "get up", paced by GRABBER_LIFT_STEP_MS),
+    // then snap to close INSTANTLY. Making the big lift the only slow phase avoids the whole grab
+    // dragging while still controlling the approach. Self-contained — runs the full stroke
+    // regardless of the grabber's prior pose. The returned action drains on M_GRAB, whose isDone()
+    // stays false until the LAST stop settles, so a blocking grab() waits for the whole stroke and
+    // grab().async() returns immediately while update() advances it.
+    const ManipServo::Waypoint stroke[3] = {
+        { Config::GRABBER.openForWhiteDeg, 0 },                            // 1) instant jump to open pose
+        { Config::GRABBER.homeDeg, Config::GRABBER_LIFT_STEP_MS },         // 2) slow lift up to home
+        { Config::GRABBER.closeDeg, 0 },                                  // 3) instant close
+    };
+    grabber.moveWaypoints(stroke, 3);
     return _action(M_GRAB);
 }
 
@@ -149,6 +168,23 @@ ManipAction ManipulatorClass::boxClose()
 ManipAction ManipulatorClass::_action(uint8_t mask)
 {
     return ManipAction(*this, mask);
+}
+
+void ManipulatorClass::_applyStepMs(uint8_t mask, uint16_t stepMs)
+{
+    // Retarget only the SERVO joints the verb touched — the belt is not step-paced this way.
+    if (mask & M_GRAB)
+    {
+        grabber.setStepMs(stepMs);
+    }
+    if (mask & M_SORT)
+    {
+        sorter.setStepMs(stepMs);
+    }
+    if (mask & M_DUMP)
+    {
+        dumper.setStepMs(stepMs);
+    }
 }
 
 // -----------------------------------------------------------------------------------------
@@ -265,16 +301,50 @@ void ManipulatorClass::_drain(uint8_t mask)
     // The ceiling depends on whether the belt is in the mask. If it is, the longest a single
     // masked actuator can legitimately take is the belt's full home sequence (stall + reset +
     // settle + drive to MID, which home() chains), so the ceiling is Config::BELT_HOME_TIMEOUT_MS
-    // to cover all of those phases. A servo-only drain (no belt in the mask) can only be waiting
-    // on a servo settle timer, so it uses the much shorter Config::MANIP_SERVO_DRAIN_TIMEOUT_MS —
-    // a tighter backstop than the belt-home ceiling. By the deadline the belt's own watchdogs have
-    // forced its state machine to IDLE and the servo timers have long since elapsed, so a healthy
-    // drain converges well inside it. On expiry we stop the belt (a safe brake via a zero-speed
-    // run, finalised on the next update()) and warn so a stuck actuator can never hang the drain
-    // indefinitely.
+    // to cover all of those phases. A servo-only drain (no belt in the mask) is sized to each
+    // masked servo's own estimated remaining move time: an INSTANT move settles inside the
+    // Config::MANIP_SERVO_DRAIN_TIMEOUT_MS floor, while a `stepMs > 0` ramp (e.g. a slowed
+    // grabber) can legitimately crawl for longer, so the ceiling grows to cover it
+    // (worst servo budget + Config::MANIP_SERVO_DRAIN_MARGIN_MS). By the deadline the belt's own
+    // watchdogs have forced its state machine to IDLE and the servo ramps/timers have elapsed, so
+    // a healthy drain converges well inside it. On expiry we stop the belt (a safe brake via a
+    // zero-speed run, finalised on the next update()) and warn so a stuck actuator can never hang
+    // the drain indefinitely.
     static bool noCallbackWarned = false;
-    const uint32_t ceiling  = (mask & M_BELT) ? (uint32_t) Config::BELT_HOME_TIMEOUT_MS
-                                              : (uint32_t) Config::MANIP_SERVO_DRAIN_TIMEOUT_MS;
+    // A belt-masked drain uses the belt-home ceiling (its home() chains stall+reset+MID). A
+    // servo-only drain derives its ceiling from the masked servos' own estimated remaining move
+    // time: a `stepMs > 0` ramp (e.g. the grabber) can legitimately run far longer than the
+    // MANIP_SERVO_DRAIN_TIMEOUT_MS floor, so use max(floor, worst servo budget + margin) — an
+    // instant move stays capped at the floor, a slow ramp gets exactly the time it needs.
+    uint32_t ceiling;
+    if (mask & M_BELT)
+    {
+        ceiling = (uint32_t) Config::BELT_HOME_TIMEOUT_MS;
+    }
+    else
+    {
+        uint32_t servoBudget = 0;
+        if (mask & M_GRAB)
+        {
+            const uint32_t b = grabber.estimatedRemainingMs();
+            if (b > servoBudget) { servoBudget = b; }
+        }
+        if (mask & M_SORT)
+        {
+            const uint32_t b = sorter.estimatedRemainingMs();
+            if (b > servoBudget) { servoBudget = b; }
+        }
+        if (mask & M_DUMP)
+        {
+            const uint32_t b = dumper.estimatedRemainingMs();
+            if (b > servoBudget) { servoBudget = b; }
+        }
+        ceiling = servoBudget + (uint32_t) Config::MANIP_SERVO_DRAIN_MARGIN_MS;
+        if (ceiling < (uint32_t) Config::MANIP_SERVO_DRAIN_TIMEOUT_MS)
+        {
+            ceiling = (uint32_t) Config::MANIP_SERVO_DRAIN_TIMEOUT_MS;
+        }
+    }
     const uint32_t deadline = millis() + ceiling;
 
     while (!_maskDone(mask))

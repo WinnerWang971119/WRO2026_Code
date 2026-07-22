@@ -73,17 +73,43 @@ namespace Config
         uint16_t openDeg;    ///< "Open" pose angle (degrees).
         uint16_t openForWhiteDeg;   ///< White-payload open pose angle (degrees).
         uint16_t closeDeg;   ///< "Close" pose angle (degrees).
-        float    msPerDeg;   ///< Slew estimate (ms per degree) for move-time budgeting.
-        uint16_t settleMs;   ///< Extra dwell after the slew completes (ms).
+        float    msPerDeg;   ///< Slew estimate (ms per degree) for INSTANT (stepMs == 0) move-time budgeting.
+        uint16_t settleMs;   ///< Extra dwell after the slew/ramp completes (ms).
         bool     reverse;    ///< HARDWARE direction flag -> MiniR4RC::setHWDir(reverse); NOT software.
+        /**
+         * @brief Default ramp rate: milliseconds to wait between each 1° step of a move.
+         *
+         * `0` = INSTANT — the full target angle is written in one command (the original
+         * behaviour) and completion is timer-estimated from `msPerDeg`. A value `> 0` makes the
+         * joint CRAWL: `ManipServo::update()` advances the commanded angle one degree every
+         * `stepMs` milliseconds until it reaches the target, so a bigger number is slower. Used
+         * to tame joints that slam too fast on the physical mechanism (e.g. the grabber).
+         * Overridable per move via the `.rampMs(ms)` builder chain or `setAngle(deg, stepMs)`.
+         * @note Effective rate is floored by the cooperative-tick period (~8 ms/deg): a `stepMs`
+         *       below that just steps once per tick.
+         */
+        uint16_t stepMs;
     };
 
-    /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, false };
-    /** @brief Dumper servo calibration. TODO calibrate. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false };
+    /** @brief Grabber servo calibration. TODO calibrate. `stepMs = 0` (instant) default — the
+     *         `grab()` capture stroke stages its own rates (jump to `openForWhiteDeg`, slow lift to
+     *         `homeDeg` at `GRABBER_LIFT_STEP_MS`, snap to `closeDeg`); other grabber moves
+     *         (`release`/`reset`) stay instant unless overridden with `.rampMs()`. */
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 5, 120, 97, 7.0f, 80, false, 0 };
+    /** @brief Dumper servo calibration. TODO calibrate. `stepMs = 0` = instant. */
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false, 0 };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER = { SORTER_RC_ID, 90, 0, 0, 0, 5.2f, 95, false };  // open/close unused
+    constexpr ServoCfg SORTER = { SORTER_RC_ID, 90, 0, 0, 0, 5.2f, 95, false, 0 };  // open/close unused; instant
+
+    /**
+     * @brief Ramp rate (ms per 1° step) for the SLOW home-lift phase of the grabber `grab()`
+     *        stroke — the controlled "get up".
+     *
+     * `grab()` runs three stops: jump to `GRABBER.openForWhiteDeg` INSTANTLY, ramp to
+     * `GRABBER.homeDeg` at this rate (the lift), then snap to `GRABBER.closeDeg` INSTANTLY. Bigger
+     * = slower; the effective rate is floored by the ~8 ms cooperative tick. TODO tune at bring-up.
+     */
+    constexpr uint16_t GRABBER_LIFT_STEP_MS = 8;
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
@@ -212,17 +238,25 @@ namespace Config
         BELT_RESET_MS + BELT_HOME_SETTLE_MS + BELT_MOVE_TIMEOUT_MS + 1000;  // stall + settle + MID move + margin
 
     /**
-     * @brief Backstop ceiling for a servo-only blocking drain (no belt in the mask).
+     * @brief FLOOR ceiling for a servo-only blocking drain (no belt in the mask).
      *
-     * Sized to comfortably exceed the largest single servo sweep
+     * Sized to comfortably exceed the largest single INSTANT servo sweep
      * (max msPerDeg * 180 + settleMs ≈ 1.1 s). Belt-masked drains use the longer
      * BELT_HOME_TIMEOUT_MS instead, since the belt's home() chains stall+reset+MID.
-     * @note `grab()` drains a TWO-stop stroke (grabber home->close via
-     *       `ManipServo::homeThenClose`), so this must exceed TWICE the grabber's largest sweep
-     *       (worst case ≈ 2 * (GRABBER close-vs-home * msPerDeg + settleMs) ≈ 1.7 s today).
-     *       Keep that margin when tuning `GRABBER.msPerDeg` / `settleMs` at bring-up.
+     * @note This is now a FLOOR, not a fixed ceiling: `Manipulator::_drain` uses
+     *       `max(MANIP_SERVO_DRAIN_TIMEOUT_MS, servoRampBudget + MANIP_SERVO_DRAIN_MARGIN_MS)`.
+     *       A `stepMs > 0` servo (e.g. the grabber) can ramp far longer than this floor, so the
+     *       drain derives the extra budget from each servo's own estimated remaining move time —
+     *       an instant move stays capped here, a slow ramp gets exactly the time it needs.
      */
     constexpr uint32_t MANIP_SERVO_DRAIN_TIMEOUT_MS = 2000;
+
+    /**
+     * @brief Slack added on top of a servo's estimated remaining ramp time when sizing the
+     *        servo-only drain ceiling. Covers cooperative-tick jitter (the effective step rate is
+     *        floored by the tick period) so a healthy slow ramp is never cut off by the watchdog.
+     */
+    constexpr uint32_t MANIP_SERVO_DRAIN_MARGIN_MS = 1000;
 
     /** @brief How a belt station is reached: by absolute encoder target or by a timed run. */
     enum class BeltMode : uint8_t { POSITION, TIMED };

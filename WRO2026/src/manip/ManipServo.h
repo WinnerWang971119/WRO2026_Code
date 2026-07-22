@@ -25,6 +25,15 @@
  * facade advances it by calling `update()` each cooperative tick, and `isDone()` stays `false`
  * until the SECOND move settles. Any direct `setAngle()` (or pose verb) cancels a queued follow-up.
  *
+ * **Optional stepped ramp (speed control).** By default a move writes its full target angle in one
+ * command and the servo slews at its own native speed. Set `cfg.stepMs > 0` (or pass a per-move
+ * rate via `setAngle(deg, stepMs)` / the `Manipulator.<verb>().rampMs(ms)` builder) to CRAWL
+ * instead: `update()` advances the commanded angle one degree every `stepMs` milliseconds until it
+ * reaches the target, so a bigger `stepMs` is slower. This tames joints that slam too fast on the
+ * mechanism (e.g. the grabber). `isDone()` stays `false` until the last step lands plus the settle
+ * dwell, so a blocking verb waits out the whole ramp; the effective rate is floored by the
+ * cooperative-tick period (~8 ms/deg).
+ *
  * **Hardware-owned direction.** A reversed servo is handled entirely in hardware: `begin()`
  * forwards `cfg.reverse` to `MiniR4RC::setHWDir()` exactly once. There is NO software angle
  * negation anywhere in this class — the commanded angle is always the raw value the caller asked
@@ -55,6 +64,23 @@ class ManipServo
 {
 public:
     /**
+     * @brief One stop of a multi-stop stroke: a target angle plus the ramp rate to reach it.
+     *
+     * The unit of `moveWaypoints()`. `stepMs == 0` reaches @ref deg instantly (one write); a value
+     * `> 0` crawls to it one degree every `stepMs` ms. Lets a single stroke mix rates — e.g. the
+     * grabber's capture stroke jumps to its open pose instantly, lifts to home slowly, then snaps
+     * closed instantly.
+     */
+    struct Waypoint
+    {
+        uint16_t deg;       ///< Absolute target angle for this stop (clamped to `[0, 180]`).
+        uint16_t stepMs;    ///< Ms per 1° step to reach it; `0` = instant.
+    };
+
+    /// @brief Max stops queued after the current one — bounds the fixed-size follow-up buffer.
+    static constexpr uint8_t MAX_WAYPOINTS = 3;
+
+    /**
      * @brief Construct a joint bound to the channel and calibration in @p cfg.
      *
      * Stores @p cfg by const reference and seeds the angle shadow to `cfg.homeDeg`. Does NOT touch
@@ -64,7 +90,8 @@ public:
      *            MUST outlive this `ManipServo` (typically a `constexpr Config::ServoCfg`).
      */
     explicit ManipServo(const Config::ServoCfg& cfg)
-        : _cfg(cfg), _shadow(cfg.homeDeg), _startMs(0), _estMs(0)
+        : _cfg(cfg), _shadow(cfg.homeDeg), _startMs(0), _estMs(0), _target(cfg.homeDeg),
+          _moveStart(cfg.homeDeg), _stepMs(cfg.stepMs), _lastStepMs(0)
     {
     }
 
@@ -89,36 +116,71 @@ public:
     void begin()
     {
         _setDir(_cfg.reverse);
-        _shadow  = _cfg.homeDeg;
-        _startMs = millis();
-        _estMs   = 0;
+        _shadow    = _cfg.homeDeg;
+        _target    = _cfg.homeDeg;
+        _moveStart = _cfg.homeDeg;
+        _stepMs    = _cfg.stepMs;
+        _startMs   = millis();
+        _estMs     = 0;
         home();
     }
 
     /**
-     * @brief Command an absolute servo angle and arm the completion timer.
+     * @brief Command an absolute servo angle at this servo's DEFAULT ramp rate (`cfg.stepMs`).
      *
-     * Clamps @p deg to `[0, 180]`, estimates the move budget as
-     * `|clamped - shadow| * cfg.msPerDeg + cfg.settleMs`, writes the clamped angle to the lower MCU,
-     * then updates the angle shadow and stamps the issue time. The write is fire-and-forget: it
-     * returns immediately and completion is reported by `isDone()` once the budget elapses.
+     * Resets the active ramp rate to the configured default, then arms the move (see the two-arg
+     * overload). Every top-level pose verb (`open`/`close`/`home`/`openForWhite`) routes through
+     * here, so a prior per-move `.rampMs()` / `setStepMs()` override is naturally one-shot — the
+     * next top-level command restores the default rate.
      *
-     * @param deg Desired absolute angle in degrees. Values outside `[0, 180]` are clamped (the
-     *            vendor servo range), not rejected.
-     * @note No reverse transform — the raw clamped angle is sent as-is; direction is owned by the
-     *       hardware flag applied in `begin()`.
-     * @note The vendor `setAngle` returns `bool`; on a failed call this retries once after a 1 ms
-     *       delay before giving up (transient-failure retry pattern).
+     * @param deg Desired absolute angle in degrees. Values outside `[0, 180]` are clamped.
      * @note A direct command CANCELS any queued `moveThen()` follow-up — the new setpoint wins.
      */
-    void setAngle(uint16_t deg)
+    void setAngle(uint16_t deg) { setAngle(deg, _cfg.stepMs); }
+
+    /**
+     * @brief Command an absolute servo angle at an explicit ramp rate for THIS move.
+     *
+     * Clamps @p deg to `[0, 180]` and arms the move. With @p stepMs `== 0` the full target is
+     * written in one command (INSTANT — the original behaviour) and completion is estimated from
+     * `cfg.msPerDeg`. With @p stepMs `> 0` the servo CRAWLS: `update()` steps the commanded angle
+     * one degree every @p stepMs milliseconds until it reaches the target, and `isDone()` stays
+     * false until the last step lands plus `cfg.settleMs`. Fire-and-forget either way — the call
+     * returns immediately; a blocking `Manipulator` verb waits it out via the drain.
+     *
+     * @param deg    Desired absolute angle in degrees (clamped to `[0, 180]`).
+     * @param stepMs Milliseconds per 1° step for this move; `0` = instant. Bigger = slower.
+     * @note No reverse transform — the raw clamped angle is sent as-is; direction is owned by the
+     *       hardware flag applied in `begin()`.
+     * @note A direct command CANCELS any queued `moveThen()` follow-up — the new setpoint wins.
+     */
+    void setAngle(uint16_t deg, uint16_t stepMs)
     {
-        const uint16_t clamped = (deg > 180) ? 180 : deg;
-        _estMs = (uint32_t)(fabs((float)clamped - (float)_shadow) * _cfg.msPerDeg) + _cfg.settleMs;
-        _writeAngle(clamped);
-        _shadow     = clamped;
-        _startMs    = millis();
-        _hasPending = false;    // a direct command overrides any queued two-stop follow-up
+        _queueCount = 0;    // a direct command cancels any queued multi-stop follow-up
+        _armStop(deg, stepMs);
+    }
+
+    /**
+     * @brief Override the ramp rate (ms per 1° step) for the IN-FLIGHT move, in place.
+     *
+     * Used by the `Manipulator.<verb>().rampMs(ms)` builder chain. The verb ALREADY armed (and, for
+     * an instant default, already wrote) the move before this override runs, so this **rewinds the
+     * commanded angle to the move's start** (`_moveStart`) and re-arms from there at @p stepMs.
+     * Rewinding is essential: without it the current shadow is already at the target, the delta is
+     * zero, and the re-arm collapses the completion budget to just `settleMs` — so `.instant()`
+     * would return almost immediately (looking like `.async()`) and `.rampMs()` would never actually
+     * crawl. Rewinding recovers the full move, so an override to `0` keeps the true slew budget and
+     * an override to `> 0` ramps the whole move. No wall-clock passes between the verb and this call
+     * (no `update()` runs in between), so re-commanding the start pose is glitch-free. Leaves the
+     * follow-up queue intact; each queued stop keeps its OWN rate (see `moveWaypoints`).
+     *
+     * @param stepMs Milliseconds per 1° step; `0` = instant. Bigger = slower.
+     */
+    void setStepMs(uint16_t stepMs)
+    {
+        _stepMs = stepMs;
+        _shadow = _moveStart;    // rewind to the move's start so the override sees the full move
+        _armRamp(_target);       // re-evaluate instant-vs-ramp for the whole move at the new rate
     }
 
     /**
@@ -137,9 +199,38 @@ public:
      */
     void moveThen(uint16_t first, uint16_t second)
     {
-        setAngle(first);    // fires `first` and clears any prior pending
-        _pendingDeg = (second > 180) ? 180 : second;
-        _hasPending = true;
+        const Waypoint pts[2] = { { first, _cfg.stepMs }, { second, _cfg.stepMs } };
+        moveWaypoints(pts, 2);
+    }
+
+    /**
+     * @brief Run a multi-stop stroke: arm @p pts[0] now, auto-fire the rest as each settles.
+     *
+     * The general form of `moveThen()`: each `Waypoint` carries its OWN ramp rate, so a single
+     * stroke can mix instant and slow stops (e.g. instant open, slow lift, instant close). @p pts[0]
+     * is armed immediately; @p pts[1..count-1] are queued and fired by `update()` once the preceding
+     * stop settles. `isDone()` stays `false` until the LAST stop settles, so a blocking drain waits
+     * for the whole stroke. Any direct `setAngle()` / pose verb cancels the whole queue.
+     *
+     * @param pts   Stops in order; the first is armed now, the rest queued.
+     * @param count Number of stops. The queued tail (`count - 1`) is capped at `MAX_WAYPOINTS`.
+     * @note Advanced only by `update()` — the owner must tick this servo each cooperative loop.
+     */
+    void moveWaypoints(const Waypoint* pts, uint8_t count)
+    {
+        _queueCount = 0;
+        _queueHead  = 0;
+        if (pts == nullptr || count == 0)
+        {
+            return;
+        }
+        // Queue the tail (stops after the first), capped at the fixed buffer size.
+        for (uint8_t i = 1; i < count && _queueCount < MAX_WAYPOINTS; ++i)
+        {
+            _queue[_queueCount] = pts[i];
+            ++_queueCount;
+        }
+        _armStop(pts[0].deg, pts[0].stepMs);
     }
 
     /**
@@ -155,19 +246,39 @@ public:
     void homeThenClose() { moveThen(_cfg.homeDeg, _cfg.closeDeg); }
 
     /**
-     * @brief Advance the optional two-stop sequence — fire the queued follow-up if the first
-     *        move has settled. A no-op when no follow-up is pending.
+     * @brief Advance an in-progress ramp by one step, then the queued multi-stop follow-ups.
      *
-     * Must be called each cooperative tick by the owning facade so a `moveThen()` / `homeThenClose()`
-     * sequence progresses. Pure servos with no queued follow-up do no work here.
+     * Two responsibilities, gated in order:
+     *  1. **Ramp** — if a `stepMs > 0` move is still crawling (`_shadow != _target`), advance the
+     *     commanded angle by one degree once the step interval has elapsed, and return. An instant
+     *     (`stepMs == 0`) move never enters this branch (it wrote its target in `_armRamp`).
+     *  2. **Queued stop** — only once the current stop has fully settled, fire the next queued
+     *     `moveWaypoints()` / `moveThen()` stop at ITS OWN rate.
+     *
+     * Must be called each cooperative tick by the owning facade. A settled servo with an empty
+     * queue costs only two compares here.
      */
     void update()
     {
-        if (_hasPending && _timerElapsed())
+        // 1) Advance an in-progress ramp — one degree per elapsed step interval.
+        if (_shadow != _target)
         {
-            const uint16_t next = _pendingDeg;
-            _hasPending         = false;
-            setAngle(next);
+            if ((uint32_t)(millis() - _lastStepMs) >= _stepMs)
+            {
+                _shadow = (_target > _shadow) ? (uint16_t)(_shadow + 1) : (uint16_t)(_shadow - 1);
+                _writeAngle(_shadow);
+                _lastStepMs = millis();
+            }
+            return;    // still crawling — do not fire the next queued stop yet
+        }
+
+        // 2) Current stop settled — fire the next queued stop at its own rate.
+        if (_queueCount > 0 && _timerElapsed())
+        {
+            const Waypoint next = _queue[_queueHead];
+            ++_queueHead;
+            --_queueCount;
+            _armStop(next.deg, next.stepMs);
         }
     }
 
@@ -204,13 +315,56 @@ public:
      * the issuing `setAngle()`. This is an estimate, not a confirmation — a stalled or unpowered
      * servo will still report done on schedule.
      *
-     * @return `true` once the estimated slew-plus-settle budget has elapsed (rollover-safe) AND no
-     *         `moveThen()` follow-up is still queued — a two-stop sequence is done only after its
-     *         SECOND move settles.
+     * @return `true` once the ramp has reached its target (`_shadow == _target`) AND the
+     *         slew-plus-settle budget has elapsed (rollover-safe) AND the follow-up queue is empty
+     *         — a multi-stop stroke is done only after its LAST stop settles, and a `stepMs > 0`
+     *         move is never "done" mid-crawl.
      * @note The `millis() - _startMs` subtraction is computed in `uint32_t`, so it stays correct
      *       across the ~49.7-day `millis()` rollover.
      */
-    bool isDone() const { return !_hasPending && _timerElapsed(); }
+    bool isDone() const { return _queueCount == 0 && (_shadow == _target) && _timerElapsed(); }
+
+    /**
+     * @brief Upper-bound estimate of the milliseconds still needed for this servo to reach `isDone()`.
+     *
+     * Used by `Manipulator::_drain` to size a slow ramp's watchdog ceiling — an instant move
+     * returns roughly its settle remainder, a `stepMs > 0` ramp returns the remaining step time
+     * (plus every queued follow-up stop), so the drain never cuts a legitimate slow stroke short.
+     *
+     * @return Estimated remaining move time in ms; `0` once already done.
+     */
+    uint32_t estimatedRemainingMs() const
+    {
+        if (isDone())
+        {
+            return 0;
+        }
+        const uint32_t elapsed = (uint32_t)(millis() - _startMs);
+        uint32_t       rem     = (_estMs > elapsed) ? (_estMs - elapsed) : 0;
+        // A ramp lagging behind its estimate (tick period > stepMs) needs the remaining steps.
+        if (_shadow != _target)
+        {
+            const uint32_t stepsLeft =
+                (_target > _shadow) ? (uint32_t)(_target - _shadow) : (uint32_t)(_shadow - _target);
+            const uint32_t rampRem = stepsLeft * (uint32_t)_stepMs + _cfg.settleMs;
+            if (rampRem > rem)
+            {
+                rem = rampRem;
+            }
+        }
+        // Add each queued follow-up stop's own move time, chaining from the current target.
+        uint16_t from = _target;
+        for (uint8_t i = 0; i < _queueCount; ++i)
+        {
+            const Waypoint& w  = _queue[(uint8_t)(_queueHead + i)];
+            const uint16_t  to = (w.deg > 180) ? 180 : w.deg;
+            const uint32_t  d  = (to > from) ? (uint32_t)(to - from) : (uint32_t)(from - to);
+            const uint32_t perDeg = (w.stepMs > 0) ? (uint32_t)w.stepMs : (uint32_t)_cfg.msPerDeg;
+            rem += d * perDeg + _cfg.settleMs;
+            from = to;
+        }
+        return rem;
+    }
 
     /**
      * @brief The last angle commanded to the servo (clamped shadow value).
@@ -283,20 +437,79 @@ private:
     }
 
     /**
-     * @brief Whether the last commanded move's slew-plus-settle timer has elapsed (ignores any
-     *        queued `moveThen()` follow-up). Rollover-safe `uint32_t` subtraction.
+     * @brief Whether the current stop's slew-plus-settle timer has elapsed (ignores the follow-up
+     *        queue). Rollover-safe `uint32_t` subtraction.
      *
-     * `isDone()` layers the pending-follow-up check on top of this; `update()` uses it raw to know
-     * when to fire the queued second move.
+     * `isDone()` layers the empty-queue check on top of this; `update()` uses it raw to know when
+     * to fire the next queued stop.
      */
     bool _timerElapsed() const { return (uint32_t)(millis() - _startMs) >= _estMs; }
 
+    /**
+     * @brief Arm a move to the pre-clamped @p clamped target at the active rate `_stepMs`.
+     *
+     * Sets `_target`, stamps the completion budget, and either writes the full angle now
+     * (`_stepMs == 0` or zero delta → INSTANT, preserving the original `msPerDeg`-based estimate)
+     * or defers the motion to `update()`, which crawls one degree per `_stepMs` (budget
+     * `delta * stepMs + settleMs`). Does NOT touch `_stepMs` or the follow-up queue — the callers
+     * own those.
+     *
+     * @param clamped Absolute target angle already clamped to `[0, 180]`.
+     */
+    void _armRamp(uint16_t clamped)
+    {
+        _target = clamped;
+        const uint16_t delta =
+            (clamped > _shadow) ? (uint16_t)(clamped - _shadow) : (uint16_t)(_shadow - clamped);
+        if (_stepMs == 0 || delta == 0)
+        {
+            // Instant: write the full target now; completion estimated from the native slew rate.
+            _estMs   = (uint32_t)((float)delta * _cfg.msPerDeg) + _cfg.settleMs;
+            _writeAngle(clamped);
+            _shadow  = clamped;
+            _startMs = millis();
+        }
+        else
+        {
+            // Ramp: `update()` steps `_shadow` toward `_target` one degree per `_stepMs`. Command
+            // the current shadow (the ramp's start) now — a no-op for a fresh ramp (the servo is
+            // already there), but for a rate override that rewound `_shadow` this re-issues the
+            // start pose so the crawl doesn't begin from the verb's stale instant-write target.
+            _estMs      = (uint32_t)delta * (uint32_t)_stepMs + _cfg.settleMs;
+            _startMs    = millis();
+            _lastStepMs = millis();
+            _writeAngle(_shadow);
+        }
+    }
+
+    /**
+     * @brief Arm one stop: set the active rate to @p stepMs, then arm the (clamped) target.
+     *
+     * The per-stop primitive shared by `setAngle()` and `update()`'s queue advance. Unlike
+     * `_armRamp` it also selects the rate, so each `Waypoint` reaches its target at its own pace.
+     * Does NOT touch the follow-up queue.
+     *
+     * @param deg    Absolute target angle (clamped to `[0, 180]`).
+     * @param stepMs Ms per 1° step for this stop; `0` = instant.
+     */
+    void _armStop(uint16_t deg, uint16_t stepMs)
+    {
+        _moveStart = _shadow;    // remember where this stop begins, so a later rate override can rewind
+        _stepMs    = stepMs;
+        _armRamp((deg > 180) ? 180 : deg);
+    }
+
     const Config::ServoCfg& _cfg;       ///< Per-servo calibration (channel, poses, slew, direction).
     uint16_t                _shadow;    ///< Last commanded angle in `[0, 180]` (no vendor getter).
-    uint32_t                _startMs;   ///< `millis()` at the last `setAngle()` issue.
-    uint32_t                _estMs;     ///< Estimated slew-plus-settle budget for the last move (ms).
-    bool                    _hasPending = false;   ///< A `moveThen()` follow-up is queued.
-    uint16_t                _pendingDeg = 0;        ///< Clamped angle to fire when `_hasPending`.
+    uint32_t                _startMs;   ///< `millis()` at the current stop's arm.
+    uint32_t                _estMs;     ///< Estimated slew/ramp-plus-settle budget for the current stop (ms).
+    uint16_t                _target;    ///< Current stop's destination; `_shadow` crawls toward this.
+    uint16_t                _moveStart; ///< Shadow at the current stop's arm — rewind point for a rate override.
+    uint16_t                _stepMs;    ///< Active ms per 1° step (`0` = instant) for the current stop.
+    uint32_t                _lastStepMs;///< `millis()` of the last ramp step (paces `update()`).
+    Waypoint                _queue[MAX_WAYPOINTS];   ///< Follow-up stops after the current one.
+    uint8_t                 _queueHead  = 0;         ///< Index of the next queued stop to fire.
+    uint8_t                 _queueCount = 0;         ///< Number of queued stops still pending.
 };
 
 #endif    // MANIPSERVO_H

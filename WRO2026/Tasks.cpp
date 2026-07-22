@@ -309,7 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    _grabToBin(1);
+    _grabToBin(3);
     
    return true;
 }
@@ -452,7 +452,9 @@ bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
 bool TasksClass::_grabToBin(uint8_t bin)
 {
     Manipulator.sortTo(bin).async();
-    Manipulator.release();
+    Manipulator.release().instant();
+    // grab() stages its own rates (instant open -> slow lift to home -> instant close), so it needs
+    // no per-move ramp override here — an override would just slow the initial instant jump.
     Manipulator.grab();
     return true;
 }
