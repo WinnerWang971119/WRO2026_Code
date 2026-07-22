@@ -2555,19 +2555,13 @@ def test_pivot_tc17_non_pivot_route_through_pivot_node_drives_full_distance():
 
     prims = sim.go_to("Y")
 
-    # Full distance on BOTH hops -- no delta subtracted on a non-pivot route, and
-    # the collinear V->Y continuation needs no ACT_TURN_REL. ADR-059: U->V->Y is a
-    # collinear BLIND run of 2 hops, so the sim chains it into ONE continuous
-    # motion -- hop 0 carries the resolved (start=TSHAPE_START_SPEED, end=cruise)
-    # + chain=True, a blind_pass marks the non-braking node V, and the final hop
-    # brakes (end 0). The DISTANCES stay the full 60 cm (the TC17 no-trim intent);
-    # only the velocity endpoints + the pass marker are added by the chain.
+    # Full 120 cm combined distance -- no pivot delta is subtracted on this route.
+    # ADR-080 coalesces U->V->Y into one braked move carrying the actual cruise,
+    # cold-start seed, final node, and a blind_pass marker for intermediate V.
     assert prims == [
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
-         _runtime.TSHAPE_START_SPEED, _runtime.SPEED_NORMAL, True),
+        (ACT_FORWARD, pytest.approx(120.0, abs=1e-9),
+         _runtime.SPEED_NORMAL, _runtime.TSHAPE_START_SPEED, 0, True, "Y"),
         (ACT_BLIND_PASS, "V"),
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
-         _runtime.SPEED_NORMAL, 0, True),
     ]
     yx, yy = field.NODES["Y"]
     assert math.hypot(chassis.x_cm - yx, chassis.y_cm - yy) < _POSITION_TOL_CM
@@ -5254,8 +5248,8 @@ def test_w2a_blind_chain_breaks_at_tier_boundary():
     assert sim.localization.current_node() == "C"
 
 
-def test_w2a_same_tier_chains_across_mode_boundary():
-    """W2(a) control: two SAME-tier BLIND hops chain across a SYNC<->GYRO boundary.
+def test_w2a_same_tier_splits_at_mode_boundary():
+    """W2(a): two same-tier BLIND hops split at a SYNC<->GYRO boundary.
 
     ``A ->(NORMAL, SYNC_TSHAPE) B ->(NORMAL, GYRO_TSHAPE) C``: same resolved tier,
     different drive mode. The blind-chain rule restricts on SPEED tier ONLY, so
@@ -5277,14 +5271,45 @@ def test_w2a_same_tier_chains_across_mode_boundary():
     prims = sim.go_to("C")
     tags = [p[0] for p in prims]
 
-    # The mode boundary did not break the chain: B was passed without braking.
-    assert tags.count(ACT_BLIND_PASS) == 1
-    assert (ACT_BLIND_PASS, "B") in prims
-    # Both hops carry the chained 5-tuple velocity suffix (chain flag True).
+    # Each authored controller gets its own braked hop.
+    assert ACT_BLIND_PASS not in tags
     forwards = [p for p in prims if p[0] == ACT_FORWARD]
     assert len(forwards) == 2
-    assert all(len(p) == 5 and p[4] is True for p in forwards), forwards
+    assert all(len(p) == 2 for p in forwards), forwards
     assert sim.localization.current_node() == "C"
+
+
+def test_w2a_cumulative_sub_tolerance_bend_rejected_by_position_corridor():
+    """Pairwise 9-degree bends cannot accumulate into one held-heading move."""
+    hop = 40.0
+    nodes = {
+        "A": (0.0, 0.0),
+        "B": (hop, 0.0),
+        "C": (hop + hop * math.cos(math.radians(9.0)), hop * math.sin(math.radians(9.0))),
+        "D": (
+            hop + hop * math.cos(math.radians(9.0)) + hop * math.cos(math.radians(18.0)),
+            hop * math.sin(math.radians(9.0)) + hop * math.sin(math.radians(18.0)),
+        ),
+    }
+    fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=0.0)
+    g = nx.DiGraph()
+    for name, (x_cm, y_cm) in nodes.items():
+        g.add_node(name, type="blind", x_cm=x_cm, y_cm=y_cm)
+    names = ["A", "B", "C", "D"]
+    for i, heading in enumerate((0.0, 9.0, 18.0)):
+        u, v = names[i], names[i + 1]
+        g.add_edge(u, v, type=EDGE_BLIND, distance_cm=hop, heading_deg=heading)
+        g.add_edge(v, u, type=EDGE_BLIND, distance_cm=hop,
+                   heading_deg=(heading + 180.0) % 360.0)
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, _linear_next_hop(names), chassis)
+    sim.localization.zero_heading_from_current()
+    prims = sim.go_to("D")
+
+    assert ACT_BLIND_PASS not in [p[0] for p in prims]
+    assert len([p for p in prims if p[0] == ACT_FORWARD]) == 3
+    assert sim.localization.current_node() == "D"
 
 
 @pytest.mark.parametrize(
@@ -5351,9 +5376,9 @@ def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
 
     # The B->C blind hop is a lone pass-through-seeded hop (C is the goal), so it
     # rides the resolved (start_pwm, end_pwm, chain) suffix, chain False.
-    seeded = [p for p in prims if p[0] == ACT_FORWARD and len(p) == 5]
+    seeded = [p for p in prims if p[0] == ACT_FORWARD and len(p) == 6]
     assert len(seeded) == 1, prims
-    start_pwm = seeded[0][2]
+    start_pwm = seeded[0][3]
 
     assert start_pwm == expected_seed
     assert sim.localization.current_node() == "C"
@@ -5401,10 +5426,9 @@ def test_w2c_per_tier_blind_cruise_drives_chain_at_preset(tier, expected_cruise)
     prims = sim.go_to("D")
 
     forwards = [p for p in prims if p[0] == ACT_FORWARD]
-    assert len(forwards) == 3
-    assert all(len(p) == 5 for p in forwards), forwards
-    # Peak commanded magnitude across every hop's (start_pwm, end_pwm) == cruise.
-    pwm_mags = [abs(value) for p in forwards for value in (p[2], p[3])]
-    assert max(pwm_mags) == expected_cruise
+    assert len(forwards) == 1
+    assert len(forwards[0]) == 7
+    assert forwards[0][2] == expected_cruise
+    assert forwards[0][5] is True
     assert expected_cruise == _runtime._speed_tier_to_pwm(tier)
     assert sim.localization.current_node() == "D"

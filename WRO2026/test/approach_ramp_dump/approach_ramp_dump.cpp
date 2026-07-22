@@ -16,7 +16,7 @@
  * `approach_ramp_freshness.cmake`, which drives it twice (once to a temp file, once already
  * committed as `tools/path_planner/tests/fixtures/approach_ramp_goldens.json`) and byte-compares
  * the two. That comparison IS the ctest — the "executable tether" (mirrors
- * `tshape_profile_dump` / `chain_speed_dump`): a firmware retune that changes
+ * `tshape_profile_dump`): a firmware retune that changes
  * `Config::TSHAPE_*` / `Config::LINE_APPROACH_*` or a change to the policy math changes this
  * program's stdout, which then diverges from the committed fixture and fails CI until the
  * fixture is regenerated. Consumed by the Python cross-language test (T5 / TC13).

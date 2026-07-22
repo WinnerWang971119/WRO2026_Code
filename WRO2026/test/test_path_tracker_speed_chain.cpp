@@ -30,10 +30,8 @@
  *     ->(SLOW) Q3`; seated at Q1 with goal Q3, the walk admits `Q1->Q2` then hits
  *     the tier boundary at `Q2->Q3` (SLOW != NORMAL) and ends the run, so `Q1->Q2`
  *     brakes at Q2 (no chain).
- *   - TC10b — a SAME-tier SYNC<->GYRO run STILL chains: `Q0 ->(NORMAL,SYNC) Q1
- *     ->(NORMAL,GYRO) Q2`; seated at Q0 with goal Q2, both hops share the NORMAL
- *     tier (the mode mix is NOT a break), so `Q0->Q1` coast-releases at Q1
- *     (chained). The a/b contrast isolates the gate as SPEED-only.
+ *   - TC10b — a SAME-tier SYNC<->GYRO boundary splits a coalesced run: each hop
+ *     brakes under its authored controller rather than silently running both under hop 0's mode.
  *   - TC10c — a seek edge cruises at its resolved tier: `Sk0 ->(SLOW,
  *     stop_at_line=on) SkL`; the seek's SEEK-phase cruise is dispatched at
  *     `presetToPwm(SLOW)` (60), not the former hardcoded `SPEED_NORMAL` (70).
@@ -154,12 +152,12 @@ void test_tc10a_tier_boundary_breaks_chain()
 }
 
 // ===========================================================================
-// TC10b — a SAME-tier SYNC<->GYRO run STILL chains (the mode mix is not a break).
+// TC10b — a resolved SYNC<->GYRO boundary splits the run.
 // ===========================================================================
 
-void test_tc10b_same_tier_mode_mix_chains()
+void test_tc10b_mode_boundary_splits_run()
 {
-    TEST_SCOPE("TC10b: Q0->(NORMAL,SYNC) Q1 ->(NORMAL,GYRO) Q2 -- same tier still chains");
+    TEST_SCOPE("TC10b: same-tier SYNC->GYRO boundary dispatches two authored moves");
 
     const uint8_t q0 = nodeByName("Q0");
     const uint8_t q1 = nodeByName("Q1");
@@ -181,15 +179,24 @@ void test_tc10b_same_tier_mode_mix_chains()
     PathTracker.goTo(q2).async();
     tickUntilMoveInFlight();
 
-    // The walk-ahead admits Q1->Q2 (same NORMAL tier; a SYNC<->GYRO mode mix is NOT a
-    // break), so a 2-hop chain forms and Q0->Q1 is a chained MID-hop. ADR-059 cruise-hold
-    // (Drive finding #13 follow-up): it completes with an empty FIFO and `setBrake(false)`, so
-    // `_updateProfile` LEAVES the cruise setpoint latched and issues NO `Move(0,0)+brake` at the
-    // boundary (the mock clock does not advance, so the bounded fail-safe never trips) -- the next
-    // hop overwrites the setpoint seamlessly.
-    const uint32_t brakeBefore = MiniR4.DriveDC.brakeCallCount;
-    ASSERT_EQ(driveBlindHopUntilNodeAdvances(), q1);         // node advanced -> not hung.
-    ASSERT_EQ(MiniR4.DriveDC.brakeCallCount, brakeBefore);   // seamless hold: no boundary brake.
+    // One combined move cannot honor two controller contracts. The SYNC first hop therefore
+    // brakes at Q1 instead of coalescing through it under the wrong mode.
+    ASSERT_EQ(driveBlindHopUntilNodeAdvances(), q1);
+    ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
+
+    // The second hop launches independently under its authored GYRO mode. GYRO hold emits via
+    // Move(L,R), while SYNC emitted through MoveSync above.
+    const uint32_t gyroMoveBefore = MiniR4.DriveDC.moveCallCount;
+    tickUntilMoveInFlight();
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && MiniR4.DriveDC.moveCallCount == gyroMoveBefore && !PathTracker.hasFault();
+         ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_GT(MiniR4.DriveDC.moveCallCount, gyroMoveBefore);
+    ASSERT_EQ(driveBlindHopUntilNodeAdvances(), q2);
+    ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
     ASSERT_FALSE(PathTracker.hasFault());
 }
 
@@ -454,7 +461,7 @@ int main()
                 "PathTracker + Drive + Localization over routes_speed_chain\n");
 
     test_tc10a_tier_boundary_breaks_chain();
-    test_tc10b_same_tier_mode_mix_chains();
+    test_tc10b_mode_boundary_splits_run();
     test_tc10c_seek_cruises_at_resolved_tier();
     test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise();
     test_tc16_left_bias_threads_offset();

@@ -325,9 +325,8 @@ PATH_PASS_THROUGH_TRUST_LINE_ENABLED: bool = True
 # does not model speed presets or ramps for MOTION, but the ADR-059 blind-chain
 # plan emits the RESOLVED velocity endpoints into the parity trace, so the run
 # cruise + the captured pass-through cruise must match the firmware's
-# ``Config::SPEED_NORMAL`` byte-for-byte. Hand-mirrored (Python cannot import the
-# C++ header); no dedicated regex-parity test (it rides the golden-pinned
-# ``chain_speed.py`` config parse + the parity sweep).
+# ``Config::SPEED_NORMAL`` byte-for-byte. Hand-mirrored because Python cannot
+# import the C++ header; the parity sweep exercises the resolved value.
 SPEED_NORMAL: int = 70
 
 # MUST mirror ``Config::SPEED_SLOW`` / ``Config::SPEED_FAST`` in
@@ -379,6 +378,10 @@ PATH_BLIND_CHAIN_ENABLED: bool = True
 # the practical bound. Mirror THIS value (1000.0). Pytest verifies parity via
 # regex grep on ConfigNav.h.
 PATH_BLIND_CHAIN_MAX_CM: float = 1000.0
+
+# MUST mirror ``Config::PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM``. Every node admitted
+# after hop 0 must lie within this Euclidean corridor of the combined move's start ray.
+PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM: float = 1.0
 
 # MUST mirror ``Config::MAX_CHAIN_HOPS`` in WRO2026/config/ConfigNav.h. Cap on
 # the number of hops one blind chain run may contain (the firmware's fixed-size
@@ -820,6 +823,7 @@ __all__ = [
     "OFF_MAP_GATE",
     "PATH_BLIND_CHAIN_ENABLED",
     "PATH_BLIND_CHAIN_MAX_CM",
+    "PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM",
     "PATH_PASS_THROUGH_ENABLED",
     "PIVOT_TRIM_MIN_DRIVE_CM",
     "RETURN_DISTANCE_CAP_CM",
@@ -3975,8 +3979,8 @@ class PathTrackerSim:
                     # through every node in run order — a blind_pass for each
                     # INTERMEDIATE node (nodes[1..hop_count-1]) BEFORE its stamp; the
                     # final node is the braked arrival (no pass). Mirror of the firmware
-                    # BLIND_FORWARD multi-node advance. The `(start, end, chain)` suffix
-                    # is (entry_pwm, 0, True): a braked stop, coalesced-run flag. The run
+                    # BLIND_FORWARD multi-node advance. The `(cruise, start, end, chain)`
+                    # suffix records the actual combined Drive command. The run
                     # retires and `nxt` becomes the final node so the shared post-hop
                     # tail (reset interlude for a reset final node, current advance) runs
                     # on it.
@@ -3985,12 +3989,16 @@ class PathTrackerSim:
                     final_node = run.nodes[hop_count]
                     if not decision.reverse:
                         self._chassis.forward(run.total_cm)
-                        yield (ACT_FORWARD, run.total_cm, entry_pwm, 0, True)
+                        yield (
+                            ACT_FORWARD, run.total_cm, cruise_mag,
+                            entry_pwm, 0, True, final_node,
+                        )
                     else:
                         self._chassis.reverse(run.total_cm)
                         yield (
                             ACT_BLIND_REVERSE, final_node, run.total_cm,
-                            resolve_blind_mode(edge, cfg), entry_pwm, 0, True,
+                            resolve_blind_mode(edge, cfg), -cruise_mag,
+                            entry_pwm, 0, True,
                         )
                     for k in range(1, hop_count + 1):
                         if k < hop_count:
@@ -4020,7 +4028,7 @@ class PathTrackerSim:
                         self._localization.on_dead_reckoned_advance(nxt)
                         if emit_suffix:
                             yield (
-                                ACT_FORWARD, effective_dist_cm,
+                                ACT_FORWARD, effective_dist_cm, cruise_mag,
                                 hop_start_pwm, hop_end_pwm, False,
                             )
                         else:
@@ -4031,7 +4039,7 @@ class PathTrackerSim:
                         if emit_suffix:
                             yield (
                                 ACT_BLIND_REVERSE, nxt, effective_dist_cm,
-                                resolve_blind_mode(edge, cfg),
+                                resolve_blind_mode(edge, cfg), -cruise_mag,
                                 hop_start_pwm, hop_end_pwm, False,
                             )
                         else:
@@ -4145,7 +4153,8 @@ class PathTrackerSim:
         Every ``break`` ENDS the run BEFORE the hop under evaluation (Error
         Handling): that hop dispatches later as a normal braked hop. The same
         ineligibility reasons the firmware uses end the chain: a pivot-adjacent
-        joint, a seek (``stopAtLine``) hop, a RAW_FLAT motion bundle, a
+        joint, a seek (``stopAtLine``) hop, a RAW_FLAT motion bundle, a resolved
+        drive-mode boundary, a
         ``< TSHAPE_MIN_MOVE_CM`` hop, a non-collinear bend / direction flip, a
         goal / reset node, and the two run caps (:data:`MAX_CHAIN_HOPS` /
         :data:`PATH_BLIND_CHAIN_MAX_CM`). The pairwise walk updates the inbound
@@ -4175,16 +4184,31 @@ class PathTrackerSim:
         if self._approaching_pivot is not None:
             return
 
-        # Hop 0's resolved speed tier defines the whole run (ADR-064): a coalesced
-        # run shares one cruise, so the walk-ahead below breaks at any hop whose
-        # resolved tier differs (SPEED-only restriction; mode mixing SYNC<->GYRO
-        # still coalesces, using hop 0's mode). Mirrors the firmware `_chainTryStart`.
+        # Hop 0's resolved mode and speed tier define the whole run: one combined
+        # Drive command has one controller and one cruise, so either boundary splits it.
         hop0_tier = resolve_speed(self._graph.edges[cur, nxt], cfg)
 
         nodes: List[str] = [cur, nxt]
         count = 1                     # hops admitted so far (hop 0 is in)
         total_cm = hop0_dist_cm       # summed COMMANDED run distance
         inbound_body = hop0_body_heading    # hop 0's body heading seeds the walk
+        def node_xy(name: str) -> tuple[float, float]:
+            attrs = self._graph.nodes[name]
+            if "x_cm" in attrs and "y_cm" in attrs:
+                return float(attrs["x_cm"]), float(attrs["y_cm"])
+            x_cm, y_cm = self._field_data.NODES[name]
+            return float(x_cm), float(y_cm)
+
+        n0_x, n0_y = node_xy(cur)
+        n1_x, n1_y = node_xy(nxt)
+        ray_dx = n1_x - n0_x
+        ray_dy = n1_y - n0_y
+        ray_mag = math.hypot(ray_dx, ray_dy)
+        if ray_mag <= 0.0:
+            return
+        ray_ux = ray_dx / ray_mag
+        ray_uy = ray_dy / ray_mag
+        distance_after_hop0 = 0.0
 
         # ---- Walk NEXT_HOP forward, admitting one hop per iteration. -----------
         while True:
@@ -4252,16 +4276,30 @@ class PathTrackerSim:
             if motion_mode == BlindMode.RAW_FLAT:
                 break
 
-            # SPEED-only chain restriction (ADR-064): a hop whose resolved speed
+            # One coalesced command cannot honor two different controller contracts.
+            # Split SYNC<->GYRO mode boundaries instead of silently applying hop 0's mode.
+            if motion_mode != hop0_mode:
+                break
+
+            # Speed-tier restriction (ADR-064): a hop whose resolved speed
             # tier differs from hop 0's ends the run — one chained run carries a
-            # single cruise, so it cannot straddle a tier boundary. Mode mixing
-            # (SYNC<->GYRO) still chains (only SPEED gates), matching the firmware
-            # `_chainTryStart` walk-ahead restriction.
+            # single cruise, so it cannot straddle a tier boundary.
             if resolve_speed(edge, cfg) != hop0_tier:
                 break
 
             # A hop below the profile floor cannot carry chained start/end speeds.
             if float(edge["distance_cm"]) < TSHAPE_MIN_MOVE_CM:
+                break
+
+            candidate_after_hop0 = distance_after_hop0 + float(edge["distance_cm"])
+            candidate_x, candidate_y = node_xy(b)
+            predicted_x = n1_x + ray_ux * candidate_after_hop0
+            predicted_y = n1_y + ray_uy * candidate_after_hop0
+            position_miss = math.hypot(
+                candidate_x - predicted_x,
+                candidate_y - predicted_y,
+            )
+            if position_miss >= PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM:
                 break
 
             # ---- Run caps (mirror of the firmware's LOGGED truncations). -------
@@ -4280,6 +4318,7 @@ class PathTrackerSim:
             nodes.append(b)
             count += 1
             total_cm += float(edge["distance_cm"])
+            distance_after_hop0 = candidate_after_hop0
 
             # The next joint's inbound body heading is THIS hop's body heading
             # (REAR rotates 180°, matching `_onPlanNextHop`'s bodyTarget math).

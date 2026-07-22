@@ -750,8 +750,8 @@ def _primitive_drive_speed(
 
 def _blind_chain_suffix(
     primitive: Tuple[Any, ...],
-) -> Optional[Tuple[int, int, bool]]:
-    """Extract a chained blind hop's recorded ``(start_pwm, end_pwm, chain)`` suffix.
+) -> Optional[Tuple[int, int, int, bool]]:
+    """Extract a coalesced blind run's ``(cruise, start, end, chain)`` suffix.
 
     A collinear BLIND chain that the sim (or firmware recorder) drove as ONE
     continuous run rides the resolved per-hop velocity endpoints on the blind
@@ -778,10 +778,10 @@ def _blind_chain_suffix(
         blind hop (``chain is True``); ``None`` otherwise.
     """
     tag = primitive[0]
-    if tag == ACT_FORWARD and len(primitive) >= 5:
-        start_pwm, end_pwm, chain = primitive[2], primitive[3], primitive[4]
-    elif tag == ACT_BLIND_REVERSE and len(primitive) >= 7:
-        start_pwm, end_pwm, chain = primitive[4], primitive[5], primitive[6]
+    if tag == ACT_FORWARD and len(primitive) >= 6:
+        cruise_pwm, start_pwm, end_pwm, chain = primitive[2:6]
+    elif tag == ACT_BLIND_REVERSE and len(primitive) >= 8:
+        cruise_pwm, start_pwm, end_pwm, chain = primitive[4:8]
     else:
         return None
     # Only a genuine chained hop (chain True) takes the whole-run consume path. A
@@ -790,7 +790,7 @@ def _blind_chain_suffix(
     # ordinary per-primitive path, so it is not a blind-run segment.
     if not bool(chain):
         return None
-    return int(start_pwm), int(end_pwm), bool(chain)
+    return int(cruise_pwm), int(start_pwm), int(end_pwm), bool(chain)
 
 
 def _densify_drive(
@@ -1054,8 +1054,8 @@ def _sample_approach_ramp_keyframes(
 # still pins its sim-snapshot pose byte-exact (TC7). Zero-motion records
 # (heading resets, in-place turns) are transparent: they neither contribute
 # distance nor break a run. The structure is intentionally reusable — a later
-# task extends it to BLIND runs by feeding the recorded per-hop speeds instead
-# of the resolved run cruise.
+# ADR-080 extends it to BLIND runs by consuming the combined move's recorded
+# cruise/start/end speeds instead of re-deriving the firmware decision.
 
 
 @dataclass
@@ -1099,6 +1099,7 @@ class _RunSegment:
     end_pose: Tuple[float, float, float]
     dist_cm: float
     braked: bool
+    chain_cruise_pwm: Optional[int] = None
     chain_start_pwm: Optional[int] = None
     chain_end_pwm: Optional[int] = None
     rear_led: bool = False
@@ -1151,13 +1152,10 @@ def _resolve_blind_run_profile(
 ):
     """Build the whole-run :class:`DriveProfile` for a BLIND-chain run from RECORDED speeds.
 
-    ADR-059 / AC11: a collinear BLIND chain that the sim (or firmware recorder)
-    drove as ONE continuous run rides the resolved per-hop ``(start_pwm,
-    end_pwm)`` on each blind advance primitive. CTPS **consumes** those recorded
-    endpoints to render the whole-run trapezoid — it NEVER re-derives a chain
-    decision (does not call ``chain_speed.resolve_chain_speeds``). The chain
-    planning already happened upstream; this only maps the recorded endpoints
-    onto a single :class:`DriveProfile` over the run's summed chord distance.
+    ADR-080: a collinear BLIND run that the sim or firmware drives as one combined
+    move carries its resolved ``cruise_pwm``, ``start_pwm``, and ``end_pwm``.
+    CTPS consumes those values to render the whole-run trapezoid; it never
+    re-derives the coalescing decision.
 
     Two well-formed shapes reach here:
 
@@ -1165,8 +1163,8 @@ def _resolve_blind_run_profile(
     * **LINE/projection → BLIND spanning run** (the plan's Decision "a collinear
       run MAY span LINE/projection → BLIND") — LEADING speed-less line /
       projection pass segments feed straight into the recorded blind chain.
-      Those leading segments legitimately carry NO chain speeds (line-follow
-      speed comes from the LineFollower preset, not per-hop ``ChainSpeedPolicy``),
+      Those leading segments legitimately carry no BLIND-run speed record
+      (line-follow speed comes from the LineFollower preset),
       so they are NOT malformed: they contribute their distance at the RUN
       CRUISE — they ARE the line-follow-at-cruise portion. The firmware passes
       through at cruise and hands the captured cruise into the first blind hop
@@ -1236,17 +1234,12 @@ def _resolve_blind_run_profile(
     last = chain_segs[-1]
     end = int(last.chain_end_pwm)
 
-    # The run peak is the largest recorded |PWM| across all chain hop endpoints
-    # (the planner clamps to |cruise|, so the observed max IS the peak). Sign it
-    # by the run direction (the first chain hop's start sign; a cold-start floor
-    # seed and the cruise share a sign, so this is unambiguous).
-    peak_mag = 0
-    for seg in chain_segs:
-        peak_mag = max(
-            peak_mag, abs(int(seg.chain_start_pwm)), abs(int(seg.chain_end_pwm))
-        )
-    direction = -1 if int(first.chain_start_pwm) < 0 else 1
-    cruise = direction * peak_mag
+    # ADR-080 records the actual `.setPower(cruisePwm)` explicitly. A cold run's
+    # endpoints (50 -> 0) cannot reveal whether its authored tier was SLOW/NORMAL/FAST.
+    if first.chain_cruise_pwm is None:
+        return None
+    cruise = int(first.chain_cruise_pwm)
+    direction = -1 if cruise < 0 else 1
 
     if first_chain == 0:
         # Pure blind run: the chain's own recorded entry (the resolved entryPwm).
@@ -1737,8 +1730,8 @@ def build(trace: Trace, field_data) -> Track:
         """Render a rejected run per-primitive (each its own profile) + warn.
 
         The malformed-run escape hatch (AC11 / TC11): when the grouper cannot
-        build a coherent whole-run profile — a blind-chain run MISSING its
-        recorded per-hop speeds, or a pass tag with NO following braked stop —
+        build a coherent whole-run profile — a blind run MISSING its recorded
+        combined-move speeds, or a pass tag with NO following braked stop —
         it does NOT guess a run cruise. It falls back to the pre-grouper
         behavior: densify EACH buffered segment on its own via
         :func:`_densify_drive`, so every segment still renders (nothing is
@@ -1783,12 +1776,10 @@ def build(trace: Trace, field_data) -> Track:
         * **line / projection** — every segment shares the follow cruise, so the
           run cruise is the ``run_speed`` seed (resolved from the first
           segment's primitive kind).
-        * **blind chain** (ADR-059) — the segments carry the RECORDED per-hop
-          ``(start_pwm, end_pwm)`` the sim/firmware resolved; the whole-run
-          trapezoid is built from those recorded endpoints (start = first hop's
-          recorded start, cruise = the peak the run actually reached, end = the
-          final hop's recorded end), NEVER by re-deriving a chain decision
-          (AC11). A run MAY span LINE/projection → BLIND: leading speed-less
+        * **blind run** (ADR-080) — the coalesced segment carries the RECORDED
+          ``(cruise_pwm, start_pwm, end_pwm)`` the sim/firmware dispatched; the
+          whole-run trapezoid consumes those values, NEVER re-deriving a
+          coalescing decision. A run MAY span LINE/projection → BLIND: leading speed-less
           line/projection pass segments are the run's line-follow-at-cruise
           portion (the ADR-023 pass-through cruise carry), so they contribute
           distance at the run cruise and the run start falls back to the
@@ -1816,7 +1807,7 @@ def build(trace: Trace, field_data) -> Track:
         # ``speed`` feeds the line/projection branch below AND seeds a
         # LINE/projection → BLIND spanning run's start (the run launches from
         # rest on its leading line-follow leg); a PURE blind run ignores it by
-        # design (its profile is CONSUMED from the recorded per-hop endpoints,
+        # design (its profile is CONSUMED from the recorded combined-move values,
         # AC11).
         speed = run_speed
         # Reset the buffer BEFORE emitting so a re-entrant tick callback (the
@@ -1841,7 +1832,7 @@ def build(trace: Trace, field_data) -> Track:
                 # projection pass segments are a legitimate spanning run and
                 # never trip this.)
                 _fallback_per_primitive(
-                    segs, "blind run missing recorded per-hop speeds"
+                    segs, "blind run missing recorded combined-move speeds"
                 )
                 return
             profile = resolved
@@ -1998,6 +1989,7 @@ def build(trace: Trace, field_data) -> Track:
         speed: Tuple[int, int, int, bool],
         braked: bool,
         chain_speeds: Optional[Tuple[int, int]] = None,
+        chain_cruise: Optional[int] = None,
         rear_led: bool = False,
         approach_predicted_cm: Optional[float] = None,
     ) -> None:
@@ -2012,7 +2004,7 @@ def build(trace: Trace, field_data) -> Track:
         stop, so the run is flushed immediately after buffering it.
 
         ``chain_speeds`` — when set, the RECORDED ``(start_pwm, end_pwm)`` for a
-        BLIND-chain hop (ADR-059). It rides ONTO the segment so ``flush_run``
+        BLIND move. It rides ONTO the segment so ``flush_run``
         builds the whole-run trapezoid from the recorded endpoints instead of the
         ``run_speed`` seed; a line/projection segment leaves it ``None``.
 
@@ -2055,6 +2047,7 @@ def build(trace: Trace, field_data) -> Track:
                 end_pose=(x_new, y_new, h_new),
                 dist_cm=dist,
                 braked=braked,
+                chain_cruise_pwm=chain_cruise,
                 chain_start_pwm=chain_start,
                 chain_end_pwm=chain_end,
                 rear_led=rear_led,
@@ -2542,20 +2535,25 @@ def build(trace: Trace, field_data) -> Track:
                                 append_turn_keyframes(
                                     tail_x, tail_y, snap.heading_deg
                                 )
-                            # A CHAINED blind hop (ADR-059) rides its resolved
-                            # per-hop (start_pwm, end_pwm, chain) on the primitive
-                            # tuple — CTPS CONSUMES those recorded speeds for the
-                            # whole-run trapezoid, never re-deriving a chain
-                            # decision (AC11). A chained mid-hop passes the node
-                            # WITHOUT braking (end != 0); the run's FINAL chained
-                            # hop is the ordinary braked stop (end == 0), which
-                            # ends the run. A non-chain hop leaves ``chain_speeds``
-                            # None and takes the ordinary per-primitive-kind path
-                            # (AC12: a single hop is byte-unchanged).
+                            # A BLIND move carries its resolved
+                            # (cruise_pwm, start_pwm, end_pwm, chain) on the
+                            # primitive tuple. CTPS consumes those recorded values
+                            # for the whole-run trapezoid and never re-derives the
+                            # coalescing decision. A braked move ends the run; a
+                            # non-BLIND primitive leaves ``chain_speeds`` None.
                             chain_suffix = _blind_chain_suffix(primitive)
                             if chain_suffix is not None:
-                                start_pwm, end_pwm, _chain = chain_suffix
+                                cruise_pwm, start_pwm, end_pwm, _chain = chain_suffix
                                 braked = end_pwm == 0
+                                # The coalesced forward primitive is yielded before the sim
+                                # stamps Localization, so `node_now` is still the run start.
+                                # Consume the explicit internal final-node payload (REAR already
+                                # carries it at index 1) when deciding RESET settle eligibility.
+                                chain_final_node = (
+                                    primitive[1]
+                                    if tag == ACT_BLIND_REVERSE
+                                    else primitive[-1]
+                                )
                                 append_run_segment(
                                     snap.x_cm,
                                     snap.y_cm,
@@ -2563,6 +2561,7 @@ def build(trace: Trace, field_data) -> Track:
                                     _primitive_drive_speed(tag, pipeline_cfg),
                                     braked,
                                     chain_speeds=(start_pwm, end_pwm),
+                                    chain_cruise=cruise_pwm,
                                 )
                                 # dwell-1 (Settle-fire matrix): a blind-chain
                                 # hop only settles on its FINAL (braked) hop —
@@ -2583,7 +2582,7 @@ def build(trace: Trace, field_data) -> Track:
                                     and braked
                                     and tag not in _WALL_RESET_TAGS
                                     and tag not in _RETURN_DRIVE_TAGS
-                                    and not sim.localization.is_reset_node(node_now)
+                                    and not sim.localization.is_reset_node(chain_final_node)
                                 ):
                                     settle_dwell_pending = True
                             else:

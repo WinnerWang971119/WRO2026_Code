@@ -329,8 +329,8 @@ namespace
         pt_parity::emit(line);
     }
 
-    /// `blind_dead_reckon` — {reverse, drive_mode, dist_cm, start_pwm, end_pwm, chain,
-    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}. ADR-080: emitted ONCE per BLIND run. `dist_cm`
+    /// `blind_dead_reckon` — {reverse, drive_mode, node, dist_cm, cruise_pwm, start_pwm,
+    /// end_pwm, chain, reanchor:"ON_DEAD_RECKONED_ADVANCE"}. ADR-080: emitted ONCE per BLIND run.
     /// is the DISPATCHED distance — `totalCm` for a coalesced (>= 2-hop) run, else the single
     /// hop's distance. A braked stop records `end_pwm = 0`; `start_pwm` is the tShape seed
     /// (±TSHAPE_START_SPEED, or the ADR-023 captured pass-through cruise). `chain` true marks
@@ -338,16 +338,19 @@ namespace
     /// The exact wire contract lives in PathTrackerParityTrace.h's wire-schema block. NOTE
     /// the coalesced-run flag key is `chain` — NEVER a sub-field named "kind"
     /// (memory `gotcha-parity-record-kind-is-discriminator`).
-    void _ptEmitBlindDeadReckon(bool reverse, Routes::BlindMode driveMode, float distCm,
-                                int16_t startPwm, int16_t endPwm, bool chain)
+    void _ptEmitBlindDeadReckon(bool reverse, Routes::BlindMode driveMode, uint8_t node,
+                                float distCm, int16_t cruisePwm, int16_t startPwm,
+                                int16_t endPwm, bool chain)
     {
         char line[256];
         std::snprintf(line, sizeof(line),
                       "{\"kind\":\"blind_dead_reckon\",\"reverse\":%s,\"drive_mode\":\"%s\","
-                      "\"dist_cm\":%.6f,\"start_pwm\":%d,\"end_pwm\":%d,\"chain\":%s,"
+                      "\"node\":\"%s\",\"dist_cm\":%.6f,\"cruise_pwm\":%d,\"start_pwm\":%d,"
+                      "\"end_pwm\":%d,\"chain\":%s,"
                       "\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
-                      _ptBool(reverse), _ptDriveModeName(driveMode), (double) distCm,
-                      (int) startPwm, (int) endPwm, _ptBool(chain));
+                      _ptBool(reverse), _ptDriveModeName(driveMode), _ptNodeName(node),
+                      (double) distCm, (int) cruisePwm, (int) startPwm, (int) endPwm,
+                      _ptBool(chain));
         pt_parity::emit(line);
     }
 
@@ -2686,6 +2689,22 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, Routes::BlindMode hop0Mode,
     float   totalCm     = hop0DistCm;    // summed COMMANDED run distance
     float   inboundBody = _resolvedBodyHeading;    // hop 0's body heading seeds the walk
 
+    // ADR-080 run-wide endpoint corridor. Anchor at node[1]: hop 0 is already known to land
+    // there under its effective (possibly pivot-trimmed) distance. Every later candidate must
+    // agree with ONE straight execution ray, not merely with the previous hop's heading.
+    const Routes::NodeInfo& n0 = FieldMap::getNode(_chain.node[0]);
+    const Routes::NodeInfo& n1 = FieldMap::getNode(_chain.node[1]);
+    const float rayDx = n1.x_cm - n0.x_cm;
+    const float rayDy = n1.y_cm - n0.y_cm;
+    const float rayMag = sqrtf(rayDx * rayDx + rayDy * rayDy);
+    if (rayMag <= 0.0f)
+    {
+        return;
+    }
+    const float rayUx = rayDx / rayMag;
+    const float rayUy = rayDy / rayMag;
+    float distanceAfterHop0 = 0.0f;
+
     // ---- Walk NEXT_HOP forward, admitting one hop per iteration. --------------------------
     // Every `break` below ENDS the chain BEFORE the hop under evaluation (Error Handling):
     // that hop dispatches later as a normal braked hop. Only the two run CAPS log — an
@@ -2773,12 +2792,18 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, Routes::BlindMode hop0Mode,
             break;    // no ramps to chain
         }
 
+        // ADR-080: one coalesced move has exactly one DriveMode. Do not silently run a hop
+        // authored for GYRO under hop 0's SYNC controller (or vice versa); a resolved mode
+        // boundary is a real run boundary, just like a speed-tier boundary.
+        if (sr.motionMode != hop0Mode)
+        {
+            break;
+        }
+
         // SPEED-tier boundary (issue #97). The run merges every admitted hop into ONE
         // velocity profile at a single cruise, so a hop whose resolved SpeedTier (edge
         // override, else PIPELINE_CONFIG.speed) differs from hop 0's cannot share that
-        // profile and ends the run before it. SPEED ONLY — a SYNC<->GYRO mode mix at the
-        // SAME tier still chains (the mode-mixed run already chains today, and adding a
-        // stop there would fight the fewer-stops preference).
+        // profile and ends the run before it.
         if (_resolveSpeed(e) != hop0Speed)
         {
             break;
@@ -2787,6 +2812,21 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, Routes::BlindMode hop0Mode,
         // A hop below the profile floor cannot carry chained start/end speeds (the Drive
         // builder silently degrades it to a flat move) — the run ends before it.
         if (e.distance_cm < Config::TSHAPE_MIN_MOVE_CM)
+        {
+            break;
+        }
+
+        // Pairwise angular tolerance alone permits cumulative bends (0 -> 9 -> 18 deg).
+        // Predict b from node 1 along hop 0's fixed execution ray and reject any Euclidean
+        // endpoint miss outside the configured corridor.
+        const float candidateAfterHop0 = distanceAfterHop0 + e.distance_cm;
+        const Routes::NodeInfo& candidateNode = FieldMap::getNode(b);
+        const float predictedX = n1.x_cm + rayUx * candidateAfterHop0;
+        const float predictedY = n1.y_cm + rayUy * candidateAfterHop0;
+        const float missX = candidateNode.x_cm - predictedX;
+        const float missY = candidateNode.y_cm - predictedY;
+        if (sqrtf(missX * missX + missY * missY)
+            >= Config::PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM)
         {
             break;
         }
@@ -2813,6 +2853,7 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, Routes::BlindMode hop0Mode,
         _chain.node[count + 1] = b;
         ++count;
         totalCm += e.distance_cm;
+        distanceAfterHop0 = candidateAfterHop0;
 
         // The next joint's inbound body heading is THIS hop's body heading (REAR rotates
         // 180°, matching `_onPlanNextHop`'s bodyTarget math) — pairwise joint tests, the
@@ -3216,11 +3257,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //     node at arrival.
             //   - no run       -> the ordinary single-hop braked dispatch, UNCHANGED (AC6:
             //     PATH_BLIND_CHAIN_ENABLED off is byte-identical to stop-at-every-node).
-            // The combined move reuses hop 0's mode (blind runs are GYRO on this chassis;
-            // SYNC is unused — crossed encoder cables) and holds hop 0's body heading (the
-            // run is collinear within NAV_TURN_TOLERANCE_DEG). RAW_FLAT is coalesce-
-            // ineligible (`_chainTryStart` returns early), so it always takes the single-hop
-            // path.
+            // Every admitted hop shares hop 0's resolved mode and speed tier. The combined
+            // move therefore uses that homogeneous mode and holds hop 0's body heading.
+            // RAW_FLAT is coalesce-ineligible (`_chainTryStart` returns early), so it always
+            // takes the single-hop path.
             // ---------------------------------------------------------------------------
             float dispatchCm = effectiveDistCm;
             if (Config::PATH_BLIND_CHAIN_ENABLED)
@@ -3320,8 +3360,11 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     emitStartPwm = rawStart;
                     emitEndPwm   = cruisePwm;
                 }
-                _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode, dispatchCm,
-                                       emitStartPwm, emitEndPwm, _chain.active);
+                const uint8_t recordNode =
+                    _chain.active ? _chain.node[_chain.hopCount] : _nextHop;
+                _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode, recordNode,
+                                       dispatchCm, cruisePwm, emitStartPwm, emitEndPwm,
+                                       _chain.active);
             }
 #endif
             // ADR-080: a coalesced run stays active until `BLIND_FORWARD` advances every

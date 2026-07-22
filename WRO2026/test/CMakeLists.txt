@@ -812,7 +812,7 @@ add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pas
 # dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
 #
 # It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
-# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=3`. It does NOT
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=4`. It does NOT
 # define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
 # with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
 # and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
@@ -837,7 +837,7 @@ target_include_directories(test_path_tracker_parity_dump PRIVATE
 add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
 target_compile_definitions(test_path_tracker_parity_dump
-    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=3)
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=4)
 
 # =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
@@ -2269,45 +2269,7 @@ add_test(NAME tshape_profile_freshness
 )
 
 # =========================================================================================
-# Test executable #25 — `chain_speed_dump` + freshness gate (ADR-059, T4).
-#
-# Host golden-vector dump for the header-only, Arduino-free `ChainSpeedPolicy.h` (T4's two-pass
-# collinear-run velocity planner). Includes ONLY the policy header plus the REAL
-# `Config::PWM_MIN_MAGNITUDE` / `PWM_MAX` / `TSHAPE_ACCEL_PWM_PER_CM` / `TSHAPE_MIN_MOVE_CM` /
-# `TSHAPE_START_SPEED` / `SPEED_NORMAL` constants (all pure `<stdint.h>`-only `constexpr`), so it
-# needs NOTHING on the include path except `${SKETCH_DIR}` — the TU is entirely self-contained.
-#
-# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just prints
-# JSON to stdout. The actual ctest is `chain_speed_freshness` below, which drives
-# `chain_speed_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file and
-# BYTE-COMPARES it against the committed
-# `tools/path_planner/tests/fixtures/chain_speed_goldens.json` (the `routes.h` /
-# `tshape_profile` regenerate-then-diff freshness-gate pattern, ctest-native so it also runs
-# locally, not just in a dedicated CI job). A firmware retune that changes
-# `Config::TSHAPE_ACCEL_PWM_PER_CM` / `PWM_MIN_MAGNITUDE` — or any change to the policy's
-# arithmetic — changes this binary's stdout and fails the ctest until the fixture is regenerated
-# and recommitted. Consumed by the Python parity mirror `chain_speed.py` (T5 / AC6 / TC1).
-# =========================================================================================
-set(CHAIN_SPEED_DUMP_DIR ${TEST_DIR}/chain_speed_dump)
-
-add_executable(chain_speed_dump
-    ${CHAIN_SPEED_DUMP_DIR}/chain_speed_dump.cpp
-)
-target_include_directories(chain_speed_dump PRIVATE ${SKETCH_DIR})
-
-set(CHAIN_SPEED_GOLDEN_FIXTURE
-    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/chain_speed_goldens.json)
-
-add_test(NAME chain_speed_freshness
-    COMMAND ${CMAKE_COMMAND}
-            -DDUMP_EXE=$<TARGET_FILE:chain_speed_dump>
-            -DGOLDEN_FILE=${CHAIN_SPEED_GOLDEN_FIXTURE}
-            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/chain_speed_goldens.fresh.json
-            -P ${CHAIN_SPEED_DUMP_DIR}/chain_speed_freshness.cmake
-)
-
-# =========================================================================================
-# Test executables #26a-d — ADR-059 blind-chain FSM (T10; TC4-TC8; AC3/AC7/AC9).
+# Test executables #26a-d — ADR-080 blind-run coalescing (TC1-TC5; AC2-AC6).
 #
 # All four link the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
 # `YawSource.cpp` + `path_mocks.cpp` — the SAME shared issue-#106 recipe as every other
@@ -2440,8 +2402,8 @@ add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_bl
 # links the hand-authored `routes_speed_chain.cpp` shadow table and force-includes
 # `routes_speed_chain.h` FIRST (guard `ROUTES_H`) instead of `routes_fixture.{h,cpp}`. That
 # table carries the per-edge `speed`/`mode`/`stop_at_line` combinations the single-sourced
-# `routes_fixture` does not author, so the SPEED-tier chain gate (a same-tier SYNC<->GYRO run
-# still chains; a tier boundary breaks it), the per-edge seek cruise speed, and the
+# `routes_fixture` does not author, so the SPEED/mode run gates (either boundary splits the
+# run), the per-edge seek cruise speed, and the
 # pass-through entry seed clamp can be driven through the REAL FSM. Nodes resolve BY NAME.
 # HOP_SETTLE_MS=0 keeps the dispatch tick sequence unperturbed by the ADR-061 settle dwell.
 # =========================================================================================
@@ -3002,7 +2964,7 @@ target_compile_definitions(test_drive_seek_predicate PRIVATE
 # `approach_ramp_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file
 # and BYTE-COMPARES it against the committed
 # `tools/path_planner/tests/fixtures/approach_ramp_goldens.json` (the `routes.h` /
-# `tshape_profile` / `chain_speed` regenerate-then-diff freshness-gate pattern, ctest-native so
+# `tshape_profile` regenerate-then-diff freshness-gate pattern, ctest-native so
 # it also runs locally, not just in a dedicated CI job). A firmware retune that changes
 # `Config::TSHAPE_*` / `Config::LINE_APPROACH_*` — or any change to the policy's arithmetic —
 # changes this binary's stdout and fails the ctest until the fixture is regenerated and

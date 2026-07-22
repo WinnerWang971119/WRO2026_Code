@@ -25,7 +25,7 @@ Covered cases
   mid collinear run keeps the run grouped (one trapezoid, no spurious
   ``UserWarning``).
 * **TC11 (malformed fallback)** — (a) a pass tag with NO following braked stop
-  and (b) a blind run MISSING its recorded per-hop speeds each REJECT the group
+  and (b) a blind run MISSING its recorded combined-move speeds each REJECT the group
   and fall back to per-primitive rendering WITH a ``UserWarning``.
 * **TC7 (render) / review C1** — a LINE->BLIND SPANNING collinear run (a line
   pass-through feeding straight into a recorded blind chain) is a VALID run,
@@ -826,45 +826,6 @@ def test_tc11_pass_without_braked_stop_falls_back_with_warning(monkeypatch):
     assert advance == pytest.approx(40.0, abs=1e-6)
 
 
-def test_tc11_blind_run_missing_speeds_falls_back_with_warning(monkeypatch):
-    """TC11 (malformed b): a blind run missing a hop's recorded speeds warns + falls back.
-
-    Scripts a CHAINED blind mid-hop (carrying a recorded ``(start, end,
-    chain=True)`` suffix) + its ``ACT_BLIND_PASS`` boundary, then a PLAIN
-    ``ACT_FORWARD`` braked hop with NO recorded suffix. The run is marked a blind
-    run (the first segment carries recorded speeds) but a segment is missing its
-    recorded ``(start, end)`` — the grouper must NOT fabricate a cruise. It
-    REJECTS the group and falls back to per-primitive rendering WITH a
-    ``UserWarning``.
-    """
-    sequence = [
-        ((ACT_FORWARD, 20.0, 50, 85, True), 20.0),   # chained mid hop (has speeds)
-        ((ACT_BLIND_PASS, "X"), 0.0),                # zero-motion boundary (transparent)
-        ((ACT_FORWARD, 20.0), 20.0),                 # plain braked hop (NO recorded speeds)
-    ]
-    monkeypatch.setattr(
-        PathTrackerSim, "step_through", _make_step_through_spy(sequence)
-    )
-
-    trace = Trace(
-        schema_version=1,
-        start_node=toy_field_data.START_NODE,
-        start_heading_deg=toy_field_data.START_HEADING_DEG,
-        build_error=False,
-        commands=[Command(seq=0, op="goto", target="B")],
-    )
-
-    with pytest.warns(UserWarning, match="blind run missing recorded per-hop speeds"):
-        track = build(trace, toy_field_data)
-
-    # Fallback still renders both moving hops (the zero-motion pass contributes
-    # nothing): the chassis advanced the full 40 cm.
-    seed = track.keyframes[0]
-    moved = track.keyframes[-1]
-    advance = math.hypot(moved["x"] - seed["x"], moved["y"] - seed["y"])
-    assert advance == pytest.approx(40.0, abs=1e-6)
-
-
 def test_tc11_zero_motion_record_is_not_malformed(monkeypatch):
     """TC11: a run whose ONLY interruption is a zero-motion record is NOT malformed.
 
@@ -906,14 +867,13 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
     ``field_fixture`` TC7 topology ``LpIn -> LpJoin -> LpBlindA -> LpBlindB``
     (a LINE pass-through ``LpIn -> LpJoin`` feeding straight into the 2-hop
     blind chain ``LpJoin -> LpBlindA -> LpBlindB``), via the ``step_through``
-    spy. The leading LINE segments legitimately carry NO recorded chain speeds
-    (line-follow speed comes from the LineFollower preset, not per-hop
-    ``ChainSpeedPolicy``), so the grouper must treat this as a VALID spanning
+    spy. The leading LINE segments legitimately carry no BLIND-run speed record
+    (line-follow speed comes from the LineFollower preset), so the grouper must treat this as a VALID spanning
     run — the plan's Decision "a collinear run MAY span LINE/projection ->
     BLIND" — never a malformed one:
 
     * NO ``UserWarning`` (the broken grouper rejected the run as "blind run
-      missing recorded per-hop speeds" and fell back per-primitive, re-seeding
+      missing recorded speeds" and fell back per-primitive, re-seeding
       each speed-less segment from the start floor — the exact mid-run dip
       this feature exists to remove, on its flagship route shape).
     * ONE trapezoid: a single contiguous cruise plateau; velocity INTO and OUT
@@ -925,15 +885,14 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
     * TC7 pose pins: every node-boundary pose appears byte-exact, in order.
     """
     # The captured field_fixture stream (LpIn seat, goto LpBlindB): a LINE
-    # follow leg + pass-through roll (NO chain speeds), then the recorded blind
-    # chain — mid hop (85 -> 85, chain), zero-motion blind_pass boundary,
-    # braked final hop (85 -> 0, chain).
+    # follow leg + pass-through roll, then ADR-080's one combined blind move
+    # (cruise=85, entry=85, braked end=0, chain=True, final node) followed by
+    # its intermediate-node trace marker.
     sequence = [
         ((ACT_FOLLOW_INT, None), 12.98),            # LINE follow leg (no speeds)
         ((ACT_LINE_PASS, 12.02), 12.02),            # pass roll onto the handoff node
-        ((ACT_FORWARD, 20.0, 85, 85, True), 20.0),  # chained blind mid hop
-        ((ACT_BLIND_PASS, "LpBlindA"), 0.0),        # zero-motion boundary (transparent)
-        ((ACT_FORWARD, 20.0, 85, 0, True), 20.0),   # chained braked final hop
+        ((ACT_FORWARD, 40.0, 85, 85, 0, True, "LpBlindB"), 40.0),
+        ((ACT_BLIND_PASS, "LpBlindA"), 0.0),        # zero-motion trace marker
     ]
     monkeypatch.setattr(
         PathTrackerSim, "step_through", _make_step_through_spy(sequence)
@@ -957,7 +916,6 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
     x0, y0 = kfs[0]["x"], kfs[0]["y"]
     follow_xy = (x0 + 12.98, y0)    # follow leg end (sensor short of the node)
     handoff_xy = (x0 + 25.0, y0)    # LINE -> BLIND handoff node (LpJoin)
-    blind_mid_xy = (x0 + 45.0, y0)  # blind mid node (LpBlindA)
     goal_xy = (x0 + 65.0, y0)       # braked goal (LpBlindB)
 
     # The recorded chain cruise (85) is the run peak — after a pass-through it
@@ -978,11 +936,6 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
     assert vels[handoff_idx] == pytest.approx(cruise_speed, abs=_VEL_TOL), (
         f"dip OUT OF the line->blind handoff: v={vels[handoff_idx]}"
     )
-    # And held through the blind mid node too.
-    assert _velocity_into(kfs, vels, *blind_mid_xy) == pytest.approx(
-        cruise_speed, abs=_VEL_TOL
-    )
-
     # ONE trapezoid: a single contiguous cruise plateau — no intra-run dip
     # anywhere (the per-primitive fallback would break it at each speed-less
     # segment boundary by re-seeding from the start floor).
@@ -992,17 +945,16 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
         "cruise plateau broken — the run dipped mid-way (per-node dip lie)"
     )
 
-    # TC7 pose pins: each boundary pose appears byte-exact, in order; the goal
-    # is the terminal keyframe.
+    # The combined motion lands byte-exact at the final node.
     follow_idx = _last_index_at(kfs, *follow_xy)
-    blind_mid_idx = _last_index_at(kfs, *blind_mid_xy)
     goal_idx = _last_index_at(kfs, *goal_xy)
-    assert 0 < follow_idx < handoff_idx < blind_mid_idx < goal_idx
+    assert 0 < follow_idx < handoff_idx < goal_idx
     assert goal_idx == len(kfs) - 1
+    assert kfs[-1]["x"] == pytest.approx(goal_xy[0], abs=_POSE_TOL)
+    assert kfs[-1]["y"] == pytest.approx(goal_xy[1], abs=_POSE_TOL)
 
-    # The handoff and blind-mid boundaries sit INSIDE the single plateau span.
+    # The handoff sits inside the single plateau span.
     assert plateau[0] < handoff_idx <= plateau[-1] + 1
-    assert plateau[0] < blind_mid_idx <= plateau[-1] + 1
 
     # One ramp-down only, into the final node: monotonic non-increasing after
     # the plateau; no interior stop keyframe before the terminal brake.
@@ -1013,6 +965,30 @@ def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
     interior = vels[: goal_idx - 1]
     assert all(v > _VEL_TOL for v in interior), (
         "an intra-run stop keyframe (interior zero velocity) was emitted"
+    )
+
+
+def test_adr080_coalesced_run_ending_at_reset_has_no_hop_settle(monkeypatch):
+    """The combined record's final node, not stale Localization, gates RESET settle."""
+    sequence = [
+        ((ACT_FORWARD, 40.0, 70, 45, 0, True, "Wall2"), 40.0),
+        ((ACT_BLIND_PASS, "ResetPre"), 0.0),
+    ]
+    monkeypatch.setattr(PathTrackerSim, "step_through", _make_step_through_spy(sequence))
+
+    field_data = field_fixture.build_field_data()
+    trace = Trace(
+        schema_version=1,
+        start_node=field_data.START_NODE,
+        start_heading_deg=field_data.START_HEADING_DEG,
+        build_error=False,
+        commands=[Command(seq=0, op="goto", target="Wall2")],
+    )
+    track = _build_quiet(trace, field_data)
+
+    assert not _zero_motion_dwells(track.keyframes)
+    assert track.keyframes[-1]["x"] == pytest.approx(
+        track.keyframes[0]["x"] + 40.0, abs=_POSE_TOL
     )
 
 

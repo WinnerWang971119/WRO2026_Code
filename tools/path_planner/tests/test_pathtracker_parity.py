@@ -161,6 +161,7 @@ _EXACT_FIELDS: frozenset = frozenset(
         # (unbucketed) rule, so they are pinned to the EXACT bucket here.
         "start_pwm",
         "end_pwm",
+        "cruise_pwm",
         # goal_start framing metadata
         "case_id",
         "route_dir",
@@ -878,18 +879,18 @@ def _goal_start_obj(
 
 
 def test_goal_start_requires_realized_offset_cm() -> None:
-    """A ``goal_start`` record must carry ``realized_offset_cm`` (TC6, schema v3).
+    """A ``goal_start`` record must carry ``realized_offset_cm`` (TC6, schema v4).
 
     Pure unit test (no dump binary): :func:`_record_from_obj` validates the
     ``goal_start`` field set for EXACT equality, so the realized-offset field
     finding 1 added is REQUIRED, not optional. A ``goal_start`` missing it raises
-    :class:`ParitySchemaError`; one carrying it (with ``schema_version == 3`` and
+    :class:`ParitySchemaError`; one carrying it (with ``schema_version == 4`` and
     every other ``goal_start`` field) parses into a :class:`TraceRecord`. The
-    schema is now v3 (issue #156 added ``follow_mode`` + renamed ``line_mode`` ->
-    ``speed`` on the follow records); ``goal_start``'s own field set is unchanged.
+    schema is now v4 (ADR-080 added required ``node`` and ``cruise_pwm`` fields to
+    ``blind_dead_reckon``); ``goal_start``'s own field set is unchanged.
     """
-    assert PARITY_SCHEMA_VERSION == 3, (
-        "issue #156 bumps the parity schema to v3 (follow_mode + line_mode->speed)"
+    assert PARITY_SCHEMA_VERSION == 4, (
+        "ADR-080 bumps parity to v4 (blind_dead_reckon node + cruise_pwm)"
     )
 
     full = _goal_start_obj("Inter2__Inter3__off_n14_h0", "Inter2", "Inter3", 14.0)
@@ -899,7 +900,7 @@ def test_goal_start_requires_realized_offset_cm() -> None:
     with pytest.raises(ParitySchemaError):
         _record_from_obj(without_field)
 
-    # With the field (+ schema_version 3 + every other goal_start field) -> parses.
+    # With the field (+ schema_version 4 + every other goal_start field) -> parses.
     record = _record_from_obj(full)
     assert record.kind == "goal_start"
     assert record.fields["realized_offset_cm"] == pytest.approx(14.0)
@@ -918,9 +919,11 @@ def test_load_cpp_ndjson_surfaces_realized_offset() -> None:
             "kind": "blind_dead_reckon",
             "reverse": False,
             "drive_mode": "GYRO_TSHAPE",
+            "node": "ProjB",
             "dist_cm": 13.999999,
             # ADR-059 field-set bump: a plain (non-chained, cold-start) hop —
             # start = TSHAPE_START_SPEED (50), braked end 0, chain false.
+            "cruise_pwm": 70,
             "start_pwm": 50,
             "end_pwm": 0,
             "chain": False,

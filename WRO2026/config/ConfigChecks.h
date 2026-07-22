@@ -455,8 +455,7 @@ namespace Config
     // Blind-chain continuous motion checks (ConfigNav.h, ADR-059)
     //
     // COUPLED SITES: PATH_BLIND_CHAIN_MAX_CM and MAX_CHAIN_HOPS both cap the same run seen by
-    // PathTracker's walk-ahead chain builder and ChainSpeedPolicy.h's two-pass resolver; the
-    // Python sim (tools/path_planner/sim/runtime.py) hand-mirrors all three constants.
+    // PathTracker's coalesced-run walk-ahead; the Python sim hand-mirrors the same constants.
     // PATH_BLIND_CHAIN_MAX_CM is a LOOSE runaway sanity guard only (owner decision, 2026-07) --
     // it is no longer tied to STOP_AT_LINE_ARM_WINDOW_CM. MAX_CHAIN_HOPS is the practical bound
     // on how long a chain can run; overflowing either cap ends the chain at an ordinary braked
@@ -475,6 +474,12 @@ namespace Config
                   "coupling was deliberately dropped; MAX_CHAIN_HOPS is the practical bound on "
                   "how far a chain can run). A cap this large or larger indicates a config typo "
                   "rather than an intentional value. See config/ConfigNav.h.");
+
+    static_assert(PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM > 0.0f
+                      && PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM <= 10.0f,
+                  "Config::PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM must be in (0, 10] cm -- "
+                  "zero rejects every candidate, while a corridor wider than 10 cm no longer "
+                  "protects a combined blind move's endpoint.");
 
     static_assert(MAX_CHAIN_HOPS >= 2 && MAX_CHAIN_HOPS <= 32,
                   "Config::MAX_CHAIN_HOPS must be in [2, 32] -- below 2 a \"chain\" can never "

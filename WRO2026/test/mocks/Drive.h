@@ -250,7 +250,7 @@ struct DriveCallRecord
     uint32_t stopBrakeTrueCount  = 0;
     uint32_t stopBrakeFalseCount = 0;
 
-    // driveDist(...) builder-knob counters (ADR-059 / ADR-049 — the chain-speed
+    // driveDist(...) builder-knob counters (ADR-080 / ADR-049). Blind-run coalescing
     // dispatch reduces to "the builder recorded setStartSpeed/setEndSpeed/setBrake";
     // memory `gotcha-ctps-mock-noop-setter-drops-builder-knob` warns a no-op setter
     // here is a documented false-green for that assertion).

@@ -841,7 +841,8 @@ private:
      *   - the hop is collinear + same-direction per the PURE
      *     `passThroughHeadingEligible(...)` predicate (a direction flip or a bend ends
      *     the run);
-     *   - the hop is `>= Config::TSHAPE_MIN_MOVE_CM` and shares hop 0's `SpeedTier`;
+     *   - the hop is `>= Config::TSHAPE_MIN_MOVE_CM` and shares hop 0's resolved
+     *     `BlindMode` and `SpeedTier`;
      *   - the run stays within the caps: `<= Config::MAX_CHAIN_HOPS` hops and a summed
      *     commanded distance `<= Config::PATH_BLIND_CHAIN_MAX_CM`. A CAP truncation of an
      *     otherwise-eligible hop is LOGGED over Serial (never silent); the ineligibility
@@ -856,9 +857,9 @@ private:
      * the whole run as deceleration runway (ADR-080 supersedes the ADR-059 chained speeds).
      *
      * @param cur        The hop-0 departure node (`Localization.getCurrentNode()`).
-     * @param hop0Mode   Hop 0's resolved motion bundle (`decision.driveMode`). The combined
-     *                   move uses this mode for the whole run (blind runs are GYRO on this
-     *                   chassis; SYNC is unused — crossed encoder cables).
+     * @param hop0Mode   Hop 0's resolved motion bundle (`decision.driveMode`). A later hop of
+     *                   a different resolved mode ends the run; the combined move uses this
+     *                   homogeneous mode for the whole run.
      * @param hop0Speed  Hop 0's resolved `SpeedTier` (`_resolveSpeed(edge)`) — a later hop of
      *                   a DIFFERENT tier ends the run (the run shares one cruise; issue #97).
      * @param hop0DistCm Hop 0's COMMANDED distance (`decision.commandedDistanceCm` — the

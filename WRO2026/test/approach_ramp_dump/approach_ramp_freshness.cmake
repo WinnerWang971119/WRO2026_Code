@@ -9,7 +9,7 @@
 #                  `tools/path_planner/tests/fixtures/approach_ramp_goldens.json`.
 #   OUT_FILE     - scratch path (inside the build tree) to capture a FRESH run's stdout.
 #
-# Mirrors the `routes.h` / `tshape_profile` / `chain_speed` CI freshness pattern (regenerate,
+# Mirrors the `routes.h` / `tshape_profile` CI freshness pattern (regenerate,
 # then `git diff --exit-code`) but implemented as a ctest so it runs locally too, not just in
 # a dedicated CI job: RUN the dump binary fresh, write its stdout to OUT_FILE, then
 # BYTE-COMPARE it against the already-committed GOLDEN_FILE via
