@@ -2967,20 +2967,43 @@ def build(trace: Trace, field_data) -> Track:
             # goto surfaces once as the trace-end residual after the loop.
 
         elif cmd.op == "declare_position":
-            # Operator-declared belief reset (issue #130, T11): set the current
-            # node + clear the offset via the sim, and emit a ``declare_position``
-            # localization-lane marker. This is DISTINCT from return-to-node — no
-            # physical motion, no chassis mutation, no keyframe: only the belief
-            # changes (the clock does not advance). ``declare_position`` warns +
+            # Operator ground-truth re-anchor (ADR-081): set the current node +
+            # clear the offset via the sim, emit a ``declare_position``
+            # localization-lane marker, AND snap the rendered chassis to the
+            # declared node so the robot visibly jumps there and the NEXT goto
+            # departs from the node, not the drifted pose. This REVERSES the
+            # original issue-#130/T11 "belief-only, no chassis mutation" choice:
+            # a declare asserts the robot IS at the node, so the predicted
+            # trajectory picks up from the node. ``declare_position`` warns +
             # no-ops on an unknown node (mirroring the loader's strict-field
             # pattern), so pre-validate against ``NODES`` the same way and emit NO
-            # marker for an unknown node (the belief did not change). The loader
-            # already dropped a structurally-malformed declare, so ``cmd.node``
-            # is a well-formed name here; the NODES guard defends the unknown-name
-            # case the loader still forwards.
+            # marker AND no snap for an unknown node (the belief did not change).
+            # The loader already dropped a structurally-malformed declare, so
+            # ``cmd.node`` is a well-formed name here; the NODES guard defends the
+            # unknown-name case the loader still forwards.
             node = cmd.node
             if node is not None and node in field_data.NODES:
                 sim.localization.declare_position(node)
+                # Close any open collinear run so the snap departs from a
+                # materialized keyframe, then teleport the shared chassis to the
+                # node (position only — a declare leaves heading untouched,
+                # mirroring the firmware leaving ``_yawOffsetDeg`` alone). The
+                # snap keyframe shares the previous keyframe's timestamp, so the
+                # player's ``poseAt`` zero-length-bracket guard renders it as an
+                # instantaneous jump rather than a slide.
+                flush_run()
+                node_x, node_y = field_data.NODES[node]
+                prev = keyframes[-1]
+                chassis.x_cm = float(node_x)
+                chassis.y_cm = float(node_y)
+                keyframes.append(
+                    {
+                        "t": prev["t"],
+                        "x": float(node_x),
+                        "y": float(node_y),
+                        "h": prev["h"],
+                    }
+                )
                 events.append(
                     {
                         "t": t,
@@ -2988,9 +3011,9 @@ def build(trace: Trace, field_data) -> Track:
                         "label": f"declare {node}",
                     }
                 )
-            # Unknown / absent node → no belief change, no marker (the sim would
-            # only warn + no-op; skipping the call avoids a spurious UserWarning
-            # in the render path).
+            # Unknown / absent node → no belief change, no marker, no snap (the
+            # sim would only warn + no-op; skipping the call avoids a spurious
+            # UserWarning in the render path).
 
         elif cmd.op == "manip":
             # `method`/`arg` are structured (additive) alongside the existing
