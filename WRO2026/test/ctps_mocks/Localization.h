@@ -9,11 +9,12 @@
  * header no-ops if reached afterwards.
  *
  * `Mission.cpp` calls `Localization.declarePosition(id)` from its immediate
- * `declarePosition(name)` recovery verb. The CTPS dump records the COMMAND STREAM
- * (drive ops / waits / beeps / leds), not localization state, so the re-anchor is
- * a no-op here. Mirroring the precedent set by the `Drive` / `PathTracker` /
- * `EventTrace` mocks, this keeps the real `Localization.cpp` (and its Drive /
- * MatrixMiniR4 / IMU chain) out of the dump link.
+ * `declarePosition(name)` recovery verb, and task bodies may call the name overload
+ * directly. The CTPS dump records the COMMAND STREAM (drive ops / waits / beeps /
+ * leds), not localization state, so both re-anchor forms are no-ops here. Mirroring
+ * the precedent set by the `Drive` / `PathTracker` / `EventTrace` mocks, this keeps
+ * the real `Localization.cpp` (and its Drive / MatrixMiniR4 / IMU chain) out of the
+ * dump link.
  *
  * Only the surface `Mission.cpp` touches is provided. If a later Mission change
  * references more of `Localization`, extend this shadow rather than dragging in
@@ -36,6 +37,9 @@ class LocalizationClass
 public:
     /** @brief No-op re-anchor — the dump does not model graph position. */
     void declarePosition(uint8_t /*nodeId*/) {}
+
+    /** @brief No-op name-based re-anchor — the dump does not model graph position. */
+    bool declarePosition(const char* nodeName) { return nodeName != nullptr; }
 
     /**
      * @brief World->IMU yaw conversion — IDENTITY in the CTPS world frame.
