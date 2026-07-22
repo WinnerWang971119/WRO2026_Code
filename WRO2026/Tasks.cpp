@@ -452,7 +452,7 @@ bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
 bool TasksClass::_grabToBin(uint8_t bin)
 {
     Manipulator.sortTo(bin).async();
-    Manipulator.release().rampMs(1);
+    Manipulator.release().instant();
     // grab() stages its own rates (instant open -> slow lift to home -> instant close), so it needs
     // no per-move ramp override here — an override would just slow the initial instant jump.
     Manipulator.grab();

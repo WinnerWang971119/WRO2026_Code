@@ -91,7 +91,7 @@ public:
      */
     explicit ManipServo(const Config::ServoCfg& cfg)
         : _cfg(cfg), _shadow(cfg.homeDeg), _startMs(0), _estMs(0), _target(cfg.homeDeg),
-          _stepMs(cfg.stepMs), _lastStepMs(0)
+          _moveStart(cfg.homeDeg), _stepMs(cfg.stepMs), _lastStepMs(0)
     {
     }
 
@@ -116,11 +116,12 @@ public:
     void begin()
     {
         _setDir(_cfg.reverse);
-        _shadow  = _cfg.homeDeg;
-        _target  = _cfg.homeDeg;
-        _stepMs  = _cfg.stepMs;
-        _startMs = millis();
-        _estMs   = 0;
+        _shadow    = _cfg.homeDeg;
+        _target    = _cfg.homeDeg;
+        _moveStart = _cfg.homeDeg;
+        _stepMs    = _cfg.stepMs;
+        _startMs   = millis();
+        _estMs     = 0;
         home();
     }
 
@@ -162,19 +163,24 @@ public:
     /**
      * @brief Override the ramp rate (ms per 1° step) for the IN-FLIGHT move, in place.
      *
-     * Used by the `Manipulator.<verb>().rampMs(ms)` builder chain: the verb has already armed the
-     * move at the default rate, and this re-arms the CURRENT stop at @p stepMs. Re-arming (rather
-     * than only flipping the rate) is what makes `.instant()` (`stepMs == 0`) actually write the
-     * target in one command even when the move was originally armed as a ramp — otherwise an async
-     * `.instant()` would still crawl one degree per tick. Leaves the follow-up queue intact; each
-     * queued stop keeps its OWN rate (see `moveWaypoints`), so this only retargets the current stop.
+     * Used by the `Manipulator.<verb>().rampMs(ms)` builder chain. The verb ALREADY armed (and, for
+     * an instant default, already wrote) the move before this override runs, so this **rewinds the
+     * commanded angle to the move's start** (`_moveStart`) and re-arms from there at @p stepMs.
+     * Rewinding is essential: without it the current shadow is already at the target, the delta is
+     * zero, and the re-arm collapses the completion budget to just `settleMs` — so `.instant()`
+     * would return almost immediately (looking like `.async()`) and `.rampMs()` would never actually
+     * crawl. Rewinding recovers the full move, so an override to `0` keeps the true slew budget and
+     * an override to `> 0` ramps the whole move. No wall-clock passes between the verb and this call
+     * (no `update()` runs in between), so re-commanding the start pose is glitch-free. Leaves the
+     * follow-up queue intact; each queued stop keeps its OWN rate (see `moveWaypoints`).
      *
      * @param stepMs Milliseconds per 1° step; `0` = instant. Bigger = slower.
      */
     void setStepMs(uint16_t stepMs)
     {
         _stepMs = stepMs;
-        _armRamp(_target);    // re-evaluate instant-vs-ramp for the current move at the new rate
+        _shadow = _moveStart;    // rewind to the move's start so the override sees the full move
+        _armRamp(_target);       // re-evaluate instant-vs-ramp for the whole move at the new rate
     }
 
     /**
@@ -465,10 +471,14 @@ private:
         }
         else
         {
-            // Ramp: `update()` steps `_shadow` toward `_target` one degree per `_stepMs`.
+            // Ramp: `update()` steps `_shadow` toward `_target` one degree per `_stepMs`. Command
+            // the current shadow (the ramp's start) now — a no-op for a fresh ramp (the servo is
+            // already there), but for a rate override that rewound `_shadow` this re-issues the
+            // start pose so the crawl doesn't begin from the verb's stale instant-write target.
             _estMs      = (uint32_t)delta * (uint32_t)_stepMs + _cfg.settleMs;
             _startMs    = millis();
             _lastStepMs = millis();
+            _writeAngle(_shadow);
         }
     }
 
@@ -484,7 +494,8 @@ private:
      */
     void _armStop(uint16_t deg, uint16_t stepMs)
     {
-        _stepMs = stepMs;
+        _moveStart = _shadow;    // remember where this stop begins, so a later rate override can rewind
+        _stepMs    = stepMs;
         _armRamp((deg > 180) ? 180 : deg);
     }
 
@@ -493,6 +504,7 @@ private:
     uint32_t                _startMs;   ///< `millis()` at the current stop's arm.
     uint32_t                _estMs;     ///< Estimated slew/ramp-plus-settle budget for the current stop (ms).
     uint16_t                _target;    ///< Current stop's destination; `_shadow` crawls toward this.
+    uint16_t                _moveStart; ///< Shadow at the current stop's arm — rewind point for a rate override.
     uint16_t                _stepMs;    ///< Active ms per 1° step (`0` = instant) for the current stop.
     uint32_t                _lastStepMs;///< `millis()` of the last ramp step (paces `update()`).
     Waypoint                _queue[MAX_WAYPOINTS];   ///< Follow-up stops after the current one.

@@ -960,6 +960,76 @@ static void test_TCR4_grab_stages_instant_open_slow_lift_instant_close()
 }
 
 // ===========================================================================
+// TCR5 / TCR6 — a rate override applied AFTER an instant-default verb already wrote its target.
+//
+// This is the bug where `.rampMs()`/`.instant()` behaved like `.async()`: an instant-default verb
+// writes the target eagerly (shadow == target), so a naive re-arm sees delta 0 and collapses the
+// budget to settle-only (and never ramps). setStepMs() must rewind to the move's start.
+// ===========================================================================
+
+// Instant-default fixture (stepMs = 0): models a verb whose servo default writes eagerly.
+static constexpr Config::ServoCfg INSTANT_CFG = { /*rcId*/ 2,     /*home*/ 90,  /*open*/ 0,
+                                                  /*openWhite*/ 0, /*close*/ 150, /*msPerDeg*/ 5.0f,
+                                                  /*settle*/ 20,   /*reverse*/ false, /*stepMs*/ 0 };
+
+static void test_TCR5_rampms_override_after_instant_write_crawls()
+{
+    TEST_SCOPE("TCR5: .rampMs() override after an instant write rewinds and actually ramps");
+
+    resetWorld();
+    clearTickCallback();
+
+    ManipServo s(INSTANT_CFG);
+    s.begin();    // at 90
+
+    // Instant default: the move to 150 is written immediately (shadow == target).
+    s.setAngle(150);
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 150);
+
+    // Override to a ramp: it must rewind to the move's start (90) and crawl — NOT no-op because the
+    // shadow is already at the target.
+    s.setStepMs(10);
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 90);    // rewound to the start
+    ASSERT_FALSE(s.isDone());
+    mockAdvanceMillis(10);
+    s.update();
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 91);    // crawling toward 150
+
+    int guard = 0;
+    while (!s.isDone() && guard++ < 100000)
+    {
+        mockAdvanceMillis(2);
+        s.update();
+    }
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 150);
+    ASSERT_TRUE(s.isDone());
+}
+
+static void test_TCR6_instant_override_keeps_full_slew_budget()
+{
+    TEST_SCOPE("TCR6: .instant() after an instant write keeps the full slew budget (not settle-only)");
+
+    resetWorld();
+    clearTickCallback();
+
+    ManipServo s(INSTANT_CFG);
+    s.begin();    // at 90
+
+    // Instant move 90 -> 150; the completion budget is |150-90| * msPerDeg + settle = 320 ms.
+    s.setAngle(150);
+    // .instant() override. The bug collapsed this to settle-only (20 ms) — so a blocking drain
+    // barely waited and looked like .async(). The rewind must preserve the full 320 ms slew budget.
+    s.setStepMs(0);
+    ASSERT_EQ(s.commandedAngle(), (uint16_t) 150);    // still commands the target in one write
+
+    const uint32_t budget = (uint32_t) (60 * INSTANT_CFG.msPerDeg) + INSTANT_CFG.settleMs;    // 320
+    mockAdvanceMillis(budget - 1);
+    ASSERT_FALSE(s.isDone());    // NOT done just under the full slew budget (would fail with the bug)
+    mockAdvanceMillis(1);
+    ASSERT_TRUE(s.isDone());     // done only once the full budget elapses
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -988,5 +1058,7 @@ int main()
     test_TCR2_setangle_override_rate();
     test_TCR3_movewaypoints_mixes_per_stop_rates();
     test_TCR4_grab_stages_instant_open_slow_lift_instant_close();
+    test_TCR5_rampms_override_after_instant_write_crawls();
+    test_TCR6_instant_override_keeps_full_slew_budget();
     TEST_REPORT();
 }
