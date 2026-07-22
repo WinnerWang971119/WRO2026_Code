@@ -685,7 +685,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11).
      */
-    constexpr uint8_t TURN_SETTLE_SAMPLES = 2;
+    constexpr uint8_t TURN_SETTLE_SAMPLES = 10;
 
     /**
      * @brief Timeout (ms) for the turn PD controller before it gives up converging (ADR-068).
@@ -718,7 +718,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.8f;
+    constexpr float TURN_TOLERANCE_DEG = 1.0f;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
@@ -735,7 +735,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 3000;
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 5000;
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");
