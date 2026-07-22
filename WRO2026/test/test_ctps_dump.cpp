@@ -146,6 +146,97 @@ static void test_TC14b_readMosaic_failAt_and_op_recorded()
 // ===========================================================================
 
 // ===========================================================================
+// TC1-TC5 — Localization.declarePosition() mock recording (issue #130, task T2).
+// ===========================================================================
+
+static void test_TCx_declare_position_recording()
+{
+    TEST_SCOPE("TC1-TC5: Localization.declarePosition() mock recording");
+
+    // --- TC1: name overload resolves + records exactly one DECLARE_POSITION. ---
+    ctps::reset();
+    {
+        const bool ok = Localization.declarePosition("Inter1");
+        ASSERT_TRUE(ok);
+
+        int declareCount = 0;
+        std::string target;
+        for (const auto& rec : ctps::g_ctpsLog)
+        {
+            if (rec.op == ctps::Op::DECLARE_POSITION)
+            {
+                target = rec.target;
+                ++declareCount;
+            }
+        }
+        ASSERT_EQ(declareCount, 1);
+        ASSERT_TRUE(target == "Inter1");
+    }
+
+    // --- TC2: uint8_t overload records the resolved node name. ---
+    ctps::reset();
+    {
+        const uint8_t id = FieldMap::findNodeByName("Corner");
+        Localization.declarePosition(id);
+
+        int declareCount = 0;
+        std::string target;
+        for (const auto& rec : ctps::g_ctpsLog)
+        {
+            if (rec.op == ctps::Op::DECLARE_POSITION)
+            {
+                target = rec.target;
+                ++declareCount;
+            }
+        }
+        ASSERT_EQ(declareCount, 1);
+        ASSERT_TRUE(target == "Corner");
+    }
+
+    // --- TC3: unknown name -> false, nothing recorded. ---
+    ctps::reset();
+    {
+        const bool ok = Localization.declarePosition("NopeNode");
+        ASSERT_FALSE(ok);
+
+        int declareCount = 0;
+        for (const auto& rec : ctps::g_ctpsLog)
+        {
+            if (rec.op == ctps::Op::DECLARE_POSITION)
+            {
+                ++declareCount;
+            }
+        }
+        ASSERT_EQ(declareCount, 0);
+    }
+
+    // --- TC4: serialization emits "op": "declare_position" + "node": "Inter1". ---
+    ctps::reset();
+    {
+        Localization.declarePosition("Inter1");
+        const std::string json = ctps::commandStreamToJson("Start", 0.0);
+        ASSERT_TRUE(json.find("\"op\": \"declare_position\"") != std::string::npos);
+        ASSERT_TRUE(json.find("\"node\": \"Inter1\"") != std::string::npos);
+    }
+
+    // --- TC5: out-of-range id -> silent no-op, nothing recorded. ---
+    ctps::reset();
+    {
+        Localization.declarePosition((uint8_t) 0xFF);
+
+        int declareCount = 0;
+        for (const auto& rec : ctps::g_ctpsLog)
+        {
+            if (rec.op == ctps::Op::DECLARE_POSITION)
+            {
+                ++declareCount;
+            }
+        }
+        ASSERT_EQ(declareCount, 0);
+    }
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -153,6 +244,7 @@ int main()
 {
     test_TC14a_getColor_returns_injected();
     test_TC14b_readMosaic_failAt_and_op_recorded();
+    test_TCx_declare_position_recording();
 
     TEST_REPORT();
 }
