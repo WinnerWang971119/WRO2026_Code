@@ -1,6 +1,6 @@
 # ADR-079: Braked-blind boundary carry generalizes beyond chains; chained final-hop stub floors, not planned-PWM brakes
 
-**Status:** Implemented
+**Status:** Superseded by [ADR-080](./080-blind-run-coalescing.md)
 **Date decided:** 2026-07 (phase)
 
 ## Rule
@@ -82,6 +82,7 @@ must be pinned by host ctests asserting the real `MiniR4.DriveDC` setpoint.
 
 ## See also
 
+- [ADR-080 — A collinear blind run coalesces into one braked `driveDist` over the whole run](./080-blind-run-coalescing.md) — superseding decision: coalescing one braked move over the whole run removes both the boundary carry and the chained-final-hop stub this ADR added, so both are retired for blind runs.
 - [ADR-059 — Collinear runs chain velocity across hops instead of stopping at every node](./059-collinear-run-continuous-motion.md) — amended: this ADR generalizes its in-chain boundary-carry subtraction to non-chain braked blind hops and floors the chained final hop's degraded stub instead of braking it from plan PWM.
 - [ADR-058 — CTPS playback renders the firmware's T-shape motion profile](./058-ctps-firmware-motion-profile.md) — the `TShapeProfilePolicy` floor/brake shape the stub-guard now matches on a degraded final hop.
 - [ADR-018 — LineFollower distance-gated stops use symmetric trapezoidal + active brake](./018-linefollower-distance-gated-stops.md) — the `cruise→floor→brake` stop shape this ADR's stub now also lands on.

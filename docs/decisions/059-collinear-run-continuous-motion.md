@@ -136,6 +136,7 @@ pass through cleanly is to straighten the field, not add a second knob.
 
 ## See also
 
+- **Update ([ADR-080](./080-blind-run-coalescing.md)):** run-coalescing — rejected above on parity-granularity cost plus a since-refuted physics claim — is adopted for BLIND runs. A strictly-collinear blind run now drives as one braked `driveDist` over the whole run instead of a per-hop velocity chain; the blind chain-speed plan and ADR-079's carry/stub are retired. LINE/PROJECTION chaining below is unchanged.
 - [ADR-023 — Pass-through collinear intersections](./023-pass-through-collinear-intersections.md) — amended: the `entryPwm` cruise-carry seed this ADR specifies is the same carry ADR-023 established at the LINE→BLIND handoff.
 - [ADR-046 — Projection is a node property, not an edge type](./046-projection-as-node-property.md) — amended: the projection ramp-down fix closes the gap where `PROJECTION_FOLLOW` never chained `setTShapeRampDown`, so its distance-gated pass-through now actually holds cruise.
 - [ADR-052 — Wall-free heading-only re-anchor at collinear line pass-throughs](./052-line-arrival-heading-reset.md) — amended: the pass-through arrival this ADR re-anchors at is unchanged in trigger, but now may sit inside a chained run rather than a single hop.
