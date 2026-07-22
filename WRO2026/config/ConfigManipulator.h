@@ -79,7 +79,7 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, true };
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, false };
     /** @brief Dumper servo calibration. TODO calibrate. */
     constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */

@@ -309,22 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    /*
-    PathTracker.goTo("i2");
-    Drive.turnToYaw(Localization.toImuYaw(90));
-    PathTracker.goTo("MWD");
-    Manipulator.dumper.openForWhite();
-    _waitStationaryMs(200);
-    PathTracker.goTo("MWU");
-    PathTracker.goTo("i2");
-    Manipulator.dumper.home();
-    PathTracker.goTo("Start");
-    Drive.turnToYaw(Localization.toImuYaw(270));
-    */
-   
-   PathTracker.goTo("i3");
-   Localization.declarePosition("MWU");
-   PathTracker.goTo("i2");
+    _grabToBin(1);
     
    return true;
 }
@@ -1136,6 +1121,14 @@ bool TasksClass::pot(const TaskArgs& /*args*/)
 
 bool TasksClass::mosaic(const TaskArgs& /*args*/)
 {
+    //Remove this before comp!
+#pragma push_macro("WHITE")
+#undef WHITE
+    Vision.fakeRead({Config::Color::GREEN, Config::Color::WHITE, Config::Color::BLUE, Config::Color::YELLOW,
+                      Config::Color::WHITE, Config::Color::GREEN, Config::Color::BLUE, Config::Color::WHITE,
+                      Config::Color::YELLOW, Config::Color::GREEN, Config::Color::BLUE, Config::Color::YELLOW});
+#pragma pop_macro("WHITE")
+
     // Consumes the latch captured by the `readMosaic` task — this body does not read the
     // camera itself. `_mosaicAlgo` reports one entry per tile, already in optimal collection
     // order, and a run of consecutive entries sharing a colour is one stop at that station.
@@ -1198,7 +1191,6 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
             // Retract before every chassis move — an extended belt throws the centre of mass too far off to drive on.
             Manipulator.beltTo(Config::BeltStation::MID);
             PathTracker.goTo(kMosaicRowNodes[station][row].node);
-            Drive.turnToYaw(Localization.toImuYaw(90));
 
             parkedColor = station;
             parkedRow   = row;
