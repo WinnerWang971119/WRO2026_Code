@@ -158,7 +158,7 @@ _NODES = {
     # `final`, all BLIND, collinear heading 0 (east). Hop lengths 20/20/8 cm -- the
     # short FINAL hop (8 cm, just over TSHAPE_MIN_MOVE_CM=5 and under the 7 cm
     # shed-to-floor room from cruise 85 -> floor 50 at accel 5 pwm/cm) exercises the
-    # ChainSpeedPolicy backward pass pulling the shed into the PRIOR hop (AC4). A pure
+    # ADR-080 combines these into one 73 cm braked move with full deceleration runway. A pure
     # dead-end branch off an existing BLIND leaf: it cannot shorten any existing
     # NEXT_HOP pair, so it is a purely additive fixture change (see field_fixture.py
     # module docstring's stable-name contract).
@@ -176,6 +176,12 @@ _NODES = {
     "LpJoin":    (45.0, 130.0),   # LINE junction (the pass-through gate fires here)
     "LpBlindA":  (65.0, 130.0),   # BLIND (chain hop 0 after the pass-through, 20 cm)
     "LpBlindB":  (85.0, 130.0),   # BLIND (chain END, 20 cm)
+    # ADR-080 run-wide corridor probe: each pairwise bend is 9 deg (< turn tolerance),
+    # but the cumulative path misses hop 0's execution ray by >1 cm.
+    "CumA": (220.0, 130.0),
+    "CumB": (240.0, 130.0),
+    "CumC": (259.7538, 133.1287),
+    "CumD": (278.7749, 139.3090),
     # ADR-059 chain-ineligibility probes (TC6, issue #106/T10-T11):
     "ChainTiny":   (163.0, 70.0),   # BLIND (off ChainC, 3 cm -- BELOW TSHAPE_MIN_MOVE_CM=5)
     "ChainPivPre": (220.0, 100.0),  # BLIND (collinear predecessor into the EXISTING
@@ -248,6 +254,7 @@ _NODE_TYPES = {
     "ProjE": "projection", "Efar": "line",
     "ChainA": "blind", "ChainB": "blind", "ChainC": "blind", "ChainD": "blind",
     "LpIn": "line", "LpJoin": "line", "LpBlindA": "blind", "LpBlindB": "blind",
+    "CumA": "blind", "CumB": "blind", "CumC": "blind", "CumD": "blind",
     "ChainTiny": "blind", "ChainPivPre": "blind", "ResetPre": "blind",
     "ResetBeyond": "blind", "SeekPre": "blind",
     "DirFlipA": "blind", "DirFlipB": "blind", "DirFlipC": "blind",
@@ -296,6 +303,9 @@ _BLIND_EDGES = [
     ("ChainA", "ChainB"),
     ("ChainB", "ChainC"),
     ("ChainC", "ChainD"),
+    ("CumA", "CumB"),
+    ("CumB", "CumC"),
+    ("CumC", "CumD"),
     # ADR-059 LINE->BLIND spanning collinear run (TC7): LpJoin's pass-through peek
     # continues onto this collinear BLIND leg, which then chains a further hop.
     ("LpJoin", "LpBlindA"),
@@ -385,6 +395,14 @@ _EDGES = [
     # pair (NOT reusing ChainC->ChainD) so the override cannot perturb the main
     # chain's TC4/TC8/TC9 dispatch.
     _edge("DirFlipB", "DirFlipC", EDGE_BLIND, direction="rear"),
+    # Corridor probe: execution semantics stay on the authored 0/180 heading while node
+    # coordinates bend away, isolating the run-wide endpoint guard from ordinary turn logic.
+    _edge("CumA", "CumB", EDGE_BLIND, heading_deg=0.0),
+    _edge("CumB", "CumA", EDGE_BLIND, heading_deg=180.0),
+    _edge("CumB", "CumC", EDGE_BLIND, heading_deg=0.0),
+    _edge("CumC", "CumB", EDGE_BLIND, heading_deg=180.0),
+    _edge("CumC", "CumD", EDGE_BLIND, heading_deg=0.0),
+    _edge("CumD", "CumC", EDGE_BLIND, heading_deg=180.0),
 ]
 
 

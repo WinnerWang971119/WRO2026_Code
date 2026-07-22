@@ -77,15 +77,15 @@ A pivot's sensor-terminated **approach** leg budgets `δ` against a direction-re
 offset, not always the FRONT one:
 
 - **Reverse-reachable** (2-board chassis, not FRONT-pinned by a per-edge pin or the
-  pipeline default) → budget against `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (**7.68 cm**, an
-  unmeasured placeholder pending the wired rear board, `ConfigDrive.h`).
+  pipeline default) → budget against `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (**6.0 cm**, bench
+  measured on 2026-07-22, `ConfigDrive.h`).
 - **FRONT-pinned or reverse-impossible** (sensor-in on a 1-board chassis) → budget
   against `LINE_SENSOR_AXLE_OFFSET_CM` (**12.02 cm**).
 
 This has a geometric consequence worth stating explicitly: with `δ = (T/2)·tan(|θ|/2)`
 and `T/2 ≈ 9 cm` (`Config::TRACK_MM = 180`), a 90° pivot has `δ ≈ 9 cm`, which already
-**exceeds** the 7.68 cm REAR budget. Reverse pivots are therefore geometrically limited
-to turns of roughly **θ < ~81°** (vs ~106° forward, ADR-044). A sharper reverse pivot
+**exceeds** the 6.0 cm REAR budget. Reverse pivots are therefore geometrically limited
+to turns of roughly **θ < ~67°** (vs ~106° forward, ADR-044). A sharper reverse pivot
 is **rejected offline** by the validator, naming the escape: pin `direction:"front"` on
 both legs, soften the turn, or approach via a dead-reckon BLIND leg instead of a
 sensor-terminated one. `direction:"front"` on both pivot legs remains the force-forward

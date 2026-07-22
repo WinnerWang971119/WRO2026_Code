@@ -1,10 +1,10 @@
 {
   "FIELD_MM": [
-    2360.0,
-    1140.0
+    2365.0,
+    1145.0
   ],
   "MAP_PNG": "maps/map.png",
-  "ROBOT_RADIUS_CM": 15.0,
+  "ROBOT_RADIUS_CM": 5.0,
   "BLIND_DECAY_ENABLED": true,
   "BLIND_DECAY_K": 0.1,
   "BLIND_DECAY_EXPONENT": 2.0,
@@ -14,7 +14,7 @@
   "NODES": {
     "C": [
       185.4986,
-      27.3
+      27.3036
     ],
     "CB1": [
       206.97499999999974,
@@ -58,7 +58,7 @@
     ],
     "CY3": [
       117.7186,
-      41.100000000000065
+      40.10000000000005
     ],
     "M": [
       50.4867,
@@ -69,64 +69,64 @@
       60.95324525661604
     ],
     "MBD": [
-      38.0,
-      58.400000000000006
+      35.23999999999994,
+      56.999999999999986
     ],
     "MBU": [
-      38.0,
-      64.80000000000001
+      35.23999999999994,
+      63.8
     ],
     "MG2": [
       50.4867,
       77.46557188130221
     ],
     "MGD": [
-      38.0,
-      74.40000000000003
+      35.23999999999994,
+      73.20000000000002
     ],
     "MGU": [
-      38.0,
-      80.70000000000005
+      35.23999999999994,
+      79.90000000000003
     ],
     "MR": [
-      38.0,
-      20.0
+      35.2,
+      27.3
     ],
     "MW2": [
       50.4867,
       93.24941350784047
     ],
     "MWD": [
-      38.0,
-      89.39999999999998
+      35.23999999999994,
+      89.19999999999997
     ],
     "MWU": [
-      38.0,
-      96.8
+      35.23999999999994,
+      95.59999999999998
     ],
     "MY2": [
       50.4867,
       45.9
     ],
     "MYD": [
-      38.0,
-      42.6
+      35.23999999999994,
+      41.19999999999998
     ],
     "MYU": [
-      38.0,
-      48.7
+      35.23999999999994,
+      47.499999999999986
     ],
     "PotGet": [
       117.7186,
       22.829197020208255
     ],
     "PotPut": [
-      168.1421,
+      164.3421,
       37.027583652302766
     ],
     "Start": [
-      19.4,
-      23.400000000000002
+      18.700000000000003,
+      22.9
     ],
     "dump1": [
       117.7186,
@@ -142,19 +142,19 @@
     ],
     "i1": [
       50.4867,
-      27.3057
+      27.3036
     ],
     "i3": [
       117.7186,
-      27.3057
+      27.3036
     ],
     "p1": [
-      168.1421,
-      27.3057
+      164.3421,
+      27.3036
     ],
     "shovel1Get": [
       89.4,
-      27.3057
+      27.3036
     ],
     "shovel1Put": [
       79.36603695929536,
@@ -162,11 +162,11 @@
     ],
     "shovel2Get": [
       147.7291,
-      27.3057
+      27.3036
     ],
     "shovel2Put": [
       32.5,
-      27.3
+      27.3036
     ]
   },
   "NODE_TYPES": {
@@ -176,7 +176,7 @@
     "CB3": "line",
     "CG1": "line",
     "CG2": "line",
-    "CG3": "blind",
+    "CG3": "projection",
     "CW1": "line",
     "CW2": "line",
     "CY1": "line",
@@ -189,7 +189,7 @@
     "MG2": "line",
     "MGD": "blind",
     "MGU": "blind",
-    "MR": "reset",
+    "MR": "blind",
     "MW2": "line",
     "MWD": "blind",
     "MWU": "blind",
@@ -208,7 +208,7 @@
     "shovel1Get": "line",
     "shovel1Put": "blind",
     "shovel2Get": "line",
-    "shovel2Put": "projection"
+    "shovel2Put": "blind"
   },
   "LINE_SEGMENTS": [
     [
@@ -284,8 +284,8 @@
       "shovel2Get"
     ],
     [
-      "shovel2Put",
-      "i1"
+      "CG3",
+      "CG2"
     ]
   ],
   "BLIND_EDGES": [
@@ -354,10 +354,6 @@
       "CY3"
     ],
     [
-      "CG3",
-      "CG2"
-    ],
-    [
       "CY3",
       "i3"
     ],
@@ -370,16 +366,20 @@
       "shovel1Get"
     ],
     [
-      "Start",
-      "shovel2Put"
+      "MR",
+      "MYD"
+    ],
+    [
+      "shovel2Put",
+      "MR"
     ],
     [
       "MR",
       "i1"
     ],
     [
-      "MR",
-      "MYD"
+      "Start",
+      "MR"
     ]
   ],
   "pivot_turns": [
@@ -389,23 +389,126 @@
       "PotPut"
     ]
   ],
-  "RESET_NODES": {
-    "MR": {
-      "axis": "y",
-      "wall_coord": 0.0,
-      "facing": 90.0
-    }
-  },
   "blind_projection_auto_seek": false,
   "pipeline_speed": "NORMAL",
   "pipeline_blind_mode": "GYRO_TSHAPE",
   "EDGES": [
     {
       "type": "LINE",
-      "u": "shovel2Put",
-      "v": "i1",
+      "u": "i3",
+      "v": "shovel1Get",
       "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MR",
+      "v": "MYD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYD",
+      "v": "MR",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYD",
+      "v": "MYU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYU",
+      "v": "MYD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYU",
+      "v": "MBD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBD",
+      "v": "MYU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBD",
+      "v": "MBU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBU",
+      "v": "MBD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBU",
+      "v": "MGD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGD",
+      "v": "MBU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGD",
+      "v": "MGU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGU",
+      "v": "MGD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGU",
+      "v": "MWD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWD",
+      "v": "MGU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWD",
+      "v": "MWU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWU",
+      "v": "MWD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "PotPut",
+      "v": "p1",
+      "stop_at_line": "on"
     }
   ],
-  "OBSTACLES": []
+  "OBSTACLES": [
+    [
+      84.9325561825562,
+      38.940624690624716,
+      97.34172359172359,
+      41.04784179784181,
+      "obstacle"
+    ]
+  ]
 }

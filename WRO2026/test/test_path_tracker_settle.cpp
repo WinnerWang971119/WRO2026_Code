@@ -39,7 +39,7 @@
  *   | PROJECTION_FOLLOW, pass-through (`_projPassThrough`)  | no      | no      |
  *   | STOP_AT_LINE (always braked)                          | yes     | YES     |
  *   | BLIND_FORWARD, non-chain (`!_chain.active`)           | yes     | YES     |
- *   | BLIND_FORWARD, chain intermediate (`_chain.active`)  | no      | no      |
+ *   | BLIND_FORWARD, coalesced run final                    | yes     | YES     |
  *   | Cold pre-edge turn done, normal hop (`!_returnActive`)| n/a     | YES (turn->move) |
  *   | Return-prologue pre-edge turn (`_returnActive`)       | n/a     | no      |
  *   | Goal arrival (final braked hop, `cur==dest`)          | yes     | YES     |
@@ -63,10 +63,9 @@
  *     LINE-LINE-LINE pass-through triple (heading 0).
  *   - `Inter3` -> `Inter4` -> `Corner`(LINE,260,100): the `(Inter3,Inter4,Corner)` pivot;
  *     `Inter4 -> Corner` is a genuine 90 deg cold turn (TC4 dwell-1 + dwell-2 on one hop).
- *   - `final`(BLIND,95,70) -> `ChainA`/`ChainB`/`ChainC` -> `ChainD`(168,70): ADR-059 blind
- *     chain, all collinear heading 0. `ChainA..C` are non-final intermediates (chain active,
- *     no settle); `ChainD` is the final braked chained hop (chain retired at its dispatch,
- *     so `_chain.active` reads false at ITS arrival -> settles).
+ *   - `final`(BLIND,95,70) -> `ChainA`/`ChainB`/`ChainC` -> `ChainD`(168,70): ADR-080 folds
+ *     the four collinear hops into one braked move. There are no physical intermediate
+ *     arrivals to settle; the combined arrival at ChainD settles once.
  *   - `Inter1` -> `ProjL`(PROJECTION,100,40) -> `Inter2`: line-projection-line pass-through.
  *   - `position1`(BLIND,200,110) -> `Wall1`(RESET,165,139): BLIND dead-reckon into a RESET
  *     node; the wall interlude owns that boundary (TC6 / TC5b).
@@ -317,14 +316,11 @@ void test_TC2_line_pass_through_skips_settle()
 }
 
 // ===========================================================================================
-// TC3 — blind chain: the intermediate hops (`_chain.active`) NEVER settle; the FINAL chained
-//       braked hop (`ChainD`, chain retired at its own dispatch) DOES settle. Matrix rows:
-//       `BLIND_FORWARD, chain intermediate` -> no; `BLIND_FORWARD, non-chain` (the final
-//       chained hop reads chain inactive) -> YES.
+// TC3 — a coalesced blind run has no intermediate arrivals and settles once at its final stop.
 // ===========================================================================================
-void test_TC3_blind_chain_intermediates_skip_final_settles()
+void test_TC3_coalesced_blind_run_settles_once_at_final()
 {
-    TEST_SCOPE("TC3: blind-chain intermediates skip SETTLE; final chained hop (ChainD) settles");
+    TEST_SCOPE("TC3: coalesced blind run skips intermediate arrivals and settles at ChainD");
 
     const uint8_t nFinal = nodeByName("final");
     const uint8_t nA     = nodeByName("ChainA");
@@ -344,35 +340,13 @@ void test_TC3_blind_chain_intermediates_skip_final_settles()
     seatAt("final", 0);    // final->ChainA departs heading 0 == the seated facing (no pre-turn).
     PathTracker.goTo(nD).async();
 
-    // ChainA/B/C are collinear intermediates at heading 0. Retire each hop and peek the arrival
-    // state: an active chain routes straight to PLAN_NEXT_HOP (no settle), so the peek must NOT be
-    // SETTLE and the node must have advanced.
     const int16_t hw0 = hwYaw(0);
-
-    // --- Intermediate hop 0: final -> ChainA (chain active -> no settle). ---
     tickUntilBlindForward(hw0);
-    State s0 = retireBlindHopAndPeek(hw0);
-    ASSERT_EQ(Localization.getCurrentNode(), nA);
-    ASSERT_FALSE(s0 == State::SETTLE);    // chain intermediate: no dwell-1
-
-    // --- Intermediate hop 1: ChainA -> ChainB (chain active -> no settle). ---
-    tickUntilBlindForward(hw0);
-    State s1 = retireBlindHopAndPeek(hw0);
-    ASSERT_EQ(Localization.getCurrentNode(), nB);
-    ASSERT_FALSE(s1 == State::SETTLE);
-
-    // --- Intermediate hop 2: ChainB -> ChainC (chain active -> no settle). ---
-    tickUntilBlindForward(hw0);
-    State s2 = retireBlindHopAndPeek(hw0);
-    ASSERT_EQ(Localization.getCurrentNode(), nC);
-    ASSERT_FALSE(s2 == State::SETTLE);
-
-    // --- FINAL chained hop 3: ChainC -> ChainD. The chain retires at THIS hop's dispatch, so
-    //     `_chain.active` reads false at its arrival -> the braked stop DOES settle (dwell-1). ---
-    tickUntilBlindForward(hw0);
-    State s3 = retireBlindHopAndPeek(hw0);
+    ASSERT_EQ(Localization.getCurrentNode(), nFinal);
+    State arrival = retireBlindHopAndPeek(hw0);
     ASSERT_EQ(Localization.getCurrentNode(), nD);
-    ASSERT_EQ(s3 == State::SETTLE, true);    // final chained braked hop DOES settle
+    ASSERT_EQ(arrival == State::SETTLE, true);
+    ASSERT_TRUE(MiniR4.DriveDC.lastBrake);
     ASSERT_FALSE(PathTracker.hasFault());
 
     // Retire the dwell: ChainD is the goal, so the FSM leaves SETTLE and settles to IDLE.
@@ -1019,7 +993,7 @@ int main()
 
     test_TC1_braked_stop_enters_settle();
     test_TC2_line_pass_through_skips_settle();
-    test_TC3_blind_chain_intermediates_skip_final_settles();
+    test_TC3_coalesced_blind_run_settles_once_at_final();
     test_TC4_cold_turn_then_move_two_dwells();
     test_TC5a_goal_arrival_settles_before_idle();
     test_TC5b_first_plan_no_dwell1_but_dwell2_fires();

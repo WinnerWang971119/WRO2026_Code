@@ -1139,12 +1139,12 @@ def test_t11_return_to_node_marker_shape_and_ordering():
 def test_t11_declare_position_marker_and_node_change():
     """A ``declare_position`` op emits a declare marker and changes the sim node.
 
-    The op is a pure belief reset: it emits exactly one localization-lane event
-    of ``type == "declare_position"`` (the string T12 branches on) naming the
-    declared node, advances no keyframe / clock, and — because it re-anchored the
-    offset onto the (physically-unchanged) chassis — leaves no trace-end residual
-    ``drift_warn``. A downstream ``goto`` then plans FROM the declared node,
-    proving the belief actually moved.
+    It emits exactly one localization-lane event of ``type == "declare_position"``
+    (the string T12 branches on) naming the declared node, does not advance the
+    clock, snaps the chassis onto the node (ADR-081), and — because it cleared
+    the offset — leaves no trace-end residual ``drift_warn``. A downstream
+    ``goto`` then plans AND departs FROM the declared node, proving the belief
+    actually moved.
     """
     track = _build_quiet(
         _inline_trace(
@@ -2327,15 +2327,16 @@ def test_tc10_over_cap_raw_drive_under_best_effort_gate_proceeds_capped(monkeypa
 
 
 def test_tc11_declare_position_applies_node_change_and_clears_offset():
-    """TC11 (AC8): ``declare_position`` changes the sim's belief, not the chassis.
+    """TC11 (AC8, ADR-081): ``declare_position`` snaps the chassis to the node.
 
     A raw drive grows the offset off node ``A``; the operator then declares
-    the (unrelated) node ``C`` — a pure belief reset per T7's contract (node
-    change + offset clear, heading calibration untouched, NO chassis motion).
-    The marker is a zero-dwell event (the clock does not advance for it), the
-    trace-end residual is gone (the declare cleared the offset the raw drive
-    grew), and a following goto plans FROM ``C`` — proving the belief, not
-    just a label, actually changed.
+    the (unrelated) node ``C``. Per ADR-081 this is an operator ground-truth
+    re-anchor: the sim belief resets (node change + offset clear, heading
+    calibration untouched) AND the rendered chassis SNAPS onto ``C`` (a keyframe
+    lands on its coords). The marker is a zero-dwell event (the clock does not
+    advance for it), the trace-end residual is gone (the declare cleared the
+    offset the raw drive grew), and a following goto plans AND departs FROM
+    ``C`` — proving the belief, not just a label, actually changed.
     """
     track = _build_quiet(
         _inline_trace(
@@ -2360,6 +2361,15 @@ def test_tc11_declare_position_applies_node_change_and_clears_offset():
     assert declare_events[0]["t"] >= drive_t
     assert declare_events[0]["t"] == pytest.approx(goto_events[0]["t"], abs=_POSE_TOL)
     assert goto_events[0]["label"].startswith("C->")
+
+    # ADR-081: the declare SNAPS the rendered chassis onto node C -- a keyframe
+    # lands exactly on C's coordinates (reverses the original T11 belief-only
+    # rendering, which left the chassis on the drifted pose).
+    cx, cy = toy_field_data.NODES["C"]
+    assert any(
+        abs(kf["x"] - cx) < _POSE_TOL and abs(kf["y"] - cy) < _POSE_TOL
+        for kf in track.keyframes
+    ), "declare_position should snap a keyframe onto node C's coordinates"
 
     # No residual anywhere -- the declare cleared the offset the raw drive grew.
     assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
@@ -2525,13 +2535,13 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
        ``ACT_RETURN_FORWARD`` (dead-reckon, ``S`` is BLIND); the second
        triggers ``ACT_RETURN_STOP_AT_LINE`` (line-seek, ``A`` is LINE-typed and
        re-anchors back onto itself, so the trailing ``goto A`` needs no further
-       hop). Both must render their cruise plateau at ``cfg.speed_fast`` (90),
+       hop). Both must render their cruise plateau at ``cfg.speed_fast`` (80),
        matching ``PIPELINE_SPEED: FAST`` -- pre-fix, both rendered at
-       ``cfg.speed_normal`` (70) instead, conflating the return moves with the
+       ``cfg.speed_normal`` (65) instead, conflating the return moves with the
        un-tiered wall-depart default.
     2. ``_wall_depart_field_data`` drives a single ``goto R`` (``R`` typed
        ``reset``): the arrival auto-fires WALL_STOP -> REANCHOR -> WALL_DEPART.
-       ``ACT_WALL_DEPART`` must STILL render at ``cfg.speed_normal`` (70) despite
+       ``ACT_WALL_DEPART`` must STILL render at ``cfg.speed_normal`` (65) despite
        the SAME ``PIPELINE_SPEED: FAST`` field -- it mirrors the firmware's
        ``.setPower``-free wall-departure move, which never consults
        ``PIPELINE_CONFIG.speed`` at all.
@@ -2539,11 +2549,11 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
     cfg = default_config()
     fast_speed = SCALE_CM_S_PER_PWM * cfg.speed_fast
     normal_speed = SCALE_CM_S_PER_PWM * cfg.speed_normal
-    # Sanity-pin the current firmware Config values the plan cites (90 / 70) so
+    # Sanity-pin the current firmware Config values the plan cites (80 / 65) so
     # a future retune of ConfigDrive.h is caught here rather than silently
-    # changing what "renders at 90" means.
-    assert cfg.speed_fast == 90
-    assert cfg.speed_normal == 70
+    # changing what "renders at the FAST preset" means.
+    assert cfg.speed_fast == 80
+    assert cfg.speed_normal == 65
 
     # -- Return tags: ACT_RETURN_FORWARD (dead-reckon) + ACT_RETURN_STOP_AT_LINE (line-seek) --
     return_trace = Trace(

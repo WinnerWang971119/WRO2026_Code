@@ -1121,13 +1121,13 @@ static void test_TC4_seek_into_approaching_pivot_trims_overshoot()
     TEST_SCOPE("TC4: seek into an approaching pivot reduces overshoot by the trim (offset - trim)");
 
     // Approaching pivot active with trim=9.0: the seek overshoot becomes
-    // offset - trim = 12.02 - 9.0 = 3.02 cm (well above the 0.5 floor, so not
+    // offset - trim = 11.0 - 9.0 = 2.0 cm (well above the 0.5 floor, so not
     // clamped). This is the delta-short-of-node landing ADR-044 D1 requires.
     const SensorOvershootResolution r = resolveSensorOvershootTrim(
         Config::LINE_SENSOR_AXLE_OFFSET_CM, /*approachingTrimCm*/ 9.0f,
         Config::PIVOT_TRIM_MIN_DRIVE_CM);
 
-    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, 3.02f));
+    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, 2.0f));
     ASSERT_FALSE(r.clamped);
 }
 
@@ -1136,7 +1136,7 @@ static void test_TC4_seek_without_approaching_pivot_keeps_full_offset()
     TEST_SCOPE("TC4: seek with NO approaching pivot keeps the full default overshoot (AC2)");
 
     // No approaching pivot -> trim 0 -> overshoot stays the full default
-    // LINE_SENSOR_AXLE_OFFSET_CM = 12.02 cm, unchanged from the legacy behaviour
+    // LINE_SENSOR_AXLE_OFFSET_CM = 11.0 cm, unchanged from the legacy behaviour
     // (AC2: a departing-into-seek or plain seek hop is untouched).
     const SensorOvershootResolution r = resolveSensorOvershootTrim(
         Config::LINE_SENSOR_AXLE_OFFSET_CM, /*approachingTrimCm*/ 0.0f,
@@ -1151,7 +1151,7 @@ static void test_TC4_seek_rear_uses_rear_offset()
     TEST_SCOPE("TC4: a REAR seek rolls the REAR axle offset, not FRONT (#2 direction-resolve)");
 
     // A REAR 2-board seek resolves its overshoot from the REAR sensor-to-axle
-    // offset (7.68 cm), mirroring the LINE overshoot path — not the FRONT 12.02.
+    // offset (6.0 cm), mirroring the LINE overshoot path — not the FRONT 11.0.
     // A REAR seek never carries a pivot (pivots are FRONT-only in v1), so the trim
     // is 0 and the overshoot is the full REAR offset (no reduction, no clamp).
     const SensorOvershootResolution r = resolveSensorOvershootTrim(
@@ -1166,7 +1166,7 @@ static void test_TC4_seek_overbudget_trim_clamps_to_floor()
 {
     TEST_SCOPE("TC4: over-budget approaching trim clamps the seek overshoot to the floor");
 
-    // Pathological trim larger than the axle offset (15.588 > 12.02): the shared
+    // Pathological trim larger than the axle offset (15.588 > 11.0): the shared
     // subtract-and-clamp floors the overshoot at PIVOT_TRIM_MIN_DRIVE_CM = 0.5
     // and reports clamped=true so the dispatch can hard-fault (ADR-044 D4) — the
     // helper itself still returns the floored value; the firmware faults on it.

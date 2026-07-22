@@ -99,9 +99,9 @@ namespace Config
      * @note Consumer: `PathTracker`'s SETTLE state (ADR-061).
      */
 #ifndef HOP_SETTLE_MS_DEFAULT
-#define HOP_SETTLE_MS_DEFAULT 100
+#define HOP_SETTLE_MS_DEFAULT 200
 #endif
-    constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // TODO bench-tune
+    constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // Bench-tuned 2026-07-22.
 
     /**
      * @brief Tolerance (degrees) below which `PathTracker` skips an absolute turn dispatch.
@@ -110,7 +110,7 @@ namespace Config
      * colinear (e.g. mid-segment projection-node hand-off). 0.5 deg is well below the
      * `Drive.turnToYaw` resolvable range.
      */
-    constexpr float NAV_TURN_TOLERANCE_DEG = 0.5f;
+    constexpr float NAV_TURN_TOLERANCE_DEG = 10.0f;
 
     /**
      * @brief Whether PathTracker passes straight through collinear intersections
@@ -143,6 +143,32 @@ namespace Config
 #define PATH_PASS_THROUGH_ENABLED_DEFAULT true
 #endif
     constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
+
+    /**
+     * @brief Master enable for "a LINE pass-through trusts the line, not the drifted gyro"
+     *        (ADR-078).
+     *
+     * When `true` (default), on a collinear pass-through continuation into a LINE edge,
+     * `PathTracker::_dispatchTurnIfNeeded` suppresses the pre-edge yaw turn regardless of the
+     * live IMU-heading delta — the physical line is the heading authority and the live
+     * LineFollower's P+D washes out residual heading over the hop. This prevents accumulated
+     * IMU-yaw drift from breaking a geometry-classified pass-through into a stop-and-turn. When
+     * `false`, the historical yaw-vs-peek guard (ADR-023/ADR-052) applies and a drifted heading
+     * past `NAV_TURN_TOLERANCE_DEG` fires a real turn.
+     *
+     * @note Scoped to LINE pass-through only: a BLIND continuation has no line to correct
+     *       heading, so it still turns on live yaw. The return prologue is unaffected
+     *       (`_passThrough` is false there). LINE_LOST (#146) remains the safety net.
+     * @note Consumer: `PathTracker::_dispatchTurnIfNeeded`. Mirrored (as a value, inert — the
+     *       sim has no IMU drift) in `tools/path_planner/sim/runtime.py`.
+     * @note **Compile-time override:** `-DPATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=false`
+     *       for a bench A/B, same idiom as the other `_DEFAULT` hooks here.
+     */
+#ifndef PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT
+#define PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_PASS_THROUGH_TRUST_LINE_ENABLED =
+        PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT;
 
     /// Kill-switch for bidirectional line-following auto-selection.
     ///
@@ -641,32 +667,29 @@ namespace Config
                   "strictly positive; zero or negative would place belief on or past the wall.");
 
     // ---------------------------------------------------------------------------------------
-    // Blind-chain continuous motion (ADR-059) — consumed by `PathTracker`'s walk-ahead +
-    // `ChainSpeedPolicy.h`; mirrored in `tools/path_planner/sim/runtime.py` for parity.
+    // Blind-run coalescing (ADR-080) — consumed by `PathTracker`'s walk-ahead and mirrored
+    // in the Python sim for parity.
     //
-    // COUPLED SITES (all three constants below):
+    // COUPLED SITES (all four constants below):
     //   - `PathTracker`'s walk-ahead chain builder (decides how many hops to fold into one
     //     chained run and where the run buffer is sized).
-    //   - `ChainSpeedPolicy.h`'s forward/backward two-pass resolver (the `entryPwm` seed and
-    //     the per-hop `(startPwm, endPwm)` it emits assume the run stays inside these caps).
+    //   - the coalesced dispatch's fixed node buffer and summed-distance target.
     //   - `tools/path_planner/sim/runtime.py` (hand-mirrored copies of all three; a regex-grep
     //     parity test verifies they match this header — same idiom as `PATH_PASS_THROUGH_ENABLED`
     //     above).
     // ---------------------------------------------------------------------------------------
 
     /**
-     * @brief Master kill-switch for blind-node continuous-motion chaining.
+     * @brief Master kill-switch for blind-run coalescing.
      *
      * When `true` (default), `PathTracker` walks ahead across consecutive collinear BLIND
-     * hops and dispatches them as one chained run — `setStartSpeed`/`setEndSpeed` +
-     * `setBrake(false)` on every hop but the last — instead of braking to rest at each
-     * intermediate node. When `false`, PathTracker reverts to today's behavior: every blind
-     * hop is its own braked stop-and-go move, regardless of collinearity.
+     * hops with one resolved drive mode and speed tier, then dispatches one braked move over
+     * their summed distance. When `false`, every blind hop is its own braked stop-and-go
+     * move, regardless of collinearity.
      *
-     * @note Rollback knob: flip to `false` if blind chaining regresses on hardware (e.g. the
-     *       inter-hop boundary-carry subtraction under-corrects and the chain drifts off-node
-     *       over N hops). This is the single flag that restores the pre-ADR-059 behavior.
-     * @note Consumer: `PathTracker`'s walk-ahead chain builder (ADR-059).
+     * @note Rollback knob: flip to `false` if one-move blind runs regress on hardware. This
+     *       is the single flag that restores braked per-node dead reckoning.
+     * @note Consumer: `PathTracker`'s walk-ahead run builder (ADR-080).
      * @note The Python sim (`tools/path_planner/sim/runtime.py`) hand-mirrors this constant.
      *       A pytest verifies parity via regex grep on this header (same idiom as
      *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above).
@@ -684,7 +707,7 @@ namespace Config
     constexpr bool PATH_BLIND_CHAIN_ENABLED = PATH_BLIND_CHAIN_ENABLED_DEFAULT;
 
     /**
-     * @brief Maximum total run distance (cm) a blind chain may span before it is forced to
+     * @brief Maximum total run distance (cm) a blind run may span before it is forced to
      *        end (that hop brakes; a fresh chain re-forms after).
      *
      * Bounds how far the chassis dead-reckons without an intermediate braked correction.
@@ -696,8 +719,7 @@ namespace Config
      *       any physical collinear run on a WRO field) so the cap never binds in practice; if
      *       bench testing later shows it needs to be tighter, lower it then.
      * @note Consumer: `PathTracker`'s walk-ahead chain builder (caps the run BEFORE
-     *       dispatch) and `ChainSpeedPolicy.h` (the backward pass assumes the run fits this
-     *       cap). Mirrored in `tools/path_planner/sim/runtime.py` for parity.
+     *       dispatch). Mirrored in `tools/path_planner/sim/runtime.py` for parity.
      * @note Overflow is not a fault: a run exceeding this cap ends AT the cap (that hop is
      *       dispatched as an ordinary braked stop) and PathTracker logs the truncation over
      *       Serial; a new chain may re-form on the far side. In practice `MAX_CHAIN_HOPS`
@@ -720,11 +742,26 @@ namespace Config
     constexpr float PATH_BLIND_CHAIN_MAX_CM = PATH_BLIND_CHAIN_MAX_CM_DEFAULT;
 
     /**
+     * @brief Maximum endpoint-position error (cm) admitted into one coalesced blind run.
+     *
+     * The walk-ahead predicts every candidate node from the first hop's landing point and
+     * travel ray. A candidate whose Euclidean miss reaches or exceeds this corridor ends the
+     * run before that hop. This strict bound prevents several individually sub-tolerance bends
+     * from accumulating into a combined move whose single held heading cannot land on the
+     * authored endpoint.
+     */
+#ifndef PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM_DEFAULT
+#define PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM_DEFAULT 1.0f
+#endif
+    constexpr float PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM =
+        PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM_DEFAULT;
+
+    /**
      * @brief Compile-time cap on the number of hops a single blind chain run may contain.
      *
      * Sizes the fixed-size firmware run buffer `PathTracker` uses to hold the walked-ahead
-     * `hopDistCm[]` and resolved `ChainSpeedPolicy` output — a plain stack/member array, no
-     * heap allocation, so this constant is the array dimension, not a runtime-checked limit.
+     * node sequence — a plain member array, no heap allocation, so this constant is the array
+     * dimension, not a runtime-checked limit.
      *
      * @note Sizing rule: 8 comfortably covers the toy-field longest collinear blind run
      *       (bench-observed 3-4 hops) with headroom for a denser real-field layout, while
@@ -751,7 +788,7 @@ namespace Config
      *       must be applied target-wide (`target_compile_definitions`), never per-TU.
      */
 #ifndef MAX_CHAIN_HOPS_DEFAULT
-#define MAX_CHAIN_HOPS_DEFAULT 8
+#define MAX_CHAIN_HOPS_DEFAULT 16
 #endif
     constexpr uint8_t MAX_CHAIN_HOPS = MAX_CHAIN_HOPS_DEFAULT;
 

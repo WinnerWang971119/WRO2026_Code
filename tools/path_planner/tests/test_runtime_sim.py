@@ -218,42 +218,50 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     Post-T12, EDGE_LINE traversals on REAR hops emit ``ACT_LINE_REVERSE``
     instead of ``ACT_FOLLOW_INT`` but still trigger the LINE_OVERSHOOT
     FSM transition; the helper therefore matches either primitive name and
-    emits that hop's own board offset (ADR-035 reconciliation: FRONT 12.02
-    cm, REAR 7.68 cm -- previously both stale 5.0, which masked the
+    emits that hop's own board offset (ADR-035 reconciliation: FRONT 11.0
+    cm, REAR 6.0 cm -- previously both stale 5.0, which masked the
     per-board distinction and only worked while FRONT == REAR).
 
-    Parity limitation — pass-through fixtures only:
+    Pass-through awareness:
 
-    The helper unconditionally inserts ``ACT_LINE_OVERSHOOT``. The sim,
-    however, emits ``ACT_LINE_PASS`` at intermediate intersections where
-    the body-heading delta is below ``NAV_TURN_TOLERANCE_DEG``
-    (ADR-023 collinear pass-through). ``compile_path`` is pass-through
-    unaware — it never emits ``ACT_LINE_PASS`` — so any fixture that
-    triggers pass-through in the sim cannot use this helper for parity
-    comparison. TC18 fixtures are constructed to avoid pass-through by
-    construction (90° turns or 2-node paths). If a future TC18-style
-    fixture introduces collinear intermediate hops, the parity assertion
-    will fail with a confusing diff; the fix is fixture redesign, not a
-    helper change. See the assertion below for the loud-failure mode.
+    At an intermediate collinear junction the sim emits ``ACT_LINE_PASS``
+    (not ``ACT_LINE_OVERSHOOT``) when the body-heading delta is within
+    ``NAV_TURN_TOLERANCE_DEG`` (ADR-023 collinear pass-through). The
+    advance is identical to LINE_OVERSHOOT — only the tag differs. The
+    compiler encodes that same collinearity as the ABSENCE of a
+    ``turn_relative`` between two consecutive LINE hops (its turn-emission
+    gate is the same ``NAV_TURN_TOLERANCE_DEG``), so this helper mirrors
+    the sim with a one-step look-ahead: a LINE hop immediately followed by
+    another LINE hop is a pass-through (``ACT_LINE_PASS``); the final LINE
+    hop, or one followed by a real turn / blind hop, re-anchors
+    (``ACT_LINE_OVERSHOOT``). ``compile_path`` itself never emits
+    ``ACT_LINE_PASS`` — the assertion below guards that the INPUT is a
+    compiler sequence, not an already-interleaved sim one.
     """
     assert ACT_LINE_PASS not in (p[0] for p in primitives), (
         "_interleave_overshoot received a primitive sequence containing "
         "ACT_LINE_PASS. compile_path never emits this primitive, so the "
         "input could only be a sim-emitted sequence — but the helper is "
-        "designed for compile_path output. The fixture cannot be used "
-        "for compile_path↔sim parity until it is redesigned to avoid "
-        "pass-through (e.g. add a turn at every intermediate node, or "
-        "drop intermediate nodes entirely)."
+        "designed for compile_path output."
     )
     out: List[Primitive] = []
-    for prim in primitives:
+    n = len(primitives)
+    for i, prim in enumerate(primitives):
         out.append(prim)
         if prim[0] == ACT_FOLLOW_INT:
             # FRONT line hop: front board led, so roll the FRONT axle offset.
-            out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+            offset = LINE_SENSOR_AXLE_OFFSET_CM
         elif prim[0] == ACT_LINE_REVERSE:
             # REAR line hop: rear board led, so roll the REAR axle offset.
-            out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM))
+            offset = LINE_SENSOR_AXLE_OFFSET_REAR_CM
+        else:
+            continue
+        # Collinear pass-through iff the very next primitive is another LINE hop
+        # (the compiler left no turn between them, so |delta| <= NAV_TURN_TOLERANCE_DEG);
+        # the final line hop / a pre-turn / a pre-blind hop re-anchors instead.
+        nxt = primitives[i + 1] if i + 1 < n else None
+        is_passthrough = nxt is not None and nxt[0] in (ACT_FOLLOW_INT, ACT_LINE_REVERSE)
+        out.append((ACT_LINE_PASS if is_passthrough else ACT_LINE_OVERSHOOT, offset))
     return out
 
 
@@ -2555,19 +2563,13 @@ def test_pivot_tc17_non_pivot_route_through_pivot_node_drives_full_distance():
 
     prims = sim.go_to("Y")
 
-    # Full distance on BOTH hops -- no delta subtracted on a non-pivot route, and
-    # the collinear V->Y continuation needs no ACT_TURN_REL. ADR-059: U->V->Y is a
-    # collinear BLIND run of 2 hops, so the sim chains it into ONE continuous
-    # motion -- hop 0 carries the resolved (start=TSHAPE_START_SPEED, end=cruise)
-    # + chain=True, a blind_pass marks the non-braking node V, and the final hop
-    # brakes (end 0). The DISTANCES stay the full 60 cm (the TC17 no-trim intent);
-    # only the velocity endpoints + the pass marker are added by the chain.
+    # Full 120 cm combined distance -- no pivot delta is subtracted on this route.
+    # ADR-080 coalesces U->V->Y into one braked move carrying the actual cruise,
+    # cold-start seed, final node, and a blind_pass marker for intermediate V.
     assert prims == [
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
-         _runtime.TSHAPE_START_SPEED, _runtime.SPEED_NORMAL, True),
+        (ACT_FORWARD, pytest.approx(120.0, abs=1e-9),
+         _runtime.SPEED_NORMAL, _runtime.TSHAPE_START_SPEED, 0, True, "Y"),
         (ACT_BLIND_PASS, "V"),
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
-         _runtime.SPEED_NORMAL, 0, True),
     ]
     yx, yy = field.NODES["Y"]
     assert math.hypot(chassis.x_cm - yx, chassis.y_cm - yy) < _POSITION_TOL_CM
@@ -5254,8 +5256,8 @@ def test_w2a_blind_chain_breaks_at_tier_boundary():
     assert sim.localization.current_node() == "C"
 
 
-def test_w2a_same_tier_chains_across_mode_boundary():
-    """W2(a) control: two SAME-tier BLIND hops chain across a SYNC<->GYRO boundary.
+def test_w2a_same_tier_splits_at_mode_boundary():
+    """W2(a): two same-tier BLIND hops split at a SYNC<->GYRO boundary.
 
     ``A ->(NORMAL, SYNC_TSHAPE) B ->(NORMAL, GYRO_TSHAPE) C``: same resolved tier,
     different drive mode. The blind-chain rule restricts on SPEED tier ONLY, so
@@ -5277,27 +5279,58 @@ def test_w2a_same_tier_chains_across_mode_boundary():
     prims = sim.go_to("C")
     tags = [p[0] for p in prims]
 
-    # The mode boundary did not break the chain: B was passed without braking.
-    assert tags.count(ACT_BLIND_PASS) == 1
-    assert (ACT_BLIND_PASS, "B") in prims
-    # Both hops carry the chained 5-tuple velocity suffix (chain flag True).
+    # Each authored controller gets its own braked hop.
+    assert ACT_BLIND_PASS not in tags
     forwards = [p for p in prims if p[0] == ACT_FORWARD]
     assert len(forwards) == 2
-    assert all(len(p) == 5 and p[4] is True for p in forwards), forwards
+    assert all(len(p) == 2 for p in forwards), forwards
     assert sim.localization.current_node() == "C"
+
+
+def test_w2a_cumulative_sub_tolerance_bend_rejected_by_position_corridor():
+    """Pairwise 9-degree bends cannot accumulate into one held-heading move."""
+    hop = 40.0
+    nodes = {
+        "A": (0.0, 0.0),
+        "B": (hop, 0.0),
+        "C": (hop + hop * math.cos(math.radians(9.0)), hop * math.sin(math.radians(9.0))),
+        "D": (
+            hop + hop * math.cos(math.radians(9.0)) + hop * math.cos(math.radians(18.0)),
+            hop * math.sin(math.radians(9.0)) + hop * math.sin(math.radians(18.0)),
+        ),
+    }
+    fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=0.0)
+    g = nx.DiGraph()
+    for name, (x_cm, y_cm) in nodes.items():
+        g.add_node(name, type="blind", x_cm=x_cm, y_cm=y_cm)
+    names = ["A", "B", "C", "D"]
+    for i, heading in enumerate((0.0, 9.0, 18.0)):
+        u, v = names[i], names[i + 1]
+        g.add_edge(u, v, type=EDGE_BLIND, distance_cm=hop, heading_deg=heading)
+        g.add_edge(v, u, type=EDGE_BLIND, distance_cm=hop,
+                   heading_deg=(heading + 180.0) % 360.0)
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, _linear_next_hop(names), chassis)
+    sim.localization.zero_heading_from_current()
+    prims = sim.go_to("D")
+
+    assert ACT_BLIND_PASS not in [p[0] for p in prims]
+    assert len([p for p in prims if p[0] == ACT_FORWARD]) == 3
+    assert sim.localization.current_node() == "D"
 
 
 @pytest.mark.parametrize(
     "inbound_tier, outbound_tier, expected_seed",
     [
-        (SpeedTier.FAST, SpeedTier.FAST, 90),
-        (SpeedTier.FAST, SpeedTier.SLOW, 60),
-        (SpeedTier.SLOW, SpeedTier.FAST, 60),
+        (SpeedTier.FAST, SpeedTier.FAST, 80),
+        (SpeedTier.FAST, SpeedTier.SLOW, 50),
+        (SpeedTier.SLOW, SpeedTier.FAST, 50),
     ],
     ids=[
-        "FAST_into_FAST_seed_90",
-        "FAST_into_SLOW_clamped_60",
-        "SLOW_into_FAST_seed_60",
+        "FAST_into_FAST_seed_80",
+        "FAST_into_SLOW_clamped_50",
+        "SLOW_into_FAST_seed_50",
     ],
 )
 def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
@@ -5309,18 +5342,18 @@ def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
     ``A ->LINE(inbound_tier) B ->BLIND(outbound_tier) C`` collinear: the LINE
     pass-through at junction B keeps the follower live, so the B->C blind hop is
     PASS-THROUGH-SEEDED. Before the fix the sim modeled every captured cruise as
-    the hardcoded ``SPEED_NORMAL`` (70) regardless of the true inbound tier; now
+    the hardcoded ``SPEED_NORMAL`` (65) regardless of the true inbound tier; now
     the seed is ``min(_speed_tier_to_pwm(inbound_tier), _speed_tier_to_pwm(
     outbound_tier))`` -- the tier the follower actually left off at, clamped down
     so it never exceeds this hop's own cruise:
 
-    * FAST -> FAST: no clamp binds, seed = 90 (the un-clamped ``SPEED_NORMAL``-era
-      model would have produced 70 here -- non-vacuous).
-    * FAST -> SLOW: the clamp binds, seed = 60 (the SLOW cruise), not the inbound
-      90 (AC12's clamp direction, now with the true magnitude).
-    * SLOW -> FAST: the inbound tier (60) is already below this hop's FAST
-      cruise (90), so the clamp does not need to bind; seed = 60, not the
-      un-clamped ``SPEED_NORMAL``-era 70.
+    * FAST -> FAST: no clamp binds, seed = 80 (the un-clamped ``SPEED_NORMAL``-era
+      model would have produced 65 here -- non-vacuous).
+    * FAST -> SLOW: the clamp binds, seed = 50 (the SLOW cruise), not the inbound
+      80 (AC12's clamp direction, now with the true magnitude).
+    * SLOW -> FAST: the inbound tier (50) is already below this hop's FAST
+      cruise (80), so the clamp does not need to bind; seed = 50, not the
+      un-clamped ``SPEED_NORMAL``-era 65.
 
     Non-vacuous: asserting the exact ``expected_seed`` (not just a `<=` bound)
     rejects both the pre-fix hardcoded-NORMAL model and a clamp that binds in the
@@ -5351,48 +5384,48 @@ def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
 
     # The B->C blind hop is a lone pass-through-seeded hop (C is the goal), so it
     # rides the resolved (start_pwm, end_pwm, chain) suffix, chain False.
-    seeded = [p for p in prims if p[0] == ACT_FORWARD and len(p) == 5]
+    seeded = [p for p in prims if p[0] == ACT_FORWARD and len(p) == 6]
     assert len(seeded) == 1, prims
-    start_pwm = seeded[0][2]
+    start_pwm = seeded[0][3]
 
     assert start_pwm == expected_seed
     assert sim.localization.current_node() == "C"
 
 
 def test_w2c_per_tier_blind_cruise_resolves_to_preset():
-    """W2(c): resolve_speed -> _speed_tier_to_pwm maps SLOW->60 and FAST->90.
+    """W2(c): resolve_speed -> _speed_tier_to_pwm maps SLOW->50 and FAST->80.
 
     The direct pin on the sim's per-edge blind cruise resolution -- the exact
     composition the dispatch (``cruise_mag = _speed_tier_to_pwm(resolve_speed(
     edge))``) and the chain walk-ahead both use. ADR-064 blind speed reuses the
-    line presets (SLOW/NORMAL/FAST = 60/70/90).
+    line presets (SLOW/NORMAL/FAST = 50/65/80).
     """
-    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.SLOW})) == 60
-    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.NORMAL})) == 70
-    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.FAST})) == 90
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.SLOW})) == 50
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.NORMAL})) == 65
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.FAST})) == 80
     # Tie the literals to the module's Config mirrors so a retune moves together.
-    assert _runtime.SPEED_SLOW == 60
-    assert _runtime.SPEED_FAST == 90
+    assert _runtime.SPEED_SLOW == 50
+    assert _runtime.SPEED_FAST == 80
 
 
 @pytest.mark.parametrize(
     "tier, expected_cruise",
     [
-        (SpeedTier.SLOW, 60),
-        (SpeedTier.FAST, 90),
+        (SpeedTier.SLOW, 50),
+        (SpeedTier.FAST, 80),
     ],
-    ids=["SLOW_cruise_60", "FAST_cruise_90"],
+    ids=["SLOW_cruise_50", "FAST_cruise_80"],
 )
 def test_w2c_per_tier_blind_cruise_drives_chain_at_preset(tier, expected_cruise):
     """W2(c): a same-tier BLIND chain cruises at its resolved per-tier PWM.
 
     A 3-hop collinear chain of one tier is folded into a single continuous run;
     the peak commanded PWM magnitude across the emitted chain suffix is the run
-    cruise, which must equal the tier's resolved preset (SLOW=60, FAST=90) -- NOT
-    the hardcoded NORMAL (70) blind speed used before ADR-064.
+    cruise, which must equal the tier's resolved preset (SLOW=50, FAST=80) -- NOT
+    the hardcoded NORMAL (65) blind speed used before ADR-064.
 
     Non-vacuous: if per-edge blind speed regressed to a constant NORMAL, both the
-    SLOW and FAST chains would peak at 70 -- failing the 60 / 90 assertion.
+    SLOW and FAST chains would peak at 65 -- failing the 50 / 80 assertion.
     """
     sim, _chassis = _collinear_blind_chain_sim(
         [{"speed": tier}, {"speed": tier}, {"speed": tier}]
@@ -5401,10 +5434,9 @@ def test_w2c_per_tier_blind_cruise_drives_chain_at_preset(tier, expected_cruise)
     prims = sim.go_to("D")
 
     forwards = [p for p in prims if p[0] == ACT_FORWARD]
-    assert len(forwards) == 3
-    assert all(len(p) == 5 for p in forwards), forwards
-    # Peak commanded magnitude across every hop's (start_pwm, end_pwm) == cruise.
-    pwm_mags = [abs(value) for p in forwards for value in (p[2], p[3])]
-    assert max(pwm_mags) == expected_cruise
+    assert len(forwards) == 1
+    assert len(forwards[0]) == 7
+    assert forwards[0][2] == expected_cruise
+    assert forwards[0][5] is True
     assert expected_cruise == _runtime._speed_tier_to_pwm(tier)
     assert sim.localization.current_node() == "D"

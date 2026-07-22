@@ -176,6 +176,42 @@ public:
     bool readMosaicRaw();
 
     // -----------------------------------------------------------------------------------------
+    // Injection (bench-test / camera-failure fallback seam)
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * @brief Latch a caller-supplied mosaic as if `readMosaic()` had succeeded — NO camera read.
+     *
+     * Copies @p colors into the colour latch, fills the raw-hue latch with a representative hue per
+     * colour (the midpoint of the matching `Config::HUE_BANDS` entry; colours with no chromatic band
+     * — device-achromatic `WHITE`, the bench-TODO `RED`, and `UNKNOWN` — latch
+     * `Config::VISION_RAW_HUE_NONE`), marks the module read (`_hasRead = true`), and clears any
+     * latched fault. `getColor()` / `getRawHue()` then return the injected frame exactly as they
+     * would after a real read, so the whole downstream mission (mosaic sort, …) runs unchanged
+     * without ever driving to an observation site or reading the HUE12.
+     *
+     * Two intended uses:
+     *   1. **Bench testing** — skip the drive-to-spot + real read; hand the mission a canned mosaic
+     *      (`Vision.fakeRead({RED, BLUE, GREEN, ...})`).
+     *   2. **Camera-failure fallback** — inject a mosaic read off the field by eye when the HUE12 is
+     *      dead, so a colour-consuming mission can still run.
+     *
+     * @param colors The `Config::VISION_CELL_COUNT` cell colours to latch, cell-indexed (0..N-1).
+     *               A braced temporary binds directly (`fakeRead({...})`); a named array works too.
+     * @return `true` always — an explicit injection cannot "fail". The caller vouches for @p colors,
+     *         so this does NOT apply the strict UNKNOWN guard `readMosaic()` uses: an injected
+     *         `UNKNOWN` cell is latched and reported truthfully rather than faulting.
+     *
+     * @note **Explicit-only — never an automatic fallback.** Nothing in `readMosaic()` calls this;
+     *       a real read still faults loudly on failure (ADR-037). Silently substituting fake colour
+     *       would let the robot sort with false confidence, so the substitution stays a deliberate
+     *       operator call.
+     * @note Unlike `readMosaic()` this touches NO UART and does not block. There is no camera frame
+     *       to be corrupted by motion, so the idle-chassis precondition does not apply.
+     */
+    bool fakeRead(const Config::Color (&colors)[Config::VISION_CELL_COUNT]);
+
+    // -----------------------------------------------------------------------------------------
     // Getters (pure, safe-sentinel)
     // -----------------------------------------------------------------------------------------
 
@@ -340,6 +376,20 @@ private:
      * @return As the public wrappers document.
      */
     bool _readMosaic(bool diagnostic);
+
+    /**
+     * @brief Representative raw hue for a fake-injected cell of colour @p color (used by `fakeRead`).
+     *
+     * Returns the midpoint of the matching `Config::HUE_BANDS` entry so a fake cell's `getRawHue()`
+     * stays consistent with `VisionFrame::classifyHue()` for the banded colours (YELLOW / GREEN /
+     * BLUE). Colours with no chromatic band — device-achromatic `WHITE`, the bench-TODO `RED`, and
+     * `UNKNOWN` — have no representative hue and return `Config::VISION_RAW_HUE_NONE`.
+     *
+     * @param color The injected cell colour.
+     * @return A band-midpoint hue for a banded colour, else `Config::VISION_RAW_HUE_NONE`.
+     * @note Pure and stateless — declared `static`.
+     */
+    static uint8_t _canonicalHue(Config::Color color);
 
     Config::Color _colors[Config::VISION_CELL_COUNT];   ///< Per-cell colour latch. Zeroed by ctor; updated only on a successful read.
     uint8_t       _rawHue[Config::VISION_CELL_COUNT];   ///< Per-cell raw hue latch. Zeroed by ctor; updated only on a successful read.

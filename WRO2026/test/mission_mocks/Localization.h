@@ -63,6 +63,27 @@ public:
         lastDeclaredNode = nodeId;
         declareCount++;
     }
+
+    /**
+     * @brief Snap the current node by name — no-op shadow (string overload).
+     *
+     * Mirrors the real `bool declarePosition(const char*)`, reachable from a
+     * `Tasks.cpp` task body compiled into this target. Deliberately records
+     * nothing: the recording fields stay keyed only to the `uint8_t` calls that
+     * `Mission.cpp`'s recovery verb makes and the tests assert on.
+     * @return Always `true`; the return value is unused by the mission tests.
+     */
+    bool declarePosition(const char* /*nodeName*/) { return true; }
+
+    /**
+     * @brief World->IMU yaw conversion — identity shadow.
+     *
+     * Heading math is not modelled here (the mission-dispatch tests assert task /
+     * queue behaviour, not heading values). Present only so a `Tasks.cpp` task body
+     * that calls `Localization.toImuYaw(...)` links against this shadow instead of
+     * dragging in the real translation unit (Drive / MatrixMiniR4 / IMU chain).
+     */
+    int16_t toImuYaw(float worldHeadingDeg) const { return (int16_t) worldHeadingDeg; }
 };
 
 // Single global instance — `inline` (force-included only into `test_mission_dispatch`;

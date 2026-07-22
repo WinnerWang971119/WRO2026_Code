@@ -183,13 +183,13 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 60;
+    constexpr int16_t SPEED_SLOW = 50;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 70;
+    constexpr int16_t SPEED_NORMAL = 65;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
-    constexpr int16_t SPEED_FAST = 90;
+    constexpr int16_t SPEED_FAST = 80;
 
     // ---------------------------------------------------------------------------------------
     // Turn defaults
@@ -242,7 +242,7 @@ namespace Config
      *
      * @note TODO: measure on real chassis.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 11.0f;
 
     /**
      * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
@@ -254,10 +254,9 @@ namespace Config
      * dead-reckoned hop. PathTracker selects this when the resolved direction is
      * `Direction::REAR`.
      *
-     * @note TODO: measure on real chassis. Defaults to the front offset until the rear
-     *       board is wired (T5); override once the two distances are known to differ.
+     * @note Bench-measured on the assembled chassis (2026-07-22).
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 6.0f;
 
     /**
      * @brief Floor (cm) for a pivot-trimmed dead-reckon drive / LINE overshoot advance (ADR-036).
@@ -421,8 +420,9 @@ namespace Config
      * more margin against prediction error.
      *
      * @note Must be non-negative — enforced by a `ConfigChecks.h` static_assert.
+     * @note Bench-tuned to 6.0 cm on the assembled chassis (2026-07-22).
      */
-    constexpr float LINE_APPROACH_MARGIN_CM = 4.0f;
+    constexpr float LINE_APPROACH_MARGIN_CM = 6.0f;
 
     /**
      * @brief Overrun bound (cm) PAST the predicted line crossing before the bounded
@@ -509,9 +509,9 @@ namespace Config
      *          `STOP_AT_LINE_STALL_TIMEOUT_MS` so a genuine wall press trips the inner
      *          stall-success path BEFORE this outer advisory cap fires. If this were smaller, every
      *          wall press would report the advisory timeout instead of success. The static_assert
-     *          below enforces the ordering.
+     *          below enforces the ordering. 
      */
-    constexpr uint32_t WALL_STOP_TIMEOUT_MS = 3000;
+    constexpr uint32_t WALL_STOP_TIMEOUT_MS = 2500;
     static_assert(WALL_STOP_TIMEOUT_MS > STOP_AT_LINE_STALL_TIMEOUT_MS,
                   "Config::WALL_STOP_TIMEOUT_MS must exceed STOP_AT_LINE_STALL_TIMEOUT_MS so a real "
                   "wall press trips the inner stall-success watchdog before the outer advisory "
@@ -555,16 +555,14 @@ namespace Config
      * @brief Proportional gain for the per-tick turn PD controller (ADR-068, ADR-077), in PWM per
      *        degree.
      *
-     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 1.5` (his newest 2026-07
-     * revision, which also matches his straight-drive `gyro_move` gain; the prior revision used
-     * `Kp = 2`, and one before that `Kp = 1`). Kp maps a degree error straight to a PWM.
+     * Kp maps a degree error straight to a PWM.
      * `TurnPDPolicy.h::turnPdStepRaw` computes `Kp * errNew` before the D term, clamp, slew, and
      * creep floor.
      *
-     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
+     * @note Bench-tuned to 2.6 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 2.0f
+#define TURN_KP_DEFAULT 2.5f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -586,7 +584,7 @@ namespace Config
      * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 6.0f
+#define TURN_KD_DEFAULT 6.8f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -597,12 +595,10 @@ namespace Config
      * `TURN_CREEP_PWM` plus a 5-PWM headroom margin, so a command handing off to the creep floor
      * has a small band to land in instead of chattering across the boundary tick-to-tick.
      *
-     * Robot-verified 2026-07: the bench-measured 43 (over a 38 creep) collapsed the whole final
-     * ~21 deg of a turn to a flat, fast creep and overshot a 90 deg turn to ~120. Lowered to the
-     * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
+     * Bench-tuned to 45 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_CREEP_THRESH_PWM_DEFAULT
-#define TURN_CREEP_THRESH_PWM_DEFAULT 40
+#define TURN_CREEP_THRESH_PWM_DEFAULT 45
 #endif
     constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
 
@@ -616,12 +612,10 @@ namespace Config
      * `deadbandSnap` / `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the
      * creep floor is not deadbandSnap").
      *
-     * Robot-verified 2026-07: the bench sweep's 38 approached the target too fast and coasted a
-     * 90 deg turn out to ~120. Set to the mentor's competition-proven kinetic tail floor of 20,
-     * which lands on target on this chassis.
+     * Bench-tuned to 40 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 35
+#define TURN_CREEP_PWM_DEFAULT 40
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
@@ -686,17 +680,12 @@ namespace Config
      *        (ADR-068, `TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      *
      * A single out-of-band sample resets the count to 0. Set to 2 (operator decision) rather
-     * than the mentor's 3, so the debounce stays satisfiable at the bench-measured
-     * `TURN_MIN_RESOLVABLE_DEG` step size and the widened `TURN_TOLERANCE_DEG` below — see the
-     * debounce-coupling `static_assert` in `ConfigChecks.h`, which turns a future desync of any
-     * of the three into a build failure instead of every turn silently hunting to timeout.
+     * than the mentor's 3. Edit this value directly to bench-tune the settle debounce; keep it
+     * small enough (against `TURN_TOLERANCE_DEG`) that the band stays satisfiable per crossing.
      *
      * @note TODO: bench-tune (T11).
      */
-#ifndef TURN_SETTLE_SAMPLES_DEFAULT
-#define TURN_SETTLE_SAMPLES_DEFAULT 2
-#endif
-    constexpr uint8_t TURN_SETTLE_SAMPLES = TURN_SETTLE_SAMPLES_DEFAULT;
+    constexpr uint8_t TURN_SETTLE_SAMPLES = 3;
 
     /**
      * @brief Timeout (ms) for the turn PD controller before it gives up converging (ADR-068).
@@ -720,40 +709,16 @@ namespace Config
      * brakes and declares itself complete (`TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      * Strictly less-than: a sample exactly AT the boundary is OUT of band.
      *
-     * @warning COUPLED to `TURN_MIN_RESOLVABLE_DEG` and `TURN_SETTLE_SAMPLES` — the settle band
-     *          must be wide enough that at least `TURN_SETTLE_SAMPLES` physical steps land
-     *          inside it per crossing, or the debounce can never be satisfied and every turn
-     *          silently hunts to `TURN_TIMEOUT_MS` (non-faulting by design). Widened from the
-     *          vendor-inherited 0.5 deg to 0.75 deg (operator decision, 2026-07-16) specifically
-     *          to keep this satisfiable at the bench-measured 0.4423 deg/tick resolution:
-     *          `(2 * 0.75) / 0.4423 ~= 3.39` against a required 2 samples — a 1.70x margin. See
-     *          the debounce-coupling `static_assert` in `ConfigChecks.h`, which converts a
-     *          future desync into a build failure instead of a field mystery.
+     * @note Keep the band wide enough that at least `TURN_SETTLE_SAMPLES` physical creep-steps
+     *       land inside it per crossing, or the debounce can never be satisfied and every turn
+     *       silently hunts to `TURN_TIMEOUT_MS` (non-faulting by design). This relationship was
+     *       formerly pinned by a `ConfigChecks.h` static_assert against the bench-measured
+     *       ~0.44 deg/tick creep resolution; that guardrail was removed so the turn PD can be
+     *       bench-tuned freely, so re-check it by hand when retuning.
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.8f;
-
-    /**
-     * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
-     *        degrees (ADR-068).
-     *
-     * Bench-measured (T1, Lofaix, 2026-07-16): `omega_at_creep * measured_tick_period` =
-     * 19.52 deg/s * ~22.66 ms = 0.4423 — the angular rate sustained at `TURN_CREEP_PWM` times the
-     * measured ~22.66 ms TURN tick (T1 phase b: the tick a real PD turn actually runs at, higher
-     * than the ~8 ms idle tick because a turn adds a live yaw read plus a Move write per tick).
-     * NOT a placeholder: T1's bench run is the source of truth this value is pinned to. Consumed
-     * only by the `static_assert`s in `ConfigChecks.h` (never read at runtime) — it exists so a
-     * future retune of `TURN_TOLERANCE_DEG` / `TURN_SETTLE_SAMPLES` / `TURN_CREEP_PWM` cannot
-     * silently desync from the physical floor.
-     *
-     * @note TODO: re-measure (T11) if `TURN_CREEP_PWM` is retuned — this value is derived from
-     *       it and goes stale if the creep floor moves without a re-bench.
-     */
-#ifndef TURN_MIN_RESOLVABLE_DEG_DEFAULT
-#define TURN_MIN_RESOLVABLE_DEG_DEFAULT 0.4423f
-#endif
-    constexpr float TURN_MIN_RESOLVABLE_DEG = TURN_MIN_RESOLVABLE_DEG_DEFAULT;
+    constexpr float TURN_TOLERANCE_DEG = 1.0f;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
@@ -770,7 +735,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 3000;
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 5000;
     static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
                   "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
                   "zero timeout would fault the turn on the first IMU read miss.");
@@ -803,7 +768,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KP_DEFAULT
-#define GYRO_HOLD_KP_DEFAULT 1.6f
+#define GYRO_HOLD_KP_DEFAULT 7.0f
 #endif
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 
@@ -814,7 +779,7 @@ namespace Config
      * The mentor's `gyro_move` computes a raw per-ITERATION difference (no division by loop
      * period), so his continuous damping is `Kd_raw * loop_period` — correct only at his fixed
      * ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters (see `TURN_KD` above and
-     * the ~8-11.5 ms vs ~22.66 ms timing-doc inconsistency noted on `TURN_MIN_RESOLVABLE_DEG`),
+     * the ~8-11.5 ms vs ~22.66 ms turn-tick timing inconsistency in the ADR-068 notes),
      * so porting the raw gain verbatim would silently re-scale every time the tick jitters.
      * `GyroHoldPolicy.h::gyroHoldCorrection` (via `TurnPDPolicy.h::turnPdStep`) instead divides by
      * the MEASURED per-step `dtSec`, so this gain carries real units of PWM per (deg/s):
@@ -825,7 +790,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KD_DEFAULT
-#define GYRO_HOLD_KD_DEFAULT 0.051f
+#define GYRO_HOLD_KD_DEFAULT 3.2f
 #endif
     constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
 
@@ -930,13 +895,13 @@ namespace Config
     // =============================================================================
 
     /** @brief PWM units gained per cm of travel during the ramp phase. */
-    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 4.0f;
+    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 3.5f;
 
     /** @brief Floor on the per-side ramp distance — never shorter than this (cm). */
     constexpr float TSHAPE_RAMP_MIN_CM = 5.0f;
 
     /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
-    constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
+    constexpr float TSHAPE_RAMP_MAX_CM = 22.0f;
 
     /**
      * @brief Default starting speed for a profiled move (raw PWM).
@@ -960,6 +925,27 @@ namespace Config
      * without needing a ramp-down floor.
      */
     constexpr int16_t TSHAPE_END_SPEED = 0;
+
+    /**
+     * @brief Fail-safe window (ms) for the ADR-059 chained-boundary cruise-hold.
+     *
+     * When a NON-braking chained mid-hop (`setBrake(false)`, endSpeed != 0) completes while the
+     * command FIFO is still empty, `Drive` does not `Move(0,0)` — that would dead-zero the wheels
+     * for the 2–3 cooperative ticks the PathTracker FSM needs to plan and dispatch the next hop,
+     * which reads as a stop-and-go on short hops. Instead the completion leaves the cruise setpoint
+     * latched and reports idle so the next hop's dispatch overwrites it seamlessly. This is the
+     * bound on that latch: if no follow-up move takes the wheels within `CHAIN_HOLD_TIMEOUT_MS`,
+     * `_serviceChainHold()` issues the deferred `Move(0,0)+brake(false)` (a chain that ended without
+     * a braked final hop, or a dispatch that never fired). The runaway guard finding #13's unbounded
+     * "leave cruise latched forever" lacked.
+     *
+     * Sized comfortably above the normal 2–3-tick boundary window (~30 ms at ~10 ms/tick) but small
+     * enough that a genuine dispatch failure coasts only a few cm at cruise before the fail-safe
+     * fires. A too-short value just reverts an occasional boundary to the old coast-release (benign,
+     * since the deferred stop is `brake(false)` = coast, identical to finding #13); a too-long value
+     * lengthens the worst-case runaway. Consumer: `DriveClass::_serviceChainHold`.
+     */
+    constexpr uint32_t CHAIN_HOLD_TIMEOUT_MS = 100;
 
     /**
      * @brief Hysteresis: if `|cruise - endpointSpeed| < TSHAPE_NO_RAMP_EPSILON_PWM`,

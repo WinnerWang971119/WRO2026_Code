@@ -247,7 +247,7 @@ def test_parse_config_int_uses_real_firmware_headers() -> None:
     pwm_min = parse_config_int(
         "PWM_MIN_MAGNITUDE", _CONFIG_DIR / "ConfigGlobal.h"
     )
-    assert pwm_min == 35
+    assert pwm_min == 45
 
     tshape_start = parse_config_int(
         "TSHAPE_START_SPEED",

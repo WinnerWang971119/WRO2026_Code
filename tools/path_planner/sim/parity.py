@@ -118,12 +118,11 @@ from tools.path_planner.sim.runtime import (
 )
 
 #: Expected ``schema_version`` on every ``goal_start`` framing record. The C++
-#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=3``; any mismatch on load
-#: is a hard, loud failure (a desynced emitter vs loader). Bumped 2 -> 3 for the
-#: issue-#156 / ADR-069 parity v3 wire schema: the two LINE-follow records gain a
-#: ``follow_mode`` field and rename the historically-misnamed ``line_mode`` (which
-#: has always held the resolved speed tier) to ``speed``.
-PARITY_SCHEMA_VERSION: int = 3
+#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=4``; any mismatch on load
+#: is a hard, loud failure (a desynced emitter vs loader). Bumped 3 -> 4 for the
+#: ADR-080 blind-run contract: ``blind_dead_reckon`` gains required ``node`` and
+#: ``cruise_pwm`` fields. The v3 LINE-follow field changes remain in force.
+PARITY_SCHEMA_VERSION: int = 4
 
 
 __all__ = [
@@ -228,7 +227,9 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
     "blind_dead_reckon": {
         "reverse": bool,
         "drive_mode": str,
+        "node": str,
         "dist_cm": float,
+        "cruise_pwm": int,
         "start_pwm": int,
         "end_pwm": int,
         "chain": bool,
@@ -854,7 +855,9 @@ def _make_stop_at_line_seek(
 def _make_blind_dead_reckon(
     reverse: bool,
     drive_mode: str,
+    node: str,
     dist_cm: float,
+    cruise_pwm: int,
     start_pwm: int,
     end_pwm: int,
     chain: bool,
@@ -871,7 +874,9 @@ def _make_blind_dead_reckon(
         {
             "reverse": bool(reverse),
             "drive_mode": drive_mode,
+            "node": str(node),
             "dist_cm": float(dist_cm),
+            "cruise_pwm": int(cruise_pwm),
             "start_pwm": int(start_pwm),
             "end_pwm": int(end_pwm),
             "chain": bool(chain),
@@ -1095,38 +1100,52 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             # endpoints are a load-bearing knob — never dropped to a default that
             # differs from the firmware's emitted value.)
             suffix_at = 4 if reverse else 2
-            if len(prim) > suffix_at + 2:
-                start_pwm = int(prim[suffix_at])
-                end_pwm = int(prim[suffix_at + 1])
-                chain = bool(prim[suffix_at + 2])
+            if len(prim) > suffix_at + 3:
+                cruise_pwm = int(prim[suffix_at])
+                start_pwm = int(prim[suffix_at + 1])
+                end_pwm = int(prim[suffix_at + 2])
+                chain = bool(prim[suffix_at + 3])
             else:
                 chain = False
+                cruise_mag = _speed_tier_to_pwm(
+                    resolve_speed(hops[hop_idx].edge, cfg)
+                )
+                cruise_pwm = -cruise_mag if reverse else cruise_mag
                 if decision.drive_mode == BlindMode.RAW_FLAT:
-                    cruise_mag = _speed_tier_to_pwm(
-                        resolve_speed(hops[hop_idx].edge, cfg)
-                    )
-                    cruise = -cruise_mag if reverse else cruise_mag
-                    start_pwm = cruise
-                    end_pwm = cruise
+                    start_pwm = cruise_pwm
+                    end_pwm = cruise_pwm
                 else:
                     start_pwm = -TSHAPE_START_SPEED if reverse else TSHAPE_START_SPEED
                     end_pwm = 0
 
+            node = (
+                str(prim[1])
+                if (tag == ACT_BLIND_REVERSE and chain)
+                else (
+                    str(prim[-1])
+                    if (tag == ACT_FORWARD and chain and len(prim) >= 7)
+                    else hops[hop_idx].v
+                )
+            )
             records.append(
                 _make_blind_dead_reckon(
-                    reverse, drive_mode, dist_cm, start_pwm, end_pwm, chain
+                    reverse, drive_mode, node, dist_cm, cruise_pwm,
+                    start_pwm, end_pwm, chain
                 )
             )
             hop_idx += 1
 
         elif tag == ACT_BLIND_PASS:
-            # (tag, node) — ADR-059 blind-chain NON-braking mid-hop boundary
-            # marker. It carries NO motion of its own (the chained
-            # ACT_FORWARD/ACT_BLIND_REVERSE hop already advanced onto `node` and
-            # advanced `hop_idx`), so this records `blind_pass` WITHOUT touching
-            # `hop_idx`. Sits between the two adjacent hops' `blind_dead_reckon`
-            # records, mirroring the firmware `_ptEmitBlindPass` stream order.
+            # (tag, node) — ADR-080 coalesced-run intermediate-node marker. The
+            # ONE combined ACT_FORWARD/ACT_BLIND_REVERSE record advanced `hop_idx`
+            # by 1 (for hop 0); each intermediate node the run passed is ANOTHER
+            # hop consumed, so this advances `hop_idx` too. Over a run of `N` hops
+            # that is 1 (the combined record) + (N-1) passes == N, keeping `hop_idx`
+            # aligned with `hops[]` for the record AFTER the run. Carries no motion
+            # of its own; sits after the run's `blind_dead_reckon`, mirroring the
+            # firmware `_ptEmitBlindPass` stream order.
             records.append(_make_blind_pass(prim[1]))
+            hop_idx += 1
 
         elif tag == ACT_WALL_STOP:
             # (tag, node, axis_idx, wall_coord)
@@ -1334,12 +1353,15 @@ def integrate_pose(
             # non-reset pass-through node).
             pass
         elif kind == "blind_pass":
-            # ADR-059: a blind-chain NON-braking boundary marker. The chained
-            # `blind_dead_reckon` hop that precedes it already advanced onto (and
-            # re-anchored at) this node, so the pass marker is a pose NO-OP — like
-            # `heading_reset`, it changes nothing in (x, y, heading) and does NOT
-            # advance the hop cursor (it is a boundary, not a hop).
-            pass
+            # ADR-080: a coalesced-run intermediate-node marker. The ONE combined
+            # `blind_dead_reckon` already forwarded the chassis the whole run
+            # distance (landing at the final node) and advanced `hop_cursor` by 1
+            # for hop 0, so this marker is a pose NO-OP — like `heading_reset`, it
+            # changes nothing in (x, y, heading). But each intermediate node the run
+            # passed is ANOTHER hop in the per-hop `node_sequence`, so it DOES
+            # advance the cursor: 1 (combined record) + (N-1) passes == N, keeping
+            # `hop_cursor` aligned for any snap-consuming record after the run.
+            hop_cursor += 1
         else:
             raise ParitySchemaError(
                 f"integrate_pose: unhandled record kind {kind!r}"

@@ -195,7 +195,8 @@ EventTraceClass EventTrace;
 /// @brief Recording Manipulator mock singleton.
 ManipulatorClass Manipulator;
 
-/// @brief No-op Localization mock singleton (Mission.declarePosition target).
+/// @brief Recording Localization mock singleton (records declare_position via
+///        its declarePosition(uint8_t) funnel; Mission.declarePosition target).
 LocalizationClass Localization;
 
 /// @brief Recording Vision mock singleton — dump-only.

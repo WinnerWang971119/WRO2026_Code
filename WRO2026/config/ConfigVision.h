@@ -236,7 +236,7 @@ namespace Config
      */
 #pragma push_macro("WHITE")
 #undef WHITE
-    constexpr Color VISION_MASK_FALLBACK_COLOR = Color::WHITE;   // must be a wall station colour
+    constexpr Color VISION_MASK_FALLBACK_COLOR = Color::GREEN;   // must be a wall station colour
 #pragma pop_macro("WHITE")
 
     /**

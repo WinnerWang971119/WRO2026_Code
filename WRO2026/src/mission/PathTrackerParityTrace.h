@@ -11,7 +11,7 @@
  * this header is empty there and every trace call site in PathTracker.cpp compiles
  * to nothing — the binary is byte-for-byte behaviorally identical. Only the
  * dedicated parity-dump target defines `PT_PARITY_TRACE` (with
- * `PARITY_SCHEMA_VERSION=3`).
+ * `PARITY_SCHEMA_VERSION=4`).
  *
  * When enabled, `pt_parity::emit(line)` writes one NDJSON record line to stdout.
  * PathTracker.cpp builds the per-hop records and calls it at each FSM commit point;
@@ -20,40 +20,43 @@
  * by the record builders so the text is stable for the cross-language comparator.
  *
  * ===========================================================================================
- * ADR-059 wire schema — the blind-chain records (firmware side; `sim/parity.py` mirrors
- * these field sets byte-for-byte in `TRACE_RECORD_FIELDS`, which is STRICT: an unknown OR
- * missing field of a known kind raises `ParitySchemaError`, so both sides must land the
- * field-set bump together).
+ * ADR-080 wire schema — the blind-run records (firmware side; `sim/parity.py` mirrors these
+ * field sets byte-for-byte in `TRACE_RECORD_FIELDS`, which is STRICT: an unknown OR missing
+ * field of a known kind raises `ParitySchemaError`). ADR-080 (blind-run coalescing) bumps the
+ * schema to v4: `blind_dead_reckon` gains required `node` and `cruise_pwm` fields, and a
+ * collinear BLIND run of N >= 2 hops is now ONE record (dist_cm = the summed run distance,
+ * `chain` = true) followed by N-1 `blind_pass` records (one per intermediate node), emitted at
+ * arrival in run order. A single BLIND hop is ONE `blind_dead_reckon` with `chain` = false.
  *
- * 1. `blind_dead_reckon` — field-set BUMP (three new fields on EVERY record of this kind,
- *    chained or not). Exact serialization (`_ptEmitBlindDeadReckon`, PathTracker.cpp):
+ * 1. `blind_dead_reckon` — ONE per BLIND run. Exact serialization (`_ptEmitBlindDeadReckon`,
+ *    PathTracker.cpp):
  *
  *      {"kind":"blind_dead_reckon","reverse":<bool>,"drive_mode":"<SYNC_TSHAPE|GYRO_TSHAPE|
- *       RAW_FLAT>","dist_cm":<%.6f>,"start_pwm":<%d>,"end_pwm":<%d>,"chain":<bool>,
+ *       RAW_FLAT>","node":"<final node>","dist_cm":<%.6f>,"cruise_pwm":<%d>,"start_pwm":<%d>,
+ *       "end_pwm":<%d>,"chain":<bool>,
  *       "reanchor":"ON_DEAD_RECKONED_ADVANCE"}
  *
- *    - `dist_cm`   : the COMMANDED distance — pivot-trimmed AND boundary-carry-adjusted.
- *                    The measured carry is 0 wherever encoders are exact (the sim, the
- *                    parked-encoder parity harness), so both sides emit the planned value.
- *    - `start_pwm` : signed PWM the hop's velocity PLAN starts at (`%d`, int16). Chained:
- *                    `ChainHopSpeed.startPwm`. Plain tShape: ±TSHAPE_START_SPEED, or the
- *                    ADR-023 captured LineFollower cruise after a pass-through. RAW_FLAT:
- *                    its flat start (cruise, or the captured cruise on a pass-through).
- *    - `end_pwm`   : signed PWM the plan ends at (`%d`, int16). Chained mid-hop:
- *                    `ChainHopSpeed.endPwm` (non-zero). Braked (incl. a chain's FINAL
- *                    hop): `0`. RAW_FLAT: cruise.
- *    - `chain`     : `true`/`false` — whether this hop is part of an ADR-059 chained run
- *                    (`true` on ALL hops of the run, including its braked final hop).
- *                    NOTE: the run-membership key is `chain`, deliberately NOT any
- *                    sub-field named "kind" — `kind` is the record-type discriminator the
- *                    parity loader keys on.
+ *    - `node`      : the run's final node (or the ordinary destination for a single hop).
+ *    - `dist_cm`   : the DISPATCHED distance — `totalCm` (Σ hop distances) for a coalesced
+ *                    run, else the single hop's pivot-trimmed distance. No boundary-carry
+ *                    term (ADR-080 dropped it; one braked move has no inter-hop carry).
+ *    - `cruise_pwm`: signed resolved cruise passed to `Drive.setPower(...)`. This is explicit
+ *                    because it is not recoverable from a cold run's start/end endpoints.
+ *    - `start_pwm` : signed PWM the combined move's tShape starts at (`%d`, int16):
+ *                    ±TSHAPE_START_SPEED, or the ADR-023 captured LineFollower cruise after a
+ *                    pass-through. RAW_FLAT: its flat start (cruise, or the captured cruise).
+ *    - `end_pwm`   : signed PWM the plan ends at (`%d`, int16). Braked (every coalesced run
+ *                    and every non-RAW single hop): `0`. RAW_FLAT: cruise.
+ *    - `chain`     : `true`/`false` — whether this record is a COALESCED run (>= 2 hops,
+ *                    dist_cm == totalCm) versus a single hop. NOTE: the run flag key is
+ *                    `chain`, deliberately NOT any sub-field named "kind" — `kind` is the
+ *                    record-type discriminator the parity loader keys on.
  *
- * 2. `blind_pass` — NEW record kind (maps to the sim tag `ACT_BLIND_PASS = "blind_pass"`).
- *    Emitted at each NON-braking mid-hop node boundary of a chained run — after the
- *    chained hop's move retires in `BLIND_FORWARD`, immediately BEFORE the
- *    `onDeadReckonedAdvance` stamp — so it sits BETWEEN the two adjacent hops'
- *    `blind_dead_reckon` records in the stream. The run's final (braked) arrival emits
- *    NO pass record. Exact serialization (`_ptEmitBlindPass`, PathTracker.cpp):
+ * 2. `blind_pass` — one per INTERMEDIATE node of a coalesced run (node[1..hopCount-1]).
+ *    Emitted at arrival in `BLIND_FORWARD`, immediately BEFORE that node's
+ *    `onDeadReckonedAdvance` stamp, so a run reads as one `blind_dead_reckon` followed by its
+ *    per-node passes in run order. The run's FINAL node is the braked arrival and emits NO
+ *    pass record. Exact serialization (`_ptEmitBlindPass`, PathTracker.cpp):
  *
  *      {"kind":"blind_pass","node":"<node name>"}
  *

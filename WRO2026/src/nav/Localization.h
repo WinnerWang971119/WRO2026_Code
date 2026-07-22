@@ -34,10 +34,11 @@
  *  - `begin()` once in `setup()` after every `MiniR4.begin()` and the Phase 1 modules'
  *    `begin()`. The order is `Drive` -> `LineFollower` -> `Intersection` -> `Manipulator`
  *    -> `Localization` -> `PathTracker` -> `EventTrace`.
- *  - `update()` runs once per cooperative tick (after `PathTracker.update()`, so encoders are
+ *    `update()` runs once per cooperative tick (after `PathTracker.update()`, so encoders are
  *    fresh and the nav-active flag is current). It integrates raw operator motion into a 2D
- *    offset-from-node while the gate is open (`!navActive && isZeroed()`); while the gate is
- *    closed it neither accumulates nor reads the IMU, re-baselining only on the closed->open edge.
+ *    offset-from-node while the gate is open (`!navActive && isZeroed()`). While the gate is
+ *    closed it does not accumulate offset, but refreshes the heading telemetry cache from the
+ *    tick-scoped YawSource sample; it re-baselines offset only on the closed->open edge.
  *    `getHeadingDeg()` reads the IMU live; on a transient lower-MCU read failure it falls back to
  *    the last good heading instead of a `0.0`-derived garbage value (see `getHeadingDeg`).
  *  - `getLastHeadingDeg()` returns that cached value with NO I/O — use it on telemetry /
@@ -264,6 +265,19 @@ public:
     void declarePosition(uint8_t nodeId);
 
     /**
+     * @brief Operator-recovery re-anchor by generated field node name.
+     *
+     * Resolves @p nodeName through `FieldMap`, then performs the same re-anchor as
+     * `declarePosition(uint8_t)`. An unknown or null name leaves the current node and
+     * offset unchanged.
+     *
+     * @param nodeName Generated route node name, such as `"MWU"`.
+     * @return `true` when @p nodeName resolves and the position is declared; `false`
+     *         when it does not name a field node.
+     */
+    bool declarePosition(const char* nodeName);
+
+    /**
      * @brief Wall-zero re-anchor: adopt the ground truth a `Drive.wallStop` just established.
      *
      * After the chassis presses its REAR against a known wall, the tracked wheel axle sits
@@ -382,11 +396,11 @@ public:
      * ONLY when BOTH hold:
      *   1. `!_navActive` — PathTracker is NOT executing a hop (the operator may be hand-driving).
      *   2. `isZeroed()`  — the world frame is bound (heading is meaningless before zeroing).
-     * When the gate is closed the offset is left untouched and NO IMU read is issued; the three
-     * baselines (`_lastEncL`, `_lastEncR`, `_lastYawDeg`) are instead re-snapshotted ONCE on the
-     * closed->open EDGE (from a single live read) so the first delta after the gate reopens is ~0.
-     * This keeps a multi-second mission from issuing a blocking lower-MCU read on every cooperative
-     * tick of the hot path.
+    * When the gate is closed the offset and its baselines are left untouched, but a successful
+    * `YawSource` tick sample refreshes the world-heading telemetry cache. The three baselines
+    * (`_lastEncL`, `_lastEncR`, `_lastYawDeg`) are re-snapshotted only on the closed->open EDGE
+    * so the first operator-motion delta after the gate reopens is ~0. With `YawSource.update()`
+    * first in the cooperative tick, this cache refresh normally performs no extra device I/O.
      *
      * Translation and rotation accumulate on two INDEPENDENT deadband gates (see
      * `Config::OFFSET_TRANSLATION_DEADBAND_CM` / `OFFSET_ROTATION_DEADBAND_DEG`): a pure manual

@@ -201,6 +201,18 @@ void LocalizationClass::declarePosition(uint8_t nodeId)
     clearOffset();
 }
 
+bool LocalizationClass::declarePosition(const char* nodeName)
+{
+    const uint8_t nodeId = FieldMap::findNodeByName(nodeName);
+    if (nodeId == FieldMap::NODE_NONE)
+    {
+        return false;
+    }
+
+    declarePosition(nodeId);
+    return true;
+}
+
 void LocalizationClass::_bindHeadingFromYaw(float imuYaw, float headingDeg)
 {
     // Single source of truth for the offset-bind invariant, shared by reanchorAtWall step (1) and
@@ -385,8 +397,14 @@ void LocalizationClass::update()
         return;
     }
 
-    // Gate closed (PathTracker driving a hop, or pre-zero): do NOT accumulate and do NOT read the
-    // IMU. Baselines are re-established at the reopen edge above, so there is no per-tick read here.
+    // Gate closed (PathTracker driving a hop, or pre-zero): do NOT accumulate operator offset.
+    // Once zeroed, refresh only the world-heading cache from YawSource's tick-scoped sample so
+    // telemetry stays current during long autonomous moves without changing offset baselines.
+    if (_zeroed)
+    {
+        float heading = 0.0f;
+        (void) _readWorldHeading(heading);
+    }
     _gateWasOpen = false;
 }
 

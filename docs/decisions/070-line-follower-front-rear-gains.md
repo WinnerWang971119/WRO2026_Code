@@ -12,7 +12,7 @@ The rear gains default to the front values, so behaviour is unchanged until the 
 ## Why
 The line sensor's distance from the wheel axle is the controller's *lookahead*, and the two
 boards do not share it: the front sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle,
-the rear `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). A longer lookahead anticipates heading error
+the rear `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (6.0 cm). A longer lookahead anticipates heading error
 and rides smooth; a shorter one has less preview, so the *same* Kp/Kd that track cleanly forward
 over-correct and swing the chassis off the line in reverse. This showed up on the bench as smooth
 forward follow and oscillating, line-losing reverse follow at one shared gain set — the classic
@@ -22,8 +22,8 @@ each direction needs its own tune.
 ## How to apply
 - Tune each set independently with the `inoTest/line_pid_tune` ping-pong tuner: its forward runs
   optimise the FRONT set, its reverse runs the REAR set (two independent twiddle searches).
-- Paste the tuner's printed REAR values into `Config::LINE_KP_REAR` / `LINE_KD_REAR`
-  (`WRO2026/config/ConfigLine.h`).
+- Keep the bench-tuned REAR values in `Config::LINE_KP_REAR` / `LINE_KD_REAR`
+  (`WRO2026/config/ConfigLine.h`) synchronized with any future tuner result.
 - The selection lives in `LineFollowerClass::update()`'s online P+D block; it keys off the same
   `_reverse` flag that already selects the board (`setReverseActive`) and negates cruise, so no
   new state is introduced. The correction sign is unchanged — the rear board's error mapping

@@ -30,7 +30,7 @@ namespace Config
     // Rear-board (reverse follow) gains — ADR-070.
     //
     // The front line sensor sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle;
-    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). That distance is the
+    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (6.0 cm). That distance is the
     // controller's lookahead, so the SAME Kp/Kd steer differently on each board: the shorter
     // rear lookahead goes unstable (over-corrects, swings off the line) at gains the longer
     // front lookahead rides smoothly. `LineFollower` therefore selects these gains whenever the
@@ -38,14 +38,13 @@ namespace Config
     // forward follow. Tune them independently with the `inoTest/line_pid_tune` ping-pong tuner
     // (its reverse runs optimise THIS set).
     //
-    // Default to the front gains so behaviour is unchanged until the rear set is tuned — replace
-    // with the tuner's printed REAR values once measured.
+    // Values below were bench-tuned on the assembled chassis (2026-07-22).
     // -------------------------------------------6-------------------------------------------
 
-    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KP_REAR = 6.5f;
-    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KD_REAR = 11.6f;
+    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). */
+    constexpr float LINE_KP_REAR = 6.8f;
+    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). */
+    constexpr float LINE_KD_REAR = 12.5f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -342,20 +341,20 @@ namespace Config
      *
      * Intentionally decoupled from the active SpeedPreset so that changing cruise speed never
      * silently alters the CRAWL behavior. At 60 the creep sits just below the NORMAL cruise of 70
-     * and comfortably above the `PWM_MIN_MAGNITUDE = 35` deadband floor — a deliberately chosen
+     * and comfortably above the `PWM_MIN_MAGNITUDE = 45` deadband floor — a deliberately chosen
      * absolute PWM, not a fraction of cruise. Deriving it as e.g. `SPEED_NORMAL / 2` at compile
      * time would re-introduce exactly the coupling this constant exists to avoid, and could land
      * below `PWM_MIN_MAGNITUDE` for a slower active motor profile — silently snapped UP to the
      * floor by `deadbandSnap`. Stating the creep PWM explicitly sidesteps both problems.
      *
      * @note Current values (`ConfigDrive.h` / `ConfigGlobal.h`): SPEED_NORMAL = 70,
-     *       SPEED_SLOW = 60, PWM_MIN_MAGNITUDE = 35 — 60 sits just below NORMAL cruise and
+     *       SPEED_SLOW = 60, PWM_MIN_MAGNITUDE = 45 — 60 sits just below NORMAL cruise and
      *       comfortably above the floor for both presets today. Re-derive this note if any of
      *       those three constants are retuned.
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 40;
+    constexpr int16_t CRAWL_PWM = 46;
 
     /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.

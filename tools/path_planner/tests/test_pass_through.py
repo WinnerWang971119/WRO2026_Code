@@ -241,20 +241,21 @@ def test_tc2_orthogonal_turn_no_line_pass():
 @pytest.mark.parametrize(
     "heading_delta, expected_tag",
     [
-        (0.4999, ACT_LINE_PASS),       # TC3: just inside tolerance → LINE_PASS
-        (0.5001, ACT_LINE_OVERSHOOT),  # TC4: just outside tolerance → LINE_OVERSHOOT
+        (NAV_TURN_TOLERANCE_DEG - 0.0001, ACT_LINE_PASS),       # TC3: just inside tolerance → LINE_PASS
+        (NAV_TURN_TOLERANCE_DEG + 0.0001, ACT_LINE_OVERSHOOT),  # TC4: just outside tolerance → LINE_OVERSHOOT
     ],
     ids=["TC3_inside_tolerance", "TC4_outside_tolerance"],
 )
 def test_tc3_tc4_heading_tolerance_boundary(heading_delta, expected_tag):
-    """TC3/TC4: Heading delta just inside (0.4999°) and just outside (0.5001°) the
+    """TC3/TC4: Heading delta just inside and just outside the
     NAV_TURN_TOLERANCE_DEG boundary determines LINE_PASS vs LINE_OVERSHOOT.
 
     Layout:
         A(0,0) --heading 0°--> B(50,0) --heading delta°--> C
 
     For the B intersection (not the destination), a collinear next-hop
-    (|delta| <= 0.5°) emits LINE_PASS; any larger delta emits LINE_OVERSHOOT.
+    (|delta| <= NAV_TURN_TOLERANCE_DEG) emits LINE_PASS; any larger delta emits
+    LINE_OVERSHOOT. The deltas bracket the live tolerance so a retune moves them.
     """
     c_x = 50.0 + math.cos(math.radians(heading_delta)) * 50.0
     c_y = 0.0 + math.sin(math.radians(heading_delta)) * 50.0
@@ -339,7 +340,7 @@ def test_tc6_collinear_line_to_blind():
     Expected sequence from A to C:
         (ACT_FOLLOW_INT, None)
         (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM)  ← B (collinear into BLIND)
-        (ACT_FORWARD, 50.0, <captured cruise>, 0, False)
+        (ACT_FORWARD, 50.0, <resolved cruise>, <captured start>, 0, False)
 
     ADR-023/ADR-059: the LINE pass-through at B keeps the follower live at
     cruise across the node (the ADR-023 LINE→BLIND cruise carry), so the B→C
@@ -347,7 +348,7 @@ def test_tc6_collinear_line_to_blind():
     cruise (SPEED_NORMAL), not the cold-start TSHAPE_START_SPEED floor. It is a
     SINGLE blind hop (C is the goal), so it does NOT form a chain (chain=False),
     but the pass-through seed rides the ACT tuple as the resolved
-    (start_pwm, end_pwm, chain) suffix — mirroring the firmware's
+        (cruise_pwm, start_pwm, end_pwm, chain) suffix — mirroring the firmware's
     `_passThrough ? presetToPwm(getPreset()) : TSHAPE_START_SPEED` start.
     """
     nodes = {
@@ -368,7 +369,14 @@ def test_tc6_collinear_line_to_blind():
         (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM),
         # Pass-through-seeded lone blind hop: start = captured cruise
         # (SPEED_NORMAL), braked end 0, chain False.
-        (ACT_FORWARD, 50.0, _runtime.SPEED_NORMAL, 0, False),
+        (
+            ACT_FORWARD,
+            50.0,
+            _runtime.SPEED_NORMAL,
+            _runtime.SPEED_NORMAL,
+            0,
+            False,
+        ),
     ]
     act_tags = [prim[0] for prim in prims]
     assert ACT_TURN_REL not in act_tags
@@ -591,7 +599,7 @@ def test_tc14c_line_board_count_config_parity():
 
 
 # ---------------------------------------------------------------------------
-# ADR-059 — parity: the three blind-chain Config knobs in runtime.py match
+# ADR-059 / ADR-080 — parity: the blind-run Config knobs in runtime.py match
 # ConfigNav.h via regex grep (same idiom as PATH_PASS_THROUGH_ENABLED / TC14).
 # Each knob is `#ifndef`-guarded so a host test can flip the default at compile
 # time; the `#define <KNOB>_DEFAULT <value>` line is the source of truth (the
@@ -605,6 +613,11 @@ _BLIND_CHAIN_ENABLED_RE = re.compile(
 )
 _BLIND_CHAIN_MAX_CM_RE = re.compile(
     r"#define\s+PATH_BLIND_CHAIN_MAX_CM_DEFAULT\s+([0-9]*\.?[0-9]+)f?",
+    re.MULTILINE,
+)
+_BLIND_COALESCE_MAX_POSITION_ERROR_CM_RE = re.compile(
+    r"#define\s+PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM_DEFAULT\s+"
+    r"([0-9]*\.?[0-9]+)f?",
     re.MULTILINE,
 )
 _MAX_CHAIN_HOPS_RE = re.compile(
@@ -660,6 +673,25 @@ def test_adr059_max_chain_hops_parity():
     config_value = int(match.group(1))
     assert _runtime.MAX_CHAIN_HOPS == config_value, (
         f"runtime.MAX_CHAIN_HOPS ({_runtime.MAX_CHAIN_HOPS}) "
+        f"!= ConfigNav.h ({config_value})"
+    )
+
+
+def test_adr080_blind_coalesce_position_corridor_parity():
+    """ADR-080: the strict endpoint corridor matches ConfigNav.h."""
+    assert _CONFIG_NAV_H.exists(), f"ConfigNav.h not found at {_CONFIG_NAV_H}."
+    text = _CONFIG_NAV_H.read_text(encoding="utf-8")
+    match = _BLIND_COALESCE_MAX_POSITION_ERROR_CM_RE.search(text)
+    assert match is not None, (
+        "Could not find '#define "
+        "PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM_DEFAULT <float>' in ConfigNav.h"
+    )
+    config_value = float(match.group(1))
+    assert _runtime.PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM == pytest.approx(
+        config_value, abs=1e-9
+    ), (
+        "runtime.PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM "
+        f"({_runtime.PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM}) "
         f"!= ConfigNav.h ({config_value})"
     )
 

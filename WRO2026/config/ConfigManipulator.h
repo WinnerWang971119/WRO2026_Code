@@ -71,6 +71,7 @@ namespace Config
         uint8_t  rcId;       ///< RC-bus channel this servo is wired to.
         uint16_t homeDeg;    ///< Rest / start angle (degrees).
         uint16_t openDeg;    ///< "Open" pose angle (degrees).
+        uint16_t openForWhiteDeg;   ///< White-payload open pose angle (degrees).
         uint16_t closeDeg;   ///< "Close" pose angle (degrees).
         float    msPerDeg;   ///< Slew estimate (ms per degree) for move-time budgeting.
         uint16_t settleMs;   ///< Extra dwell after the slew completes (ms).
@@ -78,16 +79,16 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 105, 7.0f, 80, true };  
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, false };
     /** @brief Dumper servo calibration. TODO calibrate. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  78, 33, 18, 5.0f, 80, false };  
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 5.2f, 95, false };  // open/close unused; 
+    constexpr ServoCfg SORTER = { SORTER_RC_ID, 90, 0, 0, 0, 5.2f, 95, false };  // open/close unused
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 102, 126};  
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 127};  
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
@@ -243,9 +244,9 @@ namespace Config
      *       end, so its row drives toward HOME (`-BELT_STALL_SPEED`).
      * @note `GRAB_RIGHT` / `GRAB_MID` / `GRAB_LEFT` are the three reach positions that let
      *       the manipulator take each of the three tiles in one M-wall row without driving
-     *       (see the `mosaic` task). `GRAB_MID` is also the mandatory travel pose: the belt
-     *       must be returned to it before ANY chassis move, or the extended manipulator
-     *       throws the centre of mass too far off.
+     *       (see the `mosaic` task). `MID` is the mandatory travel pose: the belt must be
+     *       returned to it before ANY chassis move, or the extended manipulator throws the
+     *       centre of mass too far off.
      */
     enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4,
                                        GRAB_RIGHT = 5, GRAB_MID = 6, GRAB_LEFT = 7 };  // TODO finalize
@@ -256,11 +257,11 @@ namespace Config
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
         { BeltMode::POSITION, 1000, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400);
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // RIGHT_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    1000,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
-        { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
-        { BeltMode::POSITION,    340,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
-        { BeltMode::POSITION,    640,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
-        { BeltMode::POSITION,    940,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
+        { BeltMode::POSITION,    900,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
+        { BeltMode::POSITION,    1300,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION,    920,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
+        { BeltMode::POSITION,    400,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
+        { BeltMode::POSITION,    5,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
     };
 }    // namespace Config
 
