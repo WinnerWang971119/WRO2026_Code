@@ -3352,26 +3352,6 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // preset on the inbound LINE edge). Only read on the RAW_FLAT branch.
             const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
 
-            // TEMP BENCH INSTRUMENTATION (blind-hop overshoot). Remove after diagnosis.
-            // encSum is the START-of-hop encoder; the delta to the NEXT [HOP] line = the
-            // actual encoder travel of THIS hop, to compare against geo/cmd + a ruler.
-            Serial.print(F("[HOP] "));
-            Serial.print(FieldMap::getNode(cur).name);
-            Serial.print(F("->"));
-            Serial.print(FieldMap::getNode(_nextHop).name);
-            Serial.print(F(" geo="));
-            Serial.print(edge.distance_cm);
-            Serial.print(F(" cmd="));
-            Serial.print(dispatchCm);
-            Serial.print(F(" startPwm="));
-            Serial.print(signedStartSpeed);
-            Serial.print(F(" tgtHdgW="));
-            Serial.print(_resolvedBodyHeading);
-            Serial.print(F(" yawApp="));
-            Serial.print(Localization.getHeadingDeg());
-            Serial.print(F(" encSum="));
-            Serial.println(Drive.getEncL() + Drive.getEncR());
-
             if (chainHop && dispatchCm < Config::TSHAPE_MIN_MOVE_CM)
             {
                 // ADR-059 degraded chained stub: the measured-carry subtraction shrank
