@@ -38,6 +38,7 @@ public:
     ManipServo() = default;
 
     void     open() {}
+    void     openForWhite() {}
     void     close() {}
     void     home() {}
     void     setAngle(uint16_t deg) { _shadow = deg; }
