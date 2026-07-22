@@ -22,7 +22,9 @@
  * mocks, this keeps the real `Localization.cpp` (and its Drive / MatrixMiniR4 /
  * IMU chain) out of the dump link.
  *
- * Only the surface `Mission.cpp` touches is provided. If a later Mission change
+ * `Mission.cpp` only calls the `uint8_t` overload; the `const char*` overload is
+ * a test-only convenience (it lets `test_ctps_dump` drive the name path directly)
+ * and does not mirror a production `Localization` method. If a later Mission change
  * references more of `Localization`, extend this shadow rather than dragging in
  * the real translation unit.
  */
