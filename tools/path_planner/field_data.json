@@ -121,12 +121,12 @@
       22.829197020208255
     ],
     "PotPut": [
-      168.1421,
+      164.3421,
       37.027583652302766
     ],
     "Start": [
-      18.65980367946661,
-      21.720115652138134
+      19.659803679466606,
+      22.52011565213813
     ],
     "dump1": [
       117.7186,
@@ -153,7 +153,7 @@
       27.3057
     ],
     "p1": [
-      168.1421,
+      164.3421,
       27.3057
     ],
     "shovel1Get": [
@@ -207,13 +207,13 @@
     "dump2": "blind",
     "dump3": "blind",
     "i1": "line",
-    "i2": "projection",
+    "i2": "blind",
     "i3": "line",
     "p1": "projection",
     "shovel1Get": "line",
     "shovel1Put": "blind",
     "shovel2Get": "line",
-    "shovel2Put": "projection"
+    "shovel2Put": "blind"
   },
   "LINE_SEGMENTS": [
     [
@@ -291,14 +291,6 @@
     [
       "CG3",
       "CG2"
-    ],
-    [
-      "i2",
-      "shovel2Put"
-    ],
-    [
-      "i2",
-      "i1"
     ]
   ],
   "BLIND_EDGES": [
@@ -393,6 +385,14 @@
     [
       "i2",
       "MYD"
+    ],
+    [
+      "shovel2Put",
+      "i2"
+    ],
+    [
+      "i2",
+      "i1"
     ]
   ],
   "pivot_turns": [
@@ -507,6 +507,12 @@
       "u": "MWU",
       "v": "MWD",
       "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "PotPut",
+      "v": "p1",
+      "stop_at_line": "on"
     }
   ],
   "OBSTACLES": [

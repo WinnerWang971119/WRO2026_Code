@@ -30,7 +30,7 @@ namespace Config
     // Rear-board (reverse follow) gains — ADR-070.
     //
     // The front line sensor sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle;
-    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). That distance is the
+    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (6.0 cm). That distance is the
     // controller's lookahead, so the SAME Kp/Kd steer differently on each board: the shorter
     // rear lookahead goes unstable (over-corrects, swings off the line) at gains the longer
     // front lookahead rides smoothly. `LineFollower` therefore selects these gains whenever the
@@ -38,14 +38,13 @@ namespace Config
     // forward follow. Tune them independently with the `inoTest/line_pid_tune` ping-pong tuner
     // (its reverse runs optimise THIS set).
     //
-    // Default to the front gains so behaviour is unchanged until the rear set is tuned — replace
-    // with the tuner's printed REAR values once measured.
+    // Values below were bench-tuned on the assembled chassis (2026-07-22).
     // -------------------------------------------6-------------------------------------------
 
-    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KP_REAR = 6.5f;
-    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
-    constexpr float LINE_KD_REAR = 12.0f;
+    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). */
+    constexpr float LINE_KP_REAR = 6.8f;
+    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). */
+    constexpr float LINE_KD_REAR = 12.5f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

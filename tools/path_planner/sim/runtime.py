@@ -281,11 +281,11 @@ LINE_SENSOR_AXLE_OFFSET_CM: float = 12.02
 # MUST mirror ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` in WRO2026/Config.h.
 # Used for REAR (reverse) overshoot so a rear-board hop dead-reckons with the
 # rear board's own axle offset instead of the front board's. ADR-035: aligned
-# to Config.h's authoritative REAR measurement (7.68 cm); the validator caps a
-# line-incoming pivot ``delta`` at ``MIN(12.02, 7.68) = 7.68`` so the reduced
+# to Config.h's authoritative bench measurement (6.0 cm); the validator caps a
+# line-incoming pivot ``delta`` at ``MIN(12.02, 6.0) = 6.0`` so the reduced
 # REAR overshoot stays non-negative. Keep the two C++ and Python values in
 # lockstep.
-LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = 7.68
+LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = 6.0
 
 # Floor (cm) for a pivot-trimmed dead-reckon advance / reduced LINE overshoot.
 # Mirrors ``Config::PIVOT_TRIM_MIN_DRIVE_CM`` in WRO2026/Config.h (ADR-036; T8

@@ -349,10 +349,10 @@ def make_dead_reckon_pivot_field() -> SimpleNamespace:
 #   S0(-60,0) --BLIND,heading 0--> L0(0,0) --LINE,heading 0--> L1(60,0)
 #                                                  --BLIND,heading 70--> L2
 #
-#   Pivot (L0, L1, L2): LINE-incoming (re-anchors on the junction line) +
-#   BLIND-outgoing.  A 70 deg turn gives delta ~= 6.30 cm, within the 12.02 cm
-#   FRONT overshoot budget, so the overshoot advance shrinks to (offset - delta)
-#   and the outgoing dead-reckon hop is trimmed by delta.
+#   Pivot (L0, L1, L2): FRONT-pinned LINE-incoming (re-anchors on the junction
+#   line) + FRONT-pinned BLIND-outgoing. A 70 deg turn gives delta ~= 6.30 cm,
+#   within the 12.02 cm FRONT overshoot budget, so the overshoot advance shrinks
+#   to (offset - delta) and the outgoing dead-reckon hop is trimmed by delta.
 #
 #   Issue #64 note: the T2 validator rejects an on-line START node and rejects a
 #   LINE edge incident to a blind node, so the old START=L0 (a node sitting on
@@ -395,19 +395,24 @@ def make_line_incoming_pivot_field() -> SimpleNamespace:
 
     ``S0 -> L0`` is a BLIND dead-reckon approach from the spawn (the validator
     requires a blind START node); ``L0 -> L1`` is a LINE edge (heading 0 deg);
-    ``L1 -> L2`` is BLIND (heading 70 deg).  The declared pivot ``(L0, L1, L2)``
-    is a 70 deg turn, so its over-travel ``delta`` reduces the post-detect LINE
-    overshoot advance and trims the outgoing dead-reckon hop.  Routing to ``L2``
-    runs ``S0 -> L0 -> L1 -> L2`` and takes the ``(L0, L1, L2)`` turn.
+    ``L1 -> L2`` is BLIND (heading 70 deg). Both pivot legs are FRONT-pinned so
+    the sensor approach uses the 12.02 cm FRONT budget after the rear board's
+    bench offset was tuned to 6.0 cm. The declared pivot ``(L0, L1, L2)`` is a
+    70 deg turn, so its over-travel ``delta`` reduces the post-detect LINE
+    overshoot advance and trims the outgoing dead-reckon hop.
     """
     return _make_field(
         nodes=_LI_NODES,
         node_types=_LI_NODE_TYPES,
-        line_segments=[("L0", "L1")],
-        blind_edges=[("S0", "L0"), ("L1", "L2")],
+        line_segments=[],
+        blind_edges=[("S0", "L0")],
         pivot_turns=[("L0", "L1", "L2")],
         start_node="S0",          # blind spawn (validator rejects an on-line start)
         start_heading_deg=0.0,    # facing along S0->L0->L1 (the +x line)
+        edges=[
+            {"type": "LINE", "u": "L0", "v": "L1", "direction": "front"},
+            {"type": "BLIND", "u": "L1", "v": "L2", "direction": "front"},
+        ],
     )
 
 
@@ -758,7 +763,7 @@ def _sensor_authored_field(turn_deg: float) -> SimpleNamespace:
         # node is a blind dead-reckon node; the START A must be blind.
         node_types={"A": "blind", "B": "blind", "C": "blind"},
         line_segments=[],
-        blind_edges=[("B", "C")],
+        blind_edges=[],
         pivot_turns=[("A", "B", "C")],
         start_node="A",
         start_heading_deg=0.0,    # facing along A->B
@@ -770,7 +775,9 @@ def _sensor_authored_field(turn_deg: float) -> SimpleNamespace:
                 "distance_cm": _SI_IN_CM,
                 "heading_deg": 0.0,    # A->B runs along +x
                 "stop_at_line": "on",
-            }
+                "direction": "front",
+            },
+            {"type": "BLIND", "u": "B", "v": "C", "direction": "front"},
         ],
     )
 
@@ -794,7 +801,7 @@ def make_sensor_autorule_pivot_field() -> SimpleNamespace:
     hop.  Both legs are pinned ``direction:"front"`` via ``EDGES`` (T9, issue
     #54): this pivot was a pre-#54 forward pivot (force-FRONT was the only
     regime), and the T7 validator now budgets an unpinned reverse-reachable
-    sensor-terminated approach against the smaller REAR offset (7.68 cm),
+    sensor-terminated approach against the smaller REAR offset (6.0 cm),
     which this turn's delta exceeds -- the FRONT pin is behavior-preserving
     and makes the always-implicit forward direction explicit.  The pin is
     orthogonal to the projection-node auto-seek classification (still driven
@@ -907,7 +914,7 @@ def _turn_deg_for_delta(delta_cm: float) -> float:
 #   is pinned `direction:"rear"` too (both legs, per the spec). The turn angle
 #   is DERIVED to target a delta at HALF the (REAR budget - trim floor)
 #   headroom -- comfortably inside `Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`
-#   (7.68 cm) minus `Config::PIVOT_TRIM_MIN_DRIVE_CM` (0.5 cm) -- so AC5's
+#   (6.0 cm) minus `Config::PIVOT_TRIM_MIN_DRIVE_CM` (0.5 cm) -- so AC5's
 #   "accept a REAR pivot with delta inside the REAR budget" case has an
 #   unambiguous PASS.
 

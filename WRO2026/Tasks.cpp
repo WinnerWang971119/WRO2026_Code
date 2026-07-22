@@ -309,25 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i2");
-    Drive.turnToYaw(Localization.toImuYaw(90));
-    PathTracker.goTo("MWU");
-    _signalSuccess();
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MWD");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MGU");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MGD");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MBU");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MBD");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MYU");
-    _waitStationaryMs(1000);
-    PathTracker.goTo("MYD");
-    _waitStationaryMs(1000);
+    PathTracker.goTo("i1");
     return true;
 }
 
@@ -1102,10 +1084,10 @@ bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)
 bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("shovel2Get").setArrivalDirection(Direction::REAR);
-    Drive.turnToYaw(90);
+    Drive.turnToYaw(Localization.toImuYaw(90));
     Manipulator.boxClose();
     PathTracker.goTo("shovel2Put").setArrivalDirection(Direction::REAR);
-    Drive.turnToYaw(25);
+    Drive.turnToYaw(Localization.toImuYaw(25));
     Manipulator.boxOpen();
     return true;
 }

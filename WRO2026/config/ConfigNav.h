@@ -99,9 +99,9 @@ namespace Config
      * @note Consumer: `PathTracker`'s SETTLE state (ADR-061).
      */
 #ifndef HOP_SETTLE_MS_DEFAULT
-#define HOP_SETTLE_MS_DEFAULT 120
+#define HOP_SETTLE_MS_DEFAULT 200
 #endif
-    constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // TODO bench-tune
+    constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // Bench-tuned 2026-07-22.
 
     /**
      * @brief Tolerance (degrees) below which `PathTracker` skips an absolute turn dispatch.

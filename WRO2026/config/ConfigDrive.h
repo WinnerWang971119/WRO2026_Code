@@ -254,10 +254,9 @@ namespace Config
      * dead-reckoned hop. PathTracker selects this when the resolved direction is
      * `Direction::REAR`.
      *
-     * @note TODO: measure on real chassis. Defaults to the front offset until the rear
-     *       board is wired (T5); override once the two distances are known to differ.
+     * @note Bench-measured on the assembled chassis (2026-07-22).
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 6.0f;
 
     /**
      * @brief Floor (cm) for a pivot-trimmed dead-reckon drive / LINE overshoot advance (ADR-036).
@@ -421,8 +420,9 @@ namespace Config
      * more margin against prediction error.
      *
      * @note Must be non-negative — enforced by a `ConfigChecks.h` static_assert.
+     * @note Bench-tuned to 6.0 cm on the assembled chassis (2026-07-22).
      */
-    constexpr float LINE_APPROACH_MARGIN_CM = 5.0f;
+    constexpr float LINE_APPROACH_MARGIN_CM = 6.0f;
 
     /**
      * @brief Overrun bound (cm) PAST the predicted line crossing before the bounded
@@ -555,16 +555,14 @@ namespace Config
      * @brief Proportional gain for the per-tick turn PD controller (ADR-068, ADR-077), in PWM per
      *        degree.
      *
-     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 1.5` (his newest 2026-07
-     * revision, which also matches his straight-drive `gyro_move` gain; the prior revision used
-     * `Kp = 2`, and one before that `Kp = 1`). Kp maps a degree error straight to a PWM.
+     * Kp maps a degree error straight to a PWM.
      * `TurnPDPolicy.h::turnPdStepRaw` computes `Kp * errNew` before the D term, clamp, slew, and
      * creep floor.
      *
-     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
+     * @note Bench-tuned to 2.6 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 2.0f
+#define TURN_KP_DEFAULT 2.6f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -597,12 +595,10 @@ namespace Config
      * `TURN_CREEP_PWM` plus a 5-PWM headroom margin, so a command handing off to the creep floor
      * has a small band to land in instead of chattering across the boundary tick-to-tick.
      *
-     * Robot-verified 2026-07: the bench-measured 43 (over a 38 creep) collapsed the whole final
-     * ~21 deg of a turn to a flat, fast creep and overshot a 90 deg turn to ~120. Lowered to the
-     * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
+     * Bench-tuned to 45 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_CREEP_THRESH_PWM_DEFAULT
-#define TURN_CREEP_THRESH_PWM_DEFAULT 40
+#define TURN_CREEP_THRESH_PWM_DEFAULT 45
 #endif
     constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
 
@@ -616,12 +612,10 @@ namespace Config
      * `deadbandSnap` / `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the
      * creep floor is not deadbandSnap").
      *
-     * Robot-verified 2026-07: the bench sweep's 38 approached the target too fast and coasted a
-     * 90 deg turn out to ~120. Set to the mentor's competition-proven kinetic tail floor of 20,
-     * which lands on target on this chassis.
+     * Bench-tuned to 40 on the assembled chassis (2026-07-22).
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 35
+#define TURN_CREEP_PWM_DEFAULT 40
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 
