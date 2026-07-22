@@ -1142,6 +1142,515 @@ void test_boundary_carry_subtracted_no_drift_with_n()
 }
 
 // ===========================================================================
+// ADR-079 (2026-07-22 blind-column-overshoot plan, T6): host ctests asserting the
+// REAL dispatched `MiniR4.DriveDC` setpoint for the two PARITY-INVISIBLE firmware
+// changes -- the chained final-hop degraded-stub FLOOR pin (T4) and the generalized
+// braked-blind measured-carry subtraction + its resets (T5). Per Decisions
+// `gotcha-parity-ctps-record-plan-not-dispatch`: the parity/sim/CTPS traces record
+// the PLAN endpoints, so neither change appears there -- these ctests are the SOLE
+// guard. Every assertion below reads the actual lower-MCU call the real `Drive.cpp`
+// made through the shared mock (`lastMoveSyncL/R`, `lastMoveSyncDegsL/R/Brake`,
+// `moveSyncCallCount` vs `moveSyncDegsCallCount`, `lastBrake`), never a plan record.
+//
+// Which mock counter each dispatch stamps (load-bearing to read the asserts):
+//   - A PROFILED braked blind hop dispatched at >= TSHAPE_MIN_MOVE_CM drives the
+//     continuous `MiniR4.DriveDC.MoveSync(...)` (moveSyncCallCount++), first-tick
+//     setpoint == the profile start PWM.
+//   - A hop BELOW TSHAPE_MIN_MOVE_CM degrades to the one-shot FLAT
+//     `MiniR4.DriveDC.MoveSyncDegs(power,power,deg,brake,async)` (moveSyncDegsCallCount++),
+//     setpoint == the flat POWER, `brake` == the move's brake flag. The ADR-059
+//     chained degraded stub takes THIS path; ADR-079's T4 pins its FINAL-hop power
+//     to the motor floor (`±PWM_MIN_MAGNITUDE`) instead of the plan start PWM.
+// So `MoveSync` fired == full-distance profiled dispatch; `MoveSyncDegs` fired ==
+// a shrunk-below-floor dispatch. That binary is the robust observable the reset
+// tests below key on: a braked blind hop whose carry was (wrongly) NOT reset shrinks
+// under a large stale carry to the degraded `MoveSyncDegs` path, while a correctly
+// reset carry leaves it a full-distance profiled `MoveSync`.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// TC1 (AC3) — chained-final degraded-stub FLOOR pin (T4), asserted on the REAL
+// dispatched flat setpoint. Two arms, both MUST-HAVE:
+//   (a) a chain FINAL hop shrunk below TSHAPE_MIN_MOVE_CM by a seeded boundary
+//       carry dispatches its degraded stub at `±PWM_MIN_MAGNITUDE` (the floor),
+//       braked — NOT the plan start PWM (the pre-T4 behavior);
+//   (b) a chain MID hop shrunk below the floor still dispatches its planned exit
+//       PWM (`chainEndPwm`), un-braked (the mid stub is unchanged by T4).
+// ---------------------------------------------------------------------------
+
+void test_stub_guard_final_hop_floor()
+{
+    TEST_SCOPE("TC1a/AC3: chained FINAL hop below TSHAPE_MIN_MOVE_CM dispatches the floor, braked");
+
+    const uint8_t nA = nodeByName("ChainA");
+    const uint8_t nB = nodeByName("ChainB");
+    const uint8_t nC = nodeByName("ChainC");
+
+    seatAndDispatchMainChain();    // hop 0 (final -> ChainA) in flight.
+
+    // Resolve the run's plan so the assertion can prove the dispatched floor is NOT
+    // the (pre-T4) plan start PWM the degraded stub used to emit.
+    ChainHopSpeed plan[4];
+    predictChainPlan(kMainHopDistCm, kMainHopCount, Config::SPEED_NORMAL, Config::TSHAPE_START_SPEED,
+                     plan);
+
+    // Retire hops 0 and 1 with NO carry so their commanded distances stay exact and the
+    // chain plan is undisturbed up to the final hop.
+    driveChainHopExact(kMainHopDistCm[0], 0.0f);
+    ASSERT_EQ(Localization.getCurrentNode(), nA);
+    tickUntilBlindDispatch();
+    driveChainHopExact(kMainHopDistCm[1], 0.0f);
+    ASSERT_EQ(Localization.getCurrentNode(), nB);
+    tickUntilBlindDispatch();
+
+    // Retire hop 2 (ChainB -> ChainC, 20 cm) with a SEEDED boundary carry of 5 cm so the
+    // FINAL hop's measured-carry subtraction shrinks it to 8 - 5 = 3 cm < TSHAPE_MIN_MOVE_CM
+    // (the ADR-059 degraded-stub trigger for a chain-final hop).
+    driveChainHopExact(kMainHopDistCm[2], 5.0f);
+    ASSERT_EQ(Localization.getCurrentNode(), nC);
+
+    // Dispatch the FINAL hop (ChainC -> ChainD). It shrinks below the profile floor, so it
+    // degrades to the one-shot FLAT `MoveSyncDegs` path — NOT the continuous profiled
+    // `MoveSync`. Capture both counters so the assertion proves WHICH path fired.
+    const uint32_t syncBefore = MiniR4.DriveDC.moveSyncCallCount;
+    const uint32_t degsBefore = MiniR4.DriveDC.moveSyncDegsCallCount;
+    tickUntilBlindDispatch();
+
+    ASSERT_GT(MiniR4.DriveDC.moveSyncDegsCallCount, degsBefore);    // degraded flat dispatch fired
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncCallCount, syncBefore);        // NOT a profiled MoveSync
+
+    // THE AC3 CORE CLAIM (T4): a FINAL degraded stub crawls at the motor FLOOR, braked —
+    // NOT the plan start PWM (~67) that would brake from speed into the wall. Forward hop, so
+    // the floor is +PWM_MIN_MAGNITUDE.
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncDegsL, Config::PWM_MIN_MAGNITUDE);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncDegsR, Config::PWM_MIN_MAGNITUDE);
+    ASSERT_TRUE(MiniR4.DriveDC.lastMoveSyncDegsBrake);    // the FINAL stub still brakes (floor->rest)
+
+    // Falsifiability against the pre-T4 dispatch: the old stub emitted `signedStartSpeed`
+    // (== plan[3].startPwm) here. Whenever the plan start differs from the floor, assert the
+    // dispatched value is the floor and NOT the plan start — so a revert to the old
+    // `stubPwm = signedStartSpeed` reddens this test.
+    ASSERT_TRUE(plan[3].brake);    // the run's final hop is the braked stop
+    if (plan[3].startPwm != Config::PWM_MIN_MAGNITUDE)
+    {
+        ASSERT_TRUE(MiniR4.DriveDC.lastMoveSyncDegsL != plan[3].startPwm);
+    }
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+void test_stub_guard_mid_hop_holds_exit()
+{
+    TEST_SCOPE("TC1b/AC3: chained MID hop below TSHAPE_MIN_MOVE_CM still dispatches chainEndPwm, unbraked");
+
+    const uint8_t nA = nodeByName("ChainA");
+
+    seatAndDispatchMainChain();    // hop 0 (final -> ChainA) in flight.
+
+    ChainHopSpeed plan[4];
+    predictChainPlan(kMainHopDistCm, kMainHopCount, Config::SPEED_NORMAL, Config::TSHAPE_START_SPEED,
+                     plan);
+
+    // Retire hop 0 (final -> ChainA, 25 cm) with a LARGE seeded boundary carry of 16 cm so the
+    // MID hop 1 (ChainA -> ChainB, 20 cm) shrinks to 20 - 16 = 4 cm < TSHAPE_MIN_MOVE_CM. Hop 1
+    // is a chained MID hop (brake == false), so its degraded stub holds `chainEndPwm`, NOT the
+    // floor — T4 changed only the FINAL arm.
+    driveChainHopExact(kMainHopDistCm[0], 16.0f);
+    ASSERT_EQ(Localization.getCurrentNode(), nA);
+
+    const uint32_t syncBefore = MiniR4.DriveDC.moveSyncCallCount;
+    const uint32_t degsBefore = MiniR4.DriveDC.moveSyncDegsCallCount;
+    tickUntilBlindDispatch();    // dispatch hop 1's degraded MID stub.
+
+    ASSERT_GT(MiniR4.DriveDC.moveSyncDegsCallCount, degsBefore);    // degraded flat dispatch fired
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncCallCount, syncBefore);
+
+    // A MID stub holds its planned exit PWM and does NOT brake (the run continues) — assert the
+    // real flat setpoint equals the chain plan's endPwm for hop 1, un-braked.
+    ASSERT_FALSE(plan[1].brake);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncDegsL, plan[1].endPwm);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncDegsR, plan[1].endPwm);
+    ASSERT_FALSE(MiniR4.DriveDC.lastMoveSyncDegsBrake);    // mid stub never brakes
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// TC5 (AC5) — a fresh goTo's origin bind resets the generalized carry, so the new
+// goTo's first braked blind hop commands its FULL distance. Asserted via the robust
+// MoveSync-vs-MoveSyncDegs observable: goTo #1's braked blind hop SNAPSHOTs a HUGE
+// stale carry baseline (over-driven encoders), then goTo #2's first hop must dispatch
+// a FULL-distance profiled MoveSync — a leaked stale carry would shrink the 8 cm hop
+// below TSHAPE_MIN_MOVE_CM into the degraded MoveSyncDegs path. The within-goTo
+// continuation (carry NOT reset between a single goTo's consecutive braked blind hops)
+// is the POSITIVE path exercised by TC2 / the in-chain TC8.
+// ---------------------------------------------------------------------------
+
+void test_carry_reset_across_origin_bind()
+{
+    TEST_SCOPE("TC5/AC5: fresh-goTo origin bind resets the carry -> next hop commands FULL distance");
+
+    const uint8_t nC = nodeByName("ChainC");
+    const uint8_t nD = nodeByName("ChainD");
+
+    resetWorld();
+    Serial.clearCapture();
+    seatAt("ChainB", 0);    // ChainB -> ChainC departs heading 0 == the seated facing (no pre-turn).
+
+    // goTo #1: ChainB -> ChainC (single braked blind hop to the goal). Retire it with a HUGE overshoot
+    // (`expectBlindHop` over-advances the encoder by `kEncoderAdvanceStep`), so the carry baseline it
+    // SNAPSHOTs is far larger than any 8 cm hop — a stale carry that LEAKED across the goTo boundary
+    // would clamp ChainC->ChainD below TSHAPE_MIN_MOVE_CM into the degraded path.
+    PathTracker.goTo(nC).async();
+    tickUntilBlindDispatch();
+    expectBlindHop(kMainHopDistCm[2]);
+    ASSERT_EQ(Localization.getCurrentNode(), nC);
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+
+    // goTo #2 (SEPARATE goTo): ChainC -> ChainD (8 cm). The IDLE->PLAN_NEXT_HOP origin bind
+    // (`_firstHopOfGoTo`) must reset the carry, so this hop commands its FULL 8 cm -> a PROFILED
+    // MoveSync (8 > TSHAPE_MIN_MOVE_CM), NOT the degraded MoveSyncDegs a leaked huge stale carry
+    // would force.
+    const uint32_t syncBefore = MiniR4.DriveDC.moveSyncCallCount;
+    const uint32_t degsBefore = MiniR4.DriveDC.moveSyncDegsCallCount;
+    PathTracker.goTo(nD).async();
+    tickUntilBlindDispatch();
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, syncBefore);        // profiled -> FULL distance (reset OK)
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncDegsCallCount, degsBefore);    // NOT degraded (no stale carry)
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, Config::TSHAPE_START_SPEED);    // cold-start braked seed
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// TC3 (AC5) — a real pre-edge TURN between two SAME-DIRECTION braked blind hops resets
+// the carry, so the post-turn hop commands its FULL distance. Same MoveSync-vs-
+// MoveSyncDegs observable: hop 1 SNAPSHOTs a huge stale carry; the turn at `final` must
+// INVALIDATE it (the ADR-079 turn reset in `_dispatchTurnIfNeeded`, PathTracker.cpp:2434)
+// so hop 2 (final -> ChainA, 25 cm) dispatches a full-distance profiled MoveSync.
+//
+// ROUTE CHOICE (T6 review fix): both hops must resolve the SAME travel direction (FRONT),
+// because the carry READ's DIRECTION-FLIP branch (PathTracker.cpp:3440-3452) zeroes the
+// carry independently of the turn reset — a REAR hop 2 (the previous
+// `final -> position1 -> Wall1` route, whose Wall1 wall-press approach resolves REAR)
+// made this test VACUOUS: deleting the turn reset still passed. With both hops FRONT the
+// READ takes the SUBTRACT branch, so ONLY the turn reset stands between the stale carry
+// and hop 2's command — deleting it shrinks hop 2 below TSHAPE_MIN_MOVE_CM into the
+// degraded MoveSyncDegs path and the asserts below fail.
+// `Wall2 -> final -> ChainA` is that route: both edges BLIND SYNC-braked with no
+// direction override, and the bend at `final` (~+48.8 deg) sits inside
+// (NAV_TURN_TOLERANCE_DEG, BIDIRECTIONAL_TURN_THRESHOLD_DEG] — big enough to dispatch a
+// REAL pre-edge turn, small enough that this 2-board host build's AUTO direction
+// heuristic (DirectionPolicy.h step 5: REAR iff |delta| > 90) keeps hop 2 FRONT. Only
+// hop 2's DISPATCH is observed — the goal arrival at ChainA is out of scope.
+// ---------------------------------------------------------------------------
+
+void test_carry_reset_across_turn()
+{
+    TEST_SCOPE("TC3/AC5: a pre-edge turn between two braked blind hops resets the carry -> hop 2 FULL");
+
+    const uint8_t wall2  = nodeByName("Wall2");
+    const uint8_t final_ = nodeByName("final");
+    const uint8_t chainA = nodeByName("ChainA");
+    ASSERT_TRUE(wall2 != FieldMap::NODE_NONE && final_ != FieldMap::NODE_NONE);
+    ASSERT_TRUE(chainA != FieldMap::NODE_NONE);
+
+    resetWorld();
+    Serial.clearCapture();
+
+    // goTo(ChainA) routes Wall2 -> final -> ChainA (the Chain spur hangs off `final`, and
+    // Wall2's only edge into the main graph is Wall2 -> final). Pin the two-hop route so a
+    // fixture re-weight fails loudly rather than binding this test on a different path.
+    ASSERT_EQ(routedFirstHop(wall2, chainA), final_);
+    ASSERT_EQ(routedFirstHop(final_, chainA), chainA);
+    const Routes::EdgeInfo& e1 = FieldMap::getEdge(wall2, final_);
+    const Routes::EdgeInfo& e2 = FieldMap::getEdge(final_, chainA);
+    ASSERT_TRUE(e1.type == Routes::EdgeType::BLIND);
+    ASSERT_TRUE(e2.type == Routes::EdgeType::BLIND);
+
+    // SAME-DIRECTION premise (see the ROUTE CHOICE block above): no per-edge direction
+    // override on either hop, and the bend at `final` is a REAL turn (> tolerance) that
+    // stays at or below the AUTO rear threshold — so BOTH hops resolve FRONT and the carry
+    // READ takes the SUBTRACT branch (the DIRECTION-FLIP branch cannot co-guard the reset).
+    ASSERT_TRUE(e1.direction_override == Routes::DirectionMode::DEFAULT);
+    ASSERT_TRUE(e2.direction_override == Routes::DirectionMode::DEFAULT);
+    const float bend = wrapDeltaDeg(e2.heading_deg - e1.heading_deg);
+    ASSERT_TRUE(fabsf(bend) > Config::NAV_TURN_TOLERANCE_DEG);
+    ASSERT_TRUE(fabsf(bend) <= Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG);
+    // Hop 2's FULL command must be profiled (> TSHAPE_MIN_MOVE_CM), so a leaked stale carry
+    // (which floors dispatchCm at PIVOT_TRIM_MIN_DRIVE_CM) is observable as the degraded
+    // MoveSyncDegs path.
+    ASSERT_TRUE(e2.distance_cm > Config::TSHAPE_MIN_MOVE_CM);
+
+    // Seat at Wall2 (world frame binds the seated facing to heading 0). Seating ON the
+    // Wall2 RESET node is safe: the wall-zero interlude is gated `!firstPlan`
+    // (PathTracker.cpp:1997), so it never fires on a goTo's start node.
+    seatAt("Wall2");
+
+    PathTracker.goTo(chainA).async();
+    // Park the corrected IMU read at hop 1's heading (~311) BEFORE the first plan tick, so
+    // hop 1 (Wall2 -> final, SYNC braked blind) sees delta ~0.19 < NAV_TURN_TOLERANCE_DEG
+    // and dispatches its move DIRECTLY — the ONLY turn in this test is the
+    // carry-invalidating one at `final` (hop 2's plan).
+    mmL.mockYawDeg = (double) hwYaw((int16_t) lroundf(e1.heading_deg));
+    tickUntilBlindDispatch();    // dispatch hop 1 (profiled MoveSync; SNAPSHOTs the carry baseline)
+
+    // Retire hop 1 with a HUGE overshoot (each tick over-advances by kEncoderAdvanceStep),
+    // so the SNAPSHOTed carry baseline is far larger than hop 2's 25 cm — a failed turn
+    // reset would shrink hop 2 below TSHAPE_MIN_MOVE_CM into the degraded path.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() != final_;
+         ++i)
+    {
+        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.DriveDC.mockSetPrevTaskDone(true);
+        cooperativeTick();
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), final_);
+
+    // hop 2 = final -> ChainA. CRITICAL sequencing: the FSM plans hop 2 on the NEXT tick;
+    // the belief heading is STILL hop 1's (~311 — the SYNC hop never touched the mock IMU),
+    // so the plan sees the real ~49 deg delta to hop 2's FRONT body heading (0) and
+    // DISPATCHES the carry-invalidating pre-edge turn. Tick until it is in flight.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && Drive.isIdle() && !PathTracker.hasFault();
+         ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_FALSE(Drive.isIdle());    // a REAL pre-edge turn dispatched (its site invalidated the carry)
+
+    // Settle the turn at hop 2's FRONT body heading (== e2.heading_deg, 0), then tick until
+    // hop 2's MOVE dispatches. Poll BOTH move counters so the assertion reads WHICH dispatch
+    // path hop 2 took (the turn runs Move(L,R), never a MoveSync/MoveSyncDegs, so neither
+    // counter moves until hop 2's move itself dispatches).
+    const uint32_t syncBefore = MiniR4.DriveDC.moveSyncCallCount;
+    const uint32_t degsBefore = MiniR4.DriveDC.moveSyncDegsCallCount;
+    mmL.mockYawDeg            = (double) hwYaw((int16_t) lroundf(e2.heading_deg));
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && MiniR4.DriveDC.moveSyncCallCount == syncBefore
+                    && MiniR4.DriveDC.moveSyncDegsCallCount == degsBefore && !PathTracker.hasFault();
+         ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, syncBefore);        // profiled -> FULL 25 cm (carry reset by the turn)
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncDegsCallCount, degsBefore);    // NOT degraded (no stale carry survived the turn)
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, Config::TSHAPE_START_SPEED);    // FRONT cold-start braked seed
+}
+
+// ---------------------------------------------------------------------------
+// TC4 (AC5) — a fault -> clear drops the carry, so the next goTo's braked blind hop
+// commands its FULL distance. `goTo(RevA)` from the chain spur is UNREACHABLE (the
+// RevA..RevD cluster is an isolated graph component), latching `Fault::UNREACHABLE`
+// whose `_enterFault` drops the carry baseline (and clears the queue). Same
+// MoveSync-vs-MoveSyncDegs observable on the post-clear hop.
+//
+// NOTE: the fault reset and the following fresh goTo's origin-bind reset CO-GUARD this
+// hop, so a dispatch observable cannot ISOLATE the fault-specific reset (both drive the
+// carry to inactive). What this test DOES guarantee — the end-to-end property AC5 asks
+// for — is that no stale carry survives a fault -> clear -> new goTo.
+// ---------------------------------------------------------------------------
+
+void test_carry_reset_across_fault_then_clear()
+{
+    TEST_SCOPE("TC4/AC5: a fault->clear drops the carry -> the next goTo's braked blind hop is FULL");
+
+    const uint8_t nC   = nodeByName("ChainC");
+    const uint8_t nD   = nodeByName("ChainD");
+    const uint8_t revA = nodeByName("RevA");    // isolated cluster -> UNREACHABLE from the chain spur
+    ASSERT_TRUE(revA != FieldMap::NODE_NONE);
+
+    resetWorld();
+    Serial.clearCapture();
+    seatAt("ChainB", 0);
+
+    // goTo #1: ChainB -> ChainC (braked blind, huge overshoot) SNAPSHOTs a large carry baseline, then
+    // IDLE at ChainC. The carry stays active across goal-arrival IDLE (its reset is deferred to the
+    // next goTo's origin bind by design) — so the fault below is what must drop it here.
+    PathTracker.goTo(nC).async();
+    tickUntilBlindDispatch();
+    expectBlindHop(kMainHopDistCm[2]);
+    ASSERT_EQ(Localization.getCurrentNode(), nC);
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+
+    // Induce a fault: goTo(RevA) is UNREACHABLE from ChainC, so PLAN_NEXT_HOP latches
+    // Fault::UNREACHABLE. `_enterFault` drops the carry baseline and clears the queue.
+    PathTracker.goTo(revA).async();
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.hasFault(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.hasFault());
+    PathTracker.clearFault();
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Post-clear goTo: ChainC -> ChainD (8 cm) commands its FULL distance -> a profiled MoveSync, NOT
+    // the degraded MoveSyncDegs a leaked huge stale carry would force.
+    const uint32_t syncBefore = MiniR4.DriveDC.moveSyncCallCount;
+    const uint32_t degsBefore = MiniR4.DriveDC.moveSyncDegsCallCount;
+    PathTracker.goTo(nD).async();
+    tickUntilBlindDispatch();
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, syncBefore);
+    ASSERT_EQ(MiniR4.DriveDC.moveSyncDegsCallCount, degsBefore);
+    ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, Config::TSHAPE_START_SPEED);
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// TC2 (AC4, chaining OFF) — a single goTo walking >=3 consecutive braked blind hops,
+// each seeded a boundary carry, telescopes via the GENERALIZED (non-chain) measured-
+// carry subtraction so no drift accumulates over N hops. Same realistic-step driver +
+// falsifiable step-count proxy as the in-chain TC8 (`test_boundary_carry_subtracted_...`),
+// but compiled with chaining OFF so the 4 collinear hops are SEPARATE braked blind
+// dead-reckons — the exact path T5 generalizes ADR-059's in-chain carry onto. Runs ONLY
+// on the disabled build.
+// ---------------------------------------------------------------------------
+
+void test_chaining_off_multi_hop_carry_no_drift()
+{
+    TEST_SCOPE("TC2/AC4: chaining OFF -- generalized carry subtracted across braked blind hops, no drift");
+
+    const uint8_t nA = nodeByName("ChainA");
+    const uint8_t nB = nodeByName("ChainB");
+    const uint8_t nC = nodeByName("ChainC");
+    const uint8_t nD = nodeByName("ChainD");
+
+    seatAndDispatchMainChain();    // goTo(ChainD); chaining OFF -> hop 0 is a plain braked blind hop.
+
+    // Seed a genuine ~6 cm boundary carry (2 trailing ~3 cm ticks) after each hop so the NEXT hop's
+    // dispatch measures + subtracts it via the GENERALIZED path. Each hop lands EXACTLY on its target
+    // node (`driveChainHopRealistic` asserts that internally), so no drift accumulates over the climb.
+    driveChainHopRealistic(nA, /*extraCarryTicks*/ 2);
+    const int hop1Steps = driveChainHopRealistic(nB, /*extraCarryTicks*/ 2);
+    driveChainHopRealistic(nC, /*extraCarryTicks*/ 2);
+
+    // FALSIFIABILITY (identical to the in-chain TC8): hop 1 (ChainA->ChainB, 20 cm) measures the ~6 cm
+    // carry hop 0 rolled and subtracts it (generalized non-chain path), commanding ~14 cm -> 6 steps;
+    // the UNCARRIED 20 cm edge needs 7. Strip the generalized subtraction and hop 1 commands the full
+    // 20 cm -> 7 steps -> the strict GT below fails. This is the proxy AC4 names (arrival step-count
+    // bound + exact final-node landing).
+    constexpr int kUncarriedHop1Steps  = 7;    // == uncarried count; strict GT fails at 7, passes at carried 6.
+    constexpr int kCarriedHop1MaxSteps = 6;    // the measured carry-adjusted budget.
+    ASSERT_GT(kUncarriedHop1Steps, hop1Steps);
+    ASSERT_GE(kCarriedHop1MaxSteps, hop1Steps);
+
+    // Final hop: land exactly on ChainD, braked (profiled brake OR sub-TSHAPE_MIN_MOVE_CM one-shot).
+    driveChainHopRealistic(nD, /*extraCarryTicks*/ 0);
+    ASSERT_TRUE(MiniR4.DriveDC.lastBrake || MiniR4.DriveDC.lastMoveSyncDegsBrake);
+    ASSERT_FALSE(PathTracker.hasFault());
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// TC8 (AC5 handoff) — the chain-retire ordering pin: a multi-hop chain retires, then a
+// following NON-chain braked blind hop within the SAME goTo telescopes off the chain-
+// final SNAPSHOT baseline (the SNAPSHOT survives `_chainReset`; the carry is read ONCE,
+// no double-subtract). Runs on the MAX_CHAIN_HOPS=2 build — the only host build where a
+// multi-hop chain retires at an INTERIOR node followed by a plain braked blind hop within
+// one goTo (the uncapped default build always chains straight to the goal).
+// ---------------------------------------------------------------------------
+
+void test_post_chain_handoff_telescopes()
+{
+    TEST_SCOPE("TC8/AC5: chain retires (cap) -> post-chain braked blind hop telescopes off chain-final carry");
+
+    const uint8_t nFinal = nodeByName("final");
+    const uint8_t nA     = nodeByName("ChainA");
+    const uint8_t nB     = nodeByName("ChainB");
+    const uint8_t nC     = nodeByName("ChainC");
+
+    resetWorld();
+    Serial.clearCapture();
+    seatAt("final", 0);
+
+    // MAX_CHAIN_HOPS=2: goTo(ChainC) forms the chain final->ChainA->ChainB (2 hops), which RETIRES at
+    // ChainB (cap trip); then ChainB->ChainC is the goal's single remaining hop -> a NON-chain braked
+    // blind hop that telescopes off the chain-final (ChainA->ChainB) SNAPSHOT. Pin the route.
+    ASSERT_EQ(routedFirstHop(nFinal, nC), nA);
+    ASSERT_EQ(routedFirstHop(nA, nC), nB);
+    ASSERT_EQ(routedFirstHop(nB, nC), nC);
+
+    PathTracker.goTo(nC).async();
+    tickUntilBlindDispatch();    // dispatch chain hop 0 (final -> ChainA).
+
+    // Retire the chain: hop 0 (mid) with no carry, hop 1 (ChainA->ChainB, the chain-FINAL braked hop)
+    // with a seeded ~6 cm boundary carry so the post-chain ChainB->ChainC hop measures it off the
+    // chain-final baseline (which `_chainReset` must LEAVE intact — the chain-retire ordering pin).
+    driveChainHopRealistic(nA, /*extraCarryTicks*/ 0);
+    driveChainHopRealistic(nB, /*extraCarryTicks*/ 2);
+
+    // The post-chain hop ChainB->ChainC (20 cm) telescopes: its command is reduced by the ~6 cm carry,
+    // so it arrives in FEWER ~3 cm steps than the raw 20 cm edge (7). If the chain-retire ordering pin
+    // were broken (the SNAPSHOT wiped by `_chainReset`), the hop would command the full 20 cm -> 7
+    // steps -> the strict GT fails. Landing exactly on ChainC confirms no double-subtract drift.
+    const int hopSteps = driveChainHopRealistic(nC, /*extraCarryTicks*/ 0);
+    constexpr int kUncarriedSteps  = 7;    // ceil(20/3); strict GT fails at the uncarried count.
+    constexpr int kCarriedMaxSteps = 6;    // the carry-adjusted budget (matches the in-chain TC8).
+    ASSERT_GT(kUncarriedSteps, hopSteps);
+    ASSERT_GE(kCarriedMaxSteps, hopSteps);
+    ASSERT_EQ(Localization.getCurrentNode(), nC);
+
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ---------------------------------------------------------------------------
+// AC5 scenarios NOT covered by a dedicated dispatch-observable test above, and why —
+// each needs fixture geometry the single-sourced `field_fixture.py` does not author.
+// The PRODUCTION invalidation sites for all of these ARE present (PathTracker.cpp) and
+// are exercised structurally by the tests above / the existing TC6c ineligibility probes;
+// what is missing is a route that puts a SECOND braked blind hop AFTER the event within
+// one goTo so its full-distance dispatch is observable.
+//
+// TODO(T6): non-blind LINE/PROJECTION hop BETWEEN two braked blind hops (AC5 "a non-blind
+//   hop") — needs a blind -> LINE/proj -> blind route in one goTo. The fixture's LINE/proj
+//   edges either start a run (LpIn->LpJoin->LpBlind*) or terminate at the goal, so no blind
+//   hop 3 follows the non-blind hop to observe the reset. The invalidation itself fires at
+//   PathTracker.cpp:3126 (LINE) / :3171 (PROJECTION) / :1922 (line-arrival re-anchor).
+//
+// TODO(T6): STOP_AT_LINE / seek hop BETWEEN two braked blind hops (AC5 "a seek arrival") —
+//   `SeekPre->Start->Inter1` reaches the seek but Inter1 is the goal, so there is no braked
+//   blind hop after the seek to observe. Invalidation fires at PathTracker.cpp:3241.
+//
+// TODO(T6): wall/line RE-ANCHOR between two braked blind hops (AC5 "a wall/line re-anchor")
+//   — `ResetPre->Wall2->ResetBeyond` is the route, but driving PAST the Wall2 RESET node
+//   requires retiring the multi-phase wall-zero interlude (`expectWallStop`) mid-goTo; the
+//   invalidation fires at PathTracker.cpp:1415. (The turn-reset TC3 above only DEPARTS
+//   from the Wall2 reset node — the interlude is `!firstPlan`-gated off a goTo's start
+//   node, so TC3 never reaches this path.)
+//
+// TODO(T6): DIRECTION-FLIP with NO turn (AC5 "a REAR after a FRONT with no turn", TC6) —
+//   the re-arm branch (PathTracker.cpp:3424-3452) fires ONLY when a REAR hop follows a FRONT
+//   hop WITHOUT a pre-edge turn, i.e. when the two edges' headings differ by 180 (the body
+//   faces the same way, driving backward). The fixture's only direction-flip pair
+//   (DirFlipB->DirFlipC, forced REAR, collinear heading 0) turns the body 180 first, so the
+//   pre-edge-turn invalidation (:2434) pre-empts the re-arm branch. Exercising the re-arm
+//   needs an authored A->B (FRONT, heading H) then B->C (REAR, heading H+180) pair.
+//
+// TODO(T6): CHAIN-DIVERGENCE fallback (PathTracker.cpp:3366-3389, TC7) — the divergence
+//   branch is "unreachable by construction on a static NEXT_HOP table" (its own comment); a
+//   real FSM drive cannot reach it without corrupting the run buffer, so its ZERO-stale-carry
+//   invalidation (:3384) has no host-reachable trigger. It is guarded by code review + the
+//   explicit `_brakedBlindCarryActive = false` at the divergence site.
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
@@ -1164,11 +1673,24 @@ int main()
     // default build (#26a) -- never under #26b (disabled), #26c, or #26d.
 #if defined(BLIND_CHAIN_TEST_HOP_CAP)
     test_hop_cap_truncates_and_reforms();
+    // ADR-079 TC8 (AC5 handoff): the MAX_CHAIN_HOPS=2 build is the ONLY host build in which a
+    // multi-hop chain retires at an INTERIOR node followed by a NON-chain braked blind hop within
+    // ONE goTo (the uncapped default build always chains all the way to the goal, so no post-chain
+    // hop exists). It reuses this cap build to exercise the chain-retire-ordering pin: the
+    // chain-final SNAPSHOT survives `_chainReset` and the following non-chain hop telescopes off it.
+    test_post_chain_handoff_telescopes();
 #elif defined(BLIND_CHAIN_TEST_DISTANCE_CAP)
     test_distance_cap_truncates_and_reforms();
 #else
     test_main_chain_dispatch();
-#if !defined(BLIND_CHAIN_TEST_DISABLED)
+#if defined(BLIND_CHAIN_TEST_DISABLED)
+    // ADR-079 TC2 (AC4): chaining compiled OFF — a single goTo walking >=3 consecutive braked
+    // blind hops, each seeded a boundary carry, telescopes via the GENERALIZED (non-chain)
+    // measured-carry subtraction so no drift accumulates over N hops. Runs ONLY on the disabled
+    // build (the generalized per-hop path is what chaining-off exercises; the enabled build would
+    // instead form a chain and take the in-`_chain.active` path).
+    test_chaining_off_multi_hop_carry_no_drift();
+#else
     test_ineligible_goal_ends_walk_before_it_starts();
     test_ineligible_short_hop_below_profile_floor();
     test_ineligible_pivot_ends_walk();
@@ -1178,6 +1700,13 @@ int main()
     test_ineligible_non_collinear_bend_ends_walk();
     test_line_to_blind_spanning_run_seeds_captured_cruise();
     test_boundary_carry_subtracted_no_drift_with_n();
+    // ADR-079 T6 (AC3, AC5) — the parity-invisible T4 stub-guard + T5 generalized-carry guards,
+    // asserted on the REAL dispatched setpoint. These run on the default (chaining-ON) build.
+    test_stub_guard_final_hop_floor();          // TC1a (AC3)
+    test_stub_guard_mid_hop_holds_exit();       // TC1b (AC3)
+    test_carry_reset_across_turn();             // TC3  (AC5)
+    test_carry_reset_across_fault_then_clear(); // TC4  (AC5)
+    test_carry_reset_across_origin_bind();      // TC5  (AC5)
 #endif
 #endif
 
