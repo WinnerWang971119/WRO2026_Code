@@ -309,6 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
+    
     PathTracker.goTo("i2");
     Drive.turnToYaw(Localization.toImuYaw(90));
     PathTracker.goTo("MWD");
@@ -319,7 +320,13 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     Manipulator.dumper.home();
     PathTracker.goTo("Start");
     Drive.turnToYaw(Localization.toImuYaw(270));
-    return true;
+    
+   /*
+   PathTracker.goTo("i3");
+   Localization.declarePosition("MWU");
+   PathTracker.goTo("i2");
+   */ 
+   return true;
 }
 
 bool TasksClass::debugYield(const TaskArgs& /*args*/)
@@ -1072,6 +1079,10 @@ bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("i3");
     Drive.turnToYaw(Localization.toImuYaw(90));
+    LineFollower.setEnabled(true).setPreset(Config::SpeedPreset::SLOW).setReverse(false);
+    LineFollower.waitUntilIntersection();
+    LineFollower.setEnabled(false);
+    Drive.stop();
     _waitStationaryMs(200);
     if (!_visionRead()){
         _signalFail();
