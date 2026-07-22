@@ -680,17 +680,12 @@ namespace Config
      *        (ADR-068, `TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      *
      * A single out-of-band sample resets the count to 0. Set to 2 (operator decision) rather
-     * than the mentor's 3, so the debounce stays satisfiable at the bench-measured
-     * `TURN_MIN_RESOLVABLE_DEG` step size and the widened `TURN_TOLERANCE_DEG` below — see the
-     * debounce-coupling `static_assert` in `ConfigChecks.h`, which turns a future desync of any
-     * of the three into a build failure instead of every turn silently hunting to timeout.
+     * than the mentor's 3. Edit this value directly to bench-tune the settle debounce; keep it
+     * small enough (against `TURN_TOLERANCE_DEG`) that the band stays satisfiable per crossing.
      *
      * @note TODO: bench-tune (T11).
      */
-#ifndef TURN_SETTLE_SAMPLES_DEFAULT
-#define TURN_SETTLE_SAMPLES_DEFAULT 2
-#endif
-    constexpr uint8_t TURN_SETTLE_SAMPLES = TURN_SETTLE_SAMPLES_DEFAULT;
+    constexpr uint8_t TURN_SETTLE_SAMPLES = 2;
 
     /**
      * @brief Timeout (ms) for the turn PD controller before it gives up converging (ADR-068).
@@ -714,40 +709,16 @@ namespace Config
      * brakes and declares itself complete (`TurnPDPolicy.h::turnSettleStep` / `turnSettled`).
      * Strictly less-than: a sample exactly AT the boundary is OUT of band.
      *
-     * @warning COUPLED to `TURN_MIN_RESOLVABLE_DEG` and `TURN_SETTLE_SAMPLES` — the settle band
-     *          must be wide enough that at least `TURN_SETTLE_SAMPLES` physical steps land
-     *          inside it per crossing, or the debounce can never be satisfied and every turn
-     *          silently hunts to `TURN_TIMEOUT_MS` (non-faulting by design). Widened from the
-     *          vendor-inherited 0.5 deg to 0.75 deg (operator decision, 2026-07-16) specifically
-     *          to keep this satisfiable at the bench-measured 0.4423 deg/tick resolution:
-     *          `(2 * 0.75) / 0.4423 ~= 3.39` against a required 2 samples — a 1.70x margin. See
-     *          the debounce-coupling `static_assert` in `ConfigChecks.h`, which converts a
-     *          future desync into a build failure instead of a field mystery.
+     * @note Keep the band wide enough that at least `TURN_SETTLE_SAMPLES` physical creep-steps
+     *       land inside it per crossing, or the debounce can never be satisfied and every turn
+     *       silently hunts to `TURN_TIMEOUT_MS` (non-faulting by design). This relationship was
+     *       formerly pinned by a `ConfigChecks.h` static_assert against the bench-measured
+     *       ~0.44 deg/tick creep resolution; that guardrail was removed so the turn PD can be
+     *       bench-tuned freely, so re-check it by hand when retuning.
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
     constexpr float TURN_TOLERANCE_DEG = 0.8f;
-
-    /**
-     * @brief Smallest physically resolvable heading step at the turn PD's creep floor, in
-     *        degrees (ADR-068).
-     *
-     * Bench-measured (T1, Lofaix, 2026-07-16): `omega_at_creep * measured_tick_period` =
-     * 19.52 deg/s * ~22.66 ms = 0.4423 — the angular rate sustained at `TURN_CREEP_PWM` times the
-     * measured ~22.66 ms TURN tick (T1 phase b: the tick a real PD turn actually runs at, higher
-     * than the ~8 ms idle tick because a turn adds a live yaw read plus a Move write per tick).
-     * NOT a placeholder: T1's bench run is the source of truth this value is pinned to. Consumed
-     * only by the `static_assert`s in `ConfigChecks.h` (never read at runtime) — it exists so a
-     * future retune of `TURN_TOLERANCE_DEG` / `TURN_SETTLE_SAMPLES` / `TURN_CREEP_PWM` cannot
-     * silently desync from the physical floor.
-     *
-     * @note TODO: re-measure (T11) if `TURN_CREEP_PWM` is retuned — this value is derived from
-     *       it and goes stale if the creep floor moves without a re-bench.
-     */
-#ifndef TURN_MIN_RESOLVABLE_DEG_DEFAULT
-#define TURN_MIN_RESOLVABLE_DEG_DEFAULT 0.4423f
-#endif
-    constexpr float TURN_MIN_RESOLVABLE_DEG = TURN_MIN_RESOLVABLE_DEG_DEFAULT;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
@@ -808,7 +779,7 @@ namespace Config
      * The mentor's `gyro_move` computes a raw per-ITERATION difference (no division by loop
      * period), so his continuous damping is `Kd_raw * loop_period` — correct only at his fixed
      * ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters (see `TURN_KD` above and
-     * the ~8-11.5 ms vs ~22.66 ms timing-doc inconsistency noted on `TURN_MIN_RESOLVABLE_DEG`),
+     * the ~8-11.5 ms vs ~22.66 ms turn-tick timing inconsistency in the ADR-068 notes),
      * so porting the raw gain verbatim would silently re-scale every time the tick jitters.
      * `GyroHoldPolicy.h::gyroHoldCorrection` (via `TurnPDPolicy.h::turnPdStep`) instead divides by
      * the MEASURED per-step `dtSec`, so this gain carries real units of PWM per (deg/s):
