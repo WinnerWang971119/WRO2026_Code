@@ -309,6 +309,36 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
+    // ===================================================================================
+    // TEMP DIAGNOSTIC (instrumented partial climb; chaining OFF -> one braked hop per goTo).
+    // Watch the [HOP] Serial lines: geo (edge cm) / cmd (commanded cm) / startPwm / tgtHdgW
+    // (target world heading) / yawApp (actual heading) / encSum (start-of-hop encoder; the
+    // delta to the NEXT [HOP] line = actual encoder travel of THIS hop). Also ruler-measure
+    // the chassis position at a couple of nodes vs where the node should be. Stops at MGU
+    // (~33 cm below the top wall) so nothing crashes. Restore the block below afterwards.
+    // ===================================================================================
+    /*PathTracker.goTo("i2");
+    Drive.turnToYaw(Localization.toImuYaw(90));
+    _signalSuccess();
+    _waitStationaryMs(1500);
+    PathTracker.goTo("MYD");
+    _waitStationaryMs(2500);
+    PathTracker.goTo("MYU");
+    _waitStationaryMs(2500);
+    PathTracker.goTo("MBD");
+    _waitStationaryMs(2500);
+    PathTracker.goTo("MBU");
+    _waitStationaryMs(2500);
+    PathTracker.goTo("MGD");
+    _waitStationaryMs(2500);
+    PathTracker.goTo("MGU");
+    _waitStationaryMs(2500);
+    return true;
+    */
+   Drive.holdYaw();
+   Drive.driveDist(100).setMode(DriveMode::GYRO);
+
+    /* ---- ORIGINAL testOne (restore after the diagnostic) ----
     PathTracker.goTo("i2");
     Drive.turnToYaw(Localization.toImuYaw(90));
     PathTracker.goTo("MWU");
@@ -329,6 +359,7 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     PathTracker.goTo("MYD");
     _waitStationaryMs(1000);
     return true;
+    ---- end original ---- */
 }
 
 bool TasksClass::debugYield(const TaskArgs& /*args*/)

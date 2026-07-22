@@ -803,7 +803,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KP_DEFAULT
-#define GYRO_HOLD_KP_DEFAULT 1.6f
+#define GYRO_HOLD_KP_DEFAULT 3.0f
 #endif
     constexpr float GYRO_HOLD_KP = GYRO_HOLD_KP_DEFAULT;
 
@@ -825,7 +825,7 @@ namespace Config
      * @note Consumer: `Drive::_emitGyroHold`, via `GyroHoldPolicy.h::gyroHoldCorrection`.
      */
 #ifndef GYRO_HOLD_KD_DEFAULT
-#define GYRO_HOLD_KD_DEFAULT 0.051f
+#define GYRO_HOLD_KD_DEFAULT 0.07f
 #endif
     constexpr float GYRO_HOLD_KD = GYRO_HOLD_KD_DEFAULT;
 
