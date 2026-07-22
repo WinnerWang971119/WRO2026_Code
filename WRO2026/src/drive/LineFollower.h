@@ -350,8 +350,9 @@ public:
      *               with NO derivative kick.
      * @return       `*this` for fluent chaining.
      * @note LineFollower stays nav-agnostic: this is a plain signed `float`, NOT a
-     *       `Routes::LineFollowMode` enum. `PathTracker` owns the mode→offset mapping (and the
-     *       reverse-frame sign) and passes the resolved float in here.
+     *       `Routes::LineFollowMode` enum. `PathTracker` owns the mode→offset mapping and passes
+     *       the resolved float in here unchanged for FRONT and REAR hops alike — the rotated rear
+     *       board already reads travel-frame, so no reverse sign flip exists (ADR-069 amendment).
      * @note **Unlike `setPreset(...)` / `setReverse(...)`, the offset is RESET to `0.0f` on
      *       every `setEnabled(false)` transition** — it follows the `setOvershootMode(...)` /
      *       `setBrakeOnGate(...)` reset-on-disable lifecycle (ADR-023) so a later
@@ -372,10 +373,10 @@ public:
      *             `getRawError()` contract are identical to the float knob. Prefer this at bench /
      *             direct call sites; the raw float stays for fine offset sweeps.
      * @return    `*this` for fluent chaining.
-     * @note This is the FORWARD-frame mapping — it does NOT apply the reverse-hop sign flip. On a
-     *       rear-board hop `PathTracker` keeps composing `sign * lineFollowModeToSetpoint(mode)`
-     *       through the float knob so the bias stays left-of-TRAVEL; a hand call that reverses must
-     *       negate itself (or pass the mirrored mode). See ADR-069.
+     * @note The mapping is TRAVEL-relative on both boards — LEFT biases left-of-travel whether
+     *       the hop runs on the front or the (180°-rotated, hence already travel-frame) rear
+     *       board. No caller applies a reverse sign flip; `PathTracker` dispatches the same
+     *       mapped value through the float knob. See ADR-069 (amended).
      */
     LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode mode);
 

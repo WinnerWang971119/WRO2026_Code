@@ -42,16 +42,17 @@
  *     (issue #156), so this case additionally pins that the FAST-line arm threads the
  *     resolved lateral offset into the follower.
  *   - TC16 — lateral offset threading (issue #156): the `LineFollowMode::LEFT`
- *     `Ln0->Ln1` LINE edge arms the follower with the composed forward setpoint
- *     `+Config::LINE_FOLLOW_OFFSET_ERROR` (a FORWARD hop, so no reverse-sign flip).
- *   - TC17 — reverse-hop offset negation (issue #156, AC3): the SAME `LineFollowMode::LEFT`
- *     `Ln0->Ln1` LINE edge taken in REVERSE (a builder `setRouteDirection(REAR)` route
- *     override resolves `decision.reverse == true` on the 2-board default) arms the follower
- *     with the NEGATED setpoint `-Config::LINE_FOLLOW_OFFSET_ERROR`. This pins PathTracker's
- *     reverse-sign composition (`sign = decision.reverse ? -1 : +1`) on the
- *     LINE_FOLLOW_INTERSECTION dispatch THROUGH the real FSM — TC16 covers only the forward
- *     branch. The identical composition on the PROJECTION_FOLLOW dispatch is not reached by
- *     this plain-LINE hop; it is covered only by the local arithmetic re-derivation in TC3
+ *     `Ln0->Ln1` LINE edge arms the follower with the resolved setpoint
+ *     `+Config::LINE_FOLLOW_OFFSET_ERROR` (a FORWARD hop; TC17 pins the same value REAR).
+ *   - TC17 — reverse-hop offset pass-through (issue #156, amended ADR-069): the SAME
+ *     `LineFollowMode::LEFT` `Ln0->Ln1` LINE edge taken in REVERSE (a builder
+ *     `setRouteDirection(REAR)` route override resolves `decision.reverse == true` on the
+ *     2-board default) arms the follower with the SAME setpoint as forward,
+ *     `+Config::LINE_FOLLOW_OFFSET_ERROR` — NO software negation. The 180°-rotated rear
+ *     board already reads travel-frame, so the un-negated value keeps LEFT left-of-travel;
+ *     the original `reverse ? -1 : +1` composition double-mirrored (bench-confirmed
+ *     2026-07). Pinned THROUGH the real FSM on the LINE_FOLLOW_INTERSECTION dispatch —
+ *     TC16 covers only the forward branch; PROJECTION_FOLLOW is covered by TC3
  *     (test_line_follower_offset.cpp), which does not run PathTracker.
  *
  * Config overrides use `target_compile_definitions` (CMakeLists.txt), never an
@@ -398,13 +399,14 @@ void test_tc16_left_bias_threads_offset()
 }
 
 // ===========================================================================
-// TC17 — a REVERSE (rear-board) LEFT LINE hop threads the NEGATED offset (issue #156, AC3).
+// TC17 — a REVERSE (rear-board) LEFT LINE hop threads the SAME offset as forward (ADR-069
+// amendment: no software negation — the rotated rear board already reads travel-frame).
 // ===========================================================================
 
-void test_tc17_reverse_left_bias_negates_offset()
+void test_tc17_reverse_left_bias_passes_offset_unchanged()
 {
-    TEST_SCOPE("TC17: a REAR-board LineFollowMode::LEFT Ln0->Ln1 hop threads -OFFSET "
-               "(issue #156, AC3 reverse-sign composition)");
+    TEST_SCOPE("TC17: a REAR-board LineFollowMode::LEFT Ln0->Ln1 hop threads +OFFSET "
+               "un-negated (ADR-069 amendment: no reverse-sign composition)");
 
     const uint8_t ln0 = nodeByName("Ln0");
     const uint8_t ln1 = nodeByName("Ln1");
@@ -418,8 +420,8 @@ void test_tc17_reverse_left_bias_negates_offset()
 
     // Pin the biased cell + the direct route so a shadow-table edit fails LOUDLY here rather than
     // silently binding this probe on a different (unbiased / non-LINE) edge. This is the SAME LEFT
-    // cell TC16 drives FORWARD — here it is taken in REVERSE, so the resolved forward setpoint
-    // (+OFFSET) is negated to -OFFSET by PathTracker's dispatch-site sign composition.
+    // cell TC16 drives FORWARD — here it is taken in REVERSE, and the resolved setpoint (+OFFSET)
+    // must arrive UNCHANGED: the rotated rear board supplies the travel-frame mirror physically.
     ASSERT_EQ(routedFirstHop(ln0, ln1), ln1);
     ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).type == Routes::EdgeType::LINE);
     ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).line_follow_mode_override
@@ -437,18 +439,19 @@ void test_tc17_reverse_left_bias_negates_offset()
 
     // The hop is GENUINELY reverse: the LINE_FOLLOW_INTERSECTION dispatch threaded
     // `.setReverse(decision.reverse)` == true. This guards against a regression where REAR
-    // resolution silently degrades to a forward hop (which would thread +OFFSET and mask the
-    // negation the assert below checks).
+    // resolution silently degrades to a forward hop (which would trivially satisfy the
+    // un-negated assert below without exercising the reverse dispatch at all).
     ASSERT_TRUE(LineFollower.lastReverse);
 
-    // THE TC17 ASSERT: a REVERSE LEFT hop composes sign(-1) * lineFollowModeToSetpoint(LEFT) =
-    // -Config::LINE_FOLLOW_OFFSET_ERROR (referenced, never a literal, per the retune-fanout rule),
-    // so the bias stays left-of-TRAVEL. Falsifiable: dropping the `sign = decision.reverse ? -1 :
-    // +1` factor at the LINE_FOLLOW_INTERSECTION dispatch (the site this plain-LINE hop exercises)
-    // would thread the un-negated forward +OFFSET here and RED this assert. (The identical
-    // PROJECTION_FOLLOW reverse-sign is covered only by TC3's local re-derivation.)
-    ASSERT_TRUE(nearf(LineFollower.lastLineFollowOffset, -Config::LINE_FOLLOW_OFFSET_ERROR));
-    ASSERT_TRUE(LineFollower.lastLineFollowOffset < 0.0f);
+    // THE TC17 ASSERT: a REVERSE LEFT hop threads lineFollowModeToSetpoint(LEFT) =
+    // +Config::LINE_FOLLOW_OFFSET_ERROR UNCHANGED (referenced, never a literal, per the
+    // retune-fanout rule). The rotated rear board's centroid is already travel-frame, so the
+    // un-negated value is what keeps the bias left-of-TRAVEL; re-introducing a
+    // `decision.reverse ? -1 : +1` factor at the LINE_FOLLOW_INTERSECTION dispatch (the site
+    // this plain-LINE hop exercises) would thread -OFFSET here and RED this assert —
+    // that software mirror double-flipped on the bench (rear RIGHT tracked travel-left).
+    ASSERT_TRUE(nearf(LineFollower.lastLineFollowOffset, Config::LINE_FOLLOW_OFFSET_ERROR));
+    ASSERT_TRUE(LineFollower.lastLineFollowOffset > 0.0f);
 }
 
 // ===========================================================================
@@ -465,7 +468,7 @@ int main()
     test_tc10c_seek_cruises_at_resolved_tier();
     test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise();
     test_tc16_left_bias_threads_offset();
-    test_tc17_reverse_left_bias_negates_offset();
+    test_tc17_reverse_left_bias_passes_offset_unchanged();
 
     TEST_REPORT();
 }

@@ -176,8 +176,9 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowMode(Routes::
 {
     // Ergonomic sugar over setLineFollowOffset: map the per-edge mode to the same signed offset the
     // float knob takes, then delegate — so the staging, reset-on-disable lifecycle, and P+D maths
-    // are byte-identical to the float path. FORWARD-frame only; the reverse-hop sign flip stays in
-    // PathTracker's float call (ADR-069). DEFAULT resolves to MIDDLE (offset 0) in the mapper.
+    // are byte-identical to the float path. The mapping is travel-relative on BOTH boards — the
+    // rotated rear board already reads travel-frame, so no reverse sign flip exists anywhere
+    // (ADR-069 amendment). DEFAULT resolves to MIDDLE (offset 0) in the mapper.
     return setLineFollowOffset(lineFollowModeToSetpoint(mode));
 }
 

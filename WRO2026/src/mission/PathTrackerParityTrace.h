@@ -79,9 +79,9 @@
  *                      value as the old `line_mode`, corrected key.
  *    - `follow_mode` : the RESOLVED `Routes::LineFollowMode` member name (`_ptFollowModeName`),
  *                      one of MIDDLE/LEFT/RIGHT — never "DEFAULT" (`_resolveLineFollowMode`
- *                      resolves DEFAULT→MIDDLE upstream). It is the MODE, recorded PRE-reverse-
- *                      sign: the reverse-hop sign flip only affects the actual float offset
- *                      handed to `LineFollower.setLineFollowOffset(...)`, never this record.
+ *                      resolves DEFAULT→MIDDLE upstream). It is the MODE, not the float offset
+ *                      handed to `LineFollower.setLineFollowOffset(...)` (which is the mapped
+ *                      setpoint, dispatched direction-independent — ADR-069 amendment).
  *
  * 4. `projection_follow` — field-set BUMP (same `line_mode`→`speed` rename + new `follow_mode`).
  *    Exact serialization (`_ptEmitProjectionFollow`, PathTracker.cpp):

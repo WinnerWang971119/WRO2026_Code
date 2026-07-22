@@ -1,6 +1,6 @@
 # ADR-069: LineFollower lateral offset-follow — setpoint-bias LEFT/RIGHT, directional and travel-relative
 
-**Status:** Implemented
+**Status:** Implemented (amended 2026-07 — reverse-hop negation removed after bench polarity check)
 **Date decided:** 2026-07 (issue #156)
 
 ## Rule
@@ -12,8 +12,13 @@ tracking the line. The bias is a signed offset on the P term only —
 staying the **raw** centroid — so `getRawError()` keeps its existing contract and a
 mid-follow mode change injects no derivative kick. `mode` is **directional** for LINE
 edges (LEFT/RIGHT does not mirror to the reverse-direction entry; BLIND `mode` stays
-bidirectional) and **travel-relative**: `PathTracker` negates the resolved offset on a
-rear-board (reverse) hop, so LEFT always means left of the direction of travel. `DEFAULT`
+bidirectional) and **travel-relative**: LEFT always means left of the direction of travel.
+The travel frame is provided by the hardware, not software — the rear board is mounted
+rotated 180°, so its centroid error is already travel-frame (the same rotation that keeps
+the reverse P+D stable with no error negation), and `PathTracker` dispatches the resolved
+offset **unchanged** on FRONT and REAR hops alike. (Amendment 2026-07: the original
+`reverse ? -1 : +1` software negation assumed a robot-frame rear board and double-mirrored
+the bias — a rear-hop RIGHT tracked travel-left on the bench.) `DEFAULT`
 resolves to `MIDDLE` (offset 0); there is no `PIPELINE_CONFIG` follow-offset default.
 `EdgeInfo` grows an 8th field, `line_follow_mode_override: LineFollowMode`, and every
 generated + hand-authored `EDGES` cell now goes through one uniform `constexpr
@@ -45,7 +50,8 @@ zero, so junction-freeze, the distance gate, and lost-line handling are untouche
 - `LineFollower::setLineFollowMode(Routes::LineFollowMode)` is ergonomic sugar over that
   knob for bench / direct call sites — it delegates to `setLineFollowOffset(
   lineFollowModeToSetpoint(mode))`, so lifecycle and the P+D / `getRawError()` contracts are
-  identical. It is the FORWARD-frame mapping only (no reverse sign). This is the one place the
+  identical. The mapping is travel-relative on both boards (no reverse sign anywhere — see
+  the amendment in the Rule). This is the one place the
   drive layer takes a dependency on the generated `Routes::LineFollowMode` enum: the header
   opaque-forward-declares it (no `nav/routes.h` include, so shadow-routes host targets do not
   double-define `Routes`); `LineFollower.cpp` pulls the full definition via `WROMath.h`. The
@@ -53,8 +59,8 @@ zero, so junction-freeze, the distance gate, and lost-line handling are untouche
   conformance guards — every rendered biased follow still reaches the recorder through
   `setLineFollowOffset`, since `PathTracker` dispatches the float, not the enum.
 - `PathTracker::_resolveLineFollowMode(edge)` maps `DEFAULT`→`MIDDLE`; `WROMath::
-  lineFollowModeToSetpoint(mode)` converts to a signed float; `PathTracker` composes
-  `sign = decision.reverse ? -1 : +1` and chains `.setLineFollowOffset(sign * setpoint)`
+  lineFollowModeToSetpoint(mode)` converts to a signed float; `PathTracker` chains
+  `.setLineFollowOffset(lineFollowModeToSetpoint(mode))` — no direction-conditioned sign —
   into `LINE_FOLLOW_INTERSECTION` and `PROJECTION_FOLLOW`. Not added to
   `EdgeDispatchQuery`/`Decision` — that 7-field truth table is untouched.
 - `validator.py` accepts `MIDDLE|LEFT|RIGHT` on LINE (drops the issue-#156 reject);
@@ -84,8 +90,9 @@ zero, so junction-freeze, the distance gate, and lost-line handling are untouche
   laterally off the node versus what `Localization`/the sim assume. This sits inside
   junction-arrival tolerance and is left uncompensated in both — the project has a scar
   from adding per-junction sim offsets before (see ADR-054's own trigger list).
-- **Bench items, pre-competition:** confirm LEFT/RIGHT polarity on the front AND rear
-  line boards; check `getJunctionType()` classification and `isLineLost()` still behave
+- **Bench items, pre-competition:** ~~confirm LEFT/RIGHT polarity on the front AND rear
+  line boards~~ (done 2026-07: front correct, rear mirrored — fixed by removing the
+  software negation, see the Rule amendment); check `getJunctionType()` classification and `isLineLost()` still behave
   correctly at full offset (the crossbar channel pattern shifts under the sensor); tune
   `LINE_FOLLOW_OFFSET_ERROR` on the actual mat.
 

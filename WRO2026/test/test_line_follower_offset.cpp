@@ -24,9 +24,9 @@
  *          MIDDLE reproduces the pre-#156 baseline byte-for-byte; RIGHT mirrors LEFT.
  *   - TC2: a mid-follow MIDDLE->LEFT mode change — P steps by LINE_KP*offset, no D-kick,
  *          `getRawError()` still returns the raw centroid.
- *   - TC3: the reverse-hop COMPOSITION `sign * lineFollowModeToSetpoint(mode)` PathTracker
- *          passes — a rear-board LEFT hop negates the forward setpoint. Pins the composition,
- *          not physical travel-frame polarity (that is bench-confirmed).
+ *   - TC3: the reverse-hop COMPOSITION PathTracker passes — a rear-board hop dispatches
+ *          `lineFollowModeToSetpoint(mode)` UN-negated (the rotated rear board already reads
+ *          travel-frame; a software flip double-mirrors — bench-confirmed, ADR-069 amendment).
  *   - TC4: the offset lifecycle — cold enable follows centred (offset 0); a re-arm on an
  *          already-enabled follower preserves the bias; `setEnabled(false)` RESETS it to 0 so a
  *          later `followDistance()`/`followUntilIntersection()` never inherits a stale bias.
@@ -220,40 +220,37 @@ static void test_tc2_mid_follow_mode_change_bounded_p_step_no_d_kick()
 }
 
 // ===========================================================================
-// TC3 — reverse-hop composition negates the forward setpoint (pins the composition only).
+// TC3 — reverse hop passes the setpoint UNCHANGED (no software mirror; pins the composition).
 // ===========================================================================
 
-static void test_tc3_reverse_hop_composition_negates_offset()
+static void test_tc3_reverse_hop_passes_setpoint_unchanged()
 {
-    TEST_SCOPE("TC3: LEFT + reverse — PathTracker composition passes the NEGATED offset");
+    TEST_SCOPE("TC3: LEFT + reverse — PathTracker passes the setpoint UN-negated (no sign flip)");
 
-    // The composition PathTracker performs at LINE_FOLLOW_INTERSECTION / PROJECTION_FOLLOW is
-    // `.setLineFollowOffset(sign * lineFollowModeToSetpoint(mode))`, sign = decision.reverse ? -1 : +1.
-    // Forward LEFT resolves to +LINE_FOLLOW_OFFSET_ERROR; a rear-board (reverse) hop negates it so
-    // the bias stays left-of-TRAVEL. This pins the composition only — physical travel-frame
-    // polarity is bench-confirmed (the negate is a one-line convention, ADR-069).
-    const float forwardLeft = lineFollowModeToSetpoint(Routes::LineFollowMode::LEFT);
-    ASSERT_TRUE(nearf(forwardLeft, Config::LINE_FOLLOW_OFFSET_ERROR));
+    // PathTracker dispatches `.setLineFollowOffset(lineFollowModeToSetpoint(mode))` at
+    // LINE_FOLLOW_INTERSECTION / PROJECTION_FOLLOW with NO direction-conditioned sign. The rear
+    // board is mounted rotated 180°, so its centroid error is already travel-frame — the same
+    // rotation that keeps the reverse P+D stable with no error negation. A software `reverse ?
+    // -1 : +1` flip on top of that double-mirrors the bias (rear RIGHT tracked travel-LEFT,
+    // bench-confirmed 2026-07; ADR-069 amendment). This pins the un-negated composition —
+    // physical travel-frame polarity itself is bench-confirmed, not host-testable.
+    const float leftSetpoint = lineFollowModeToSetpoint(Routes::LineFollowMode::LEFT);
+    ASSERT_TRUE(nearf(leftSetpoint, Config::LINE_FOLLOW_OFFSET_ERROR));
 
-    const float reverseSign = -1.0f;    // decision.reverse ? -1.0f : 1.0f
-    const float composed    = reverseSign * forwardLeft;
-    ASSERT_TRUE(nearf(composed, -Config::LINE_FOLLOW_OFFSET_ERROR));
-
-    // Feed the composed (negated) setpoint into the REAL follower (forward follow, to isolate the
-    // offset sign from the reverse cruise-negate) and confirm the steering honours exactly it.
+    // Feed the setpoint into the REAL follower (forward follow, to isolate the offset path from
+    // the reverse cruise-negate) and confirm the steering honours exactly it — the SAME value a
+    // rear-board hop dispatches.
     const float err = 1.0f;
     int16_t gotL, gotR;
-    driveSteady(composed, err, gotL, gotR);
+    driveSteady(leftSetpoint, err, gotL, gotR);
     int16_t expL, expR;
-    expectedSteadyLR(composed, err, expL, expR);
+    expectedSteadyLR(leftSetpoint, err, expL, expR);
     ASSERT_EQ(gotL, expL);
     ASSERT_EQ(gotR, expR);
 
-    // A reverse LEFT composes to the same magnitude as a forward RIGHT (-OFFSET) — the mirror.
-    int16_t rightL, rightR;
-    expectedSteadyLR(-Config::LINE_FOLLOW_OFFSET_ERROR, err, rightL, rightR);
-    ASSERT_EQ(gotL, rightL);
-    ASSERT_EQ(gotR, rightR);
+    // LEFT and RIGHT stay a true mirror pair about MIDDLE for the dispatched value — no
+    // direction-conditioned asymmetry survives anywhere in the composition.
+    ASSERT_TRUE(nearf(lineFollowModeToSetpoint(Routes::LineFollowMode::RIGHT), -leftSetpoint));
 }
 
 // ===========================================================================
@@ -386,7 +383,7 @@ int main()
 {
     test_tc1_offset_biases_p_setpoint_over_error_sweep();
     test_tc2_mid_follow_mode_change_bounded_p_step_no_d_kick();
-    test_tc3_reverse_hop_composition_negates_offset();
+    test_tc3_reverse_hop_passes_setpoint_unchanged();
     test_tc4_offset_lifecycle_reset_on_disable();
     test_tc5_mode_sugar_matches_offset_knob();
     TEST_REPORT();
