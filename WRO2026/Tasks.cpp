@@ -924,15 +924,16 @@ namespace
     /**
      * @brief Belt positions reaching the three tiles of one wall row, in take order.
      *
-     * The belt parks at `MID` (the far-end travel pose — see `Config::BeltStation`) before
-     * every drive, so `GRAB_RIGHT` — the reach position nearest that pose — comes first and
-     * costs almost no belt move. The order then sweeps monotonically toward the HOME end
-     * (`GRAB_RIGHT` -> `GRAB_MID` -> `GRAB_LEFT`), so no grab backtracks across the belt.
+     * The order sweeps monotonically from the HOME end toward the far-end travel pose
+     * (`GRAB_LEFT` -> `GRAB_MID` -> `GRAB_RIGHT` — see `Config::BeltStation`), so no grab
+     * backtracks across the belt. The belt still parks at `MID` before every drive; since
+     * `GRAB_RIGHT` is the reach position nearest that pose, the RETURN to `MID` after the
+     * last grab costs almost no belt move.
      */
     constexpr Config::BeltStation kMosaicGrabOrder[kMosaicTilesPerRow] = {
-        Config::BeltStation::GRAB_RIGHT,
-        Config::BeltStation::GRAB_MID,
         Config::BeltStation::GRAB_LEFT,
+        Config::BeltStation::GRAB_MID,
+        Config::BeltStation::GRAB_RIGHT,
     };
 
     /**
