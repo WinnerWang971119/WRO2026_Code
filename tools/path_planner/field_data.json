@@ -411,6 +411,102 @@
       "u": "i3",
       "v": "shovel1Get",
       "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "i2",
+      "v": "MYD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYD",
+      "v": "i2",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYD",
+      "v": "MYU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYU",
+      "v": "MYD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MYU",
+      "v": "MBD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBD",
+      "v": "MYU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBD",
+      "v": "MBU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBU",
+      "v": "MBD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MBU",
+      "v": "MGD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGD",
+      "v": "MBU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGD",
+      "v": "MGU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGU",
+      "v": "MGD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MGU",
+      "v": "MWD",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWD",
+      "v": "MGU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWD",
+      "v": "MWU",
+      "speed": "SLOW"
+    },
+    {
+      "type": "BLIND",
+      "u": "MWU",
+      "v": "MWD",
+      "speed": "SLOW"
     }
   ],
   "OBSTACLES": [
