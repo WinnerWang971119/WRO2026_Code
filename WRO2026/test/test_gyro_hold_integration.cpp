@@ -218,35 +218,43 @@ static void test_TC7_dispatched_differential_tracks_error_and_never_uses_vendor_
     const int16_t corrA = (int16_t) ((rA - lA) / 2);
     ASSERT_EQ(corrA, (int16_t) 0);
 
-    // --- Stage B: yaw drifts to -4 (error=+4, target CCW of yaw -> right>left correction).
-    gyro_hold_harness::tick(-4.0f, 1);
-    gyro_hold_harness::tick(-4.0f, 1);    // second read: clean, D==0 (yaw unchanged from the first).
+    // Precondition (post-2026-07 retune, GYRO_HOLD_KP 1.6 -> 7.0): keep the scripted errors in the
+    // unsaturated pure-P regime so the exact differential equals KP*error. At the cruise base only
+    // (PWM_MAX - SPEED_NORMAL) PWM of headroom remains above the base before the outer wheel is
+    // truncated by gyroHoldWheels, so the largest scripted error (3 deg, Stage C) must stay under
+    // BOTH the never-reverse clamp and that headroom. A future retune that breaks this fails loudly.
+    ASSERT_TRUE(Config::GYRO_HOLD_KP * 3.0f < (float) Config::GYRO_HOLD_MAX_CORR_PWM);
+    ASSERT_TRUE((float) Config::SPEED_NORMAL + Config::GYRO_HOLD_KP * 3.0f <= (float) Config::PWM_MAX);
+
+    // --- Stage B: yaw drifts to -2 (error=+2, target CCW of yaw -> right>left correction).
+    gyro_hold_harness::tick(-2.0f, 1);
+    gyro_hold_harness::tick(-2.0f, 1);    // second read: clean, D==0 (yaw unchanged from the first).
     const int16_t lB = MiniR4.DriveDC.lastMoveL;
     const int16_t rB = MiniR4.DriveDC.lastMoveR;
     ASSERT_TRUE(rB > lB);
     const int16_t corrB         = (int16_t) ((rB - lB) / 2);
-    const int16_t expectedCorrB = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 4.0f);
+    const int16_t expectedCorrB = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 2.0f);
     ASSERT_EQ(corrB, expectedCorrB);
 
-    // --- Stage C: yaw drifts FURTHER to -8 (error=+8, larger) -- the differential must GROW.
-    gyro_hold_harness::tick(-8.0f, 1);
-    gyro_hold_harness::tick(-8.0f, 1);
+    // --- Stage C: yaw drifts FURTHER to -3 (error=+3, larger) -- the differential must GROW.
+    gyro_hold_harness::tick(-3.0f, 1);
+    gyro_hold_harness::tick(-3.0f, 1);
     const int16_t lC = MiniR4.DriveDC.lastMoveL;
     const int16_t rC = MiniR4.DriveDC.lastMoveR;
     ASSERT_TRUE(rC > lC);
     const int16_t corrC         = (int16_t) ((rC - lC) / 2);
-    const int16_t expectedCorrC = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 8.0f);
+    const int16_t expectedCorrC = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 3.0f);
     ASSERT_EQ(corrC, expectedCorrC);
     ASSERT_TRUE(corrC > corrB);    // GROWS toward re-alignment as the error grows.
 
-    // --- Stage D: yaw comes BACK toward the target, to -2 (error=+2) -- the differential SHRINKS.
-    gyro_hold_harness::tick(-2.0f, 1);
-    gyro_hold_harness::tick(-2.0f, 1);
+    // --- Stage D: yaw comes BACK toward the target, to -1 (error=+1) -- the differential SHRINKS.
+    gyro_hold_harness::tick(-1.0f, 1);
+    gyro_hold_harness::tick(-1.0f, 1);
     const int16_t lD = MiniR4.DriveDC.lastMoveL;
     const int16_t rD = MiniR4.DriveDC.lastMoveR;
     ASSERT_TRUE(rD > lD);
     const int16_t corrD         = (int16_t) ((rD - lD) / 2);
-    const int16_t expectedCorrD = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 2.0f);
+    const int16_t expectedCorrD = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 1.0f);
     ASSERT_EQ(corrD, expectedCorrD);
     ASSERT_TRUE(corrD < corrC);    // SHRINKS as the scripted error shrinks.
     ASSERT_TRUE(corrD > 0);        // still actively correcting, not yet re-aligned.
@@ -329,7 +337,7 @@ static void test_TC8_chained_gyro_segments_no_derivative_spike_on_heading_change
         .setHeading((int16_t) 0)
         .setBrake(false)
         .async();
-    Drive.driveDist(10.0f).setMode(DriveMode::GYRO).setHeading((int16_t) 20).async();
+    Drive.driveDist(10.0f).setMode(DriveMode::GYRO).setHeading((int16_t) 4).async();
 
     gyro_hold_harness::tick(0.0f, 0);    // dispatch segment 1.
     const int32_t totalEnc1 = (int32_t) cmToEncDeg(10.0f);
@@ -345,7 +353,7 @@ static void test_TC8_chained_gyro_segments_no_derivative_spike_on_heading_change
     const uint32_t movesBeforeSeg2 = MiniR4.DriveDC.moveCallCount;
 
     // Segment 2's FIRST real PD tick. The yaw is STILL 0 -- UNCHANGED across the boundary --
-    // only the TARGET jumped (0 -> 20). This is the exact scenario the fold-safe
+    // only the TARGET jumped (0 -> 4). This is the exact scenario the fold-safe
     // derivative-on-measurement design exists for.
     gyro_hold_harness::tick(0.0f, 1);
     ASSERT_TRUE(MiniR4.DriveDC.moveCallCount > movesBeforeSeg2);
@@ -356,10 +364,12 @@ static void test_TC8_chained_gyro_segments_no_derivative_spike_on_heading_change
     const int16_t corr2 = (int16_t) ((r2 - l2) / 2);
 
     // Precondition: the pure-P expectation must stay under BOTH the static clamp and segment 2's
-    // freshly-ramping base, so a spurious derivative spike would visibly change the result.
-    ASSERT_TRUE(Config::GYRO_HOLD_KP * 20.0f < (float) Config::PWM_MIN_MAGNITUDE);
+    // freshly-ramping base, so a spurious derivative spike would visibly change the result. The
+    // 2026-07 GYRO_HOLD_KP 1.6 -> 7.0 retune shrinks the scripted heading change (was 20 deg) so
+    // KP*error stays below PWM_MIN_MAGNITUDE even against the lowest freshly-ramping base.
+    ASSERT_TRUE(Config::GYRO_HOLD_KP * 4.0f < (float) Config::PWM_MIN_MAGNITUDE);
 
-    const int16_t expectedCorr2 = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 20.0f);
+    const int16_t expectedCorr2 = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 4.0f);
     ASSERT_EQ(corr2, expectedCorr2);
     ASSERT_TRUE(base2 > 0);
     ASSERT_TRUE(r2 > l2);
@@ -432,29 +442,31 @@ static void test_mid_segment_tick_hitch_stays_bounded_via_staleness_guard()
     gyro_hold_harness::tickProfileToEnc(0.0f, 12L * encPerCm, profileStartEnc, 5000);    // cruise.
 
     // Establish a clean P-only baseline (paired-tick idiom) at a small live error.
-    gyro_hold_harness::tick(-4.0f, 1);
-    gyro_hold_harness::tick(-4.0f, 1);
+    gyro_hold_harness::tick(-2.0f, 1);
+    gyro_hold_harness::tick(-2.0f, 1);
     const int16_t lBaseline     = MiniR4.DriveDC.lastMoveL;
     const int16_t rBaseline     = MiniR4.DriveDC.lastMoveR;
     const int16_t corrBaseline  = (int16_t) ((rBaseline - lBaseline) / 2);
-    ASSERT_EQ(corrBaseline, gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 4.0f));
+    ASSERT_EQ(corrBaseline, gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 2.0f));
 
     // Preconditions: the post-hitch pure-P expectation must stay under the static clamp (so a
     // staleness-guard regression shows as a WRONG NUMBER) AND leave the OUTER wheel below PWM_MAX
     // at the cruise base (so the exact differential is not silently truncated by the legal-PWM cap
-    // in gyroHoldWheels — the never-reverse clamp only protects the INNER wheel).
-    ASSERT_TRUE(Config::GYRO_HOLD_KP * 12.0f < (float) Config::GYRO_HOLD_MAX_CORR_PWM);
-    ASSERT_TRUE((float) Config::SPEED_NORMAL + Config::GYRO_HOLD_KP * 12.0f <= (float) Config::PWM_MAX);
+    // in gyroHoldWheels — the never-reverse clamp only protects the INNER wheel). The 2026-07
+    // GYRO_HOLD_KP 1.6 -> 7.0 retune shrinks the post-hitch error (was 12 deg) to keep KP*error in
+    // that unsaturated window.
+    ASSERT_TRUE(Config::GYRO_HOLD_KP * 4.0f < (float) Config::GYRO_HOLD_MAX_CORR_PWM);
+    ASSERT_TRUE((float) Config::SPEED_NORMAL + Config::GYRO_HOLD_KP * 4.0f <= (float) Config::PWM_MAX);
 
     // Simulate the hitch: a large elapsed-time gap with NO Drive.update() call in between,
     // exceeding GYRO_HOLD_STALE_MS, then a NEW yaw arrives on the very next real tick.
     mockAdvanceMillis((uint32_t) Config::GYRO_HOLD_STALE_MS + 50);
-    gyro_hold_harness::tick(-12.0f, 1);
+    gyro_hold_harness::tick(-4.0f, 1);
 
     const int16_t l    = MiniR4.DriveDC.lastMoveL;
     const int16_t r    = MiniR4.DriveDC.lastMoveR;
     const int16_t corr = (int16_t) ((r - l) / 2);
-    const int16_t expectedCorr = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 12.0f);
+    const int16_t expectedCorr = gyro_hold_harness::roundPwm(Config::GYRO_HOLD_KP * 4.0f);
 
     ASSERT_EQ(corr, expectedCorr);    // pure-P -- the staleness guard zeroed the derivative term.
     ASSERT_TRUE(std::abs((int) corr) <= (int) Config::GYRO_HOLD_MAX_CORR_PWM);    // bounded, no jerk.

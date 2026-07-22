@@ -52,12 +52,15 @@
 
 namespace
 {
-/// @brief Drift injected at B (deg). Strictly ABOVE `NAV_TURN_TOLERANCE_DEG` (0.5) so the pre-edge
-///        yaw check WOULD fire a turn on the drifted gyro, and strictly BELOW
-///        `LINE_HEADING_RESET_TOLERANCE_DEG` (10) so no heading-reset gate could have laundered it
-///        — the drift genuinely reaches `_dispatchTurnIfNeeded`. Matches the heading_reset drift
-///        template (`test_path_tracker_heading_reset.cpp`).
-constexpr float kDriftDeg = 3.0f;
+/// @brief Drift injected at B (deg). Strictly ABOVE `NAV_TURN_TOLERANCE_DEG` (10.0 after the
+///        2026-07 retune) so the pre-edge yaw check WOULD fire a turn on the drifted gyro, and
+///        strictly BELOW `LINE_HEADING_RESET_TOLERANCE_DEG` so no heading-reset gate could have
+///        laundered it — the drift genuinely reaches `_dispatchTurnIfNeeded`. Production sets both
+///        tolerances to 10.0, which collapses the valid window, so the two CMake targets raise the
+///        heading-reset ceiling to 20.0 (`LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT`); this value is
+///        pinned above the turn tolerance and below that raised ceiling. Matches the heading_reset
+///        drift template (`test_path_tracker_heading_reset.cpp`).
+constexpr float kDriftDeg = Config::NAV_TURN_TOLERANCE_DEG + 3.0f;
 
 // ---------------------------------------------------------------------------
 // Drive the real FSM from a clean world through the FIRST hop `Inter2 -> Inter3` of

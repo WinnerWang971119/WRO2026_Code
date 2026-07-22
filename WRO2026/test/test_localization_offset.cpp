@@ -349,11 +349,15 @@ int main()
 
         const int32_t  hopDeg      = (int32_t) cmToEncDeg(25.0f);
           mockAdvanceMillis(100);
-          mmL.mockYawDeg = -35.0;    // world heading is +35 degrees after zeroing at 0.
+          mmL.mockYawDeg = -35.0;    // a +35 deg world-heading change from the zero (TC2b sign convention).
           Drive.mockAdvanceEncoders(hopDeg, hopDeg);
           Localization.update();
 
-          check(approx(Localization.getLastHeadingDeg(), 35.0f, 0.5f),
+          // zeroHeadingFromCurrent binds world == Routes::START_HEADING_DEG (not 0), so a +35 deg
+          // change lands at normalize(START_HEADING_DEG + 35).
+          float expectedHeading = (float) Routes::START_HEADING_DEG + 35.0f;
+          if (expectedHeading >= 360.0f) expectedHeading -= 360.0f;
+          check(approx(Localization.getLastHeadingDeg(), expectedHeading, 0.5f),
               "TC7: navActive refreshes the cached world heading");
           check(Localization.getLastHeadingUpdateMs() == 100,
               "TC7: navActive refreshes the heading-cache timestamp");

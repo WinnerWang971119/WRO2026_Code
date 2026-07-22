@@ -69,7 +69,7 @@ def test_plain_literal_constant_still_resolves_unchanged() -> None:
 
 
 def test_hop_settle_ms_resolves_through_define_macro() -> None:
-    """``HOP_SETTLE_MS`` (uint32_t, RHS = ``HOP_SETTLE_MS_DEFAULT``) resolves to 100.
+    """``HOP_SETTLE_MS`` (uint32_t, RHS = ``HOP_SETTLE_MS_DEFAULT``) resolves to 200.
 
     ``HOP_SETTLE_MS_DEFAULT`` is a preprocessor ``#define`` in ``ConfigNav.h``,
     not a ``constexpr`` -- this is the shape the resolver could not previously
@@ -77,13 +77,13 @@ def test_hop_settle_ms_resolves_through_define_macro() -> None:
     """
     nav_h = _CONFIG_DIR / "ConfigNav.h"
     search = DEFAULT_INT_SEARCH_HEADERS + (nav_h,)
-    assert parse_config_int("HOP_SETTLE_MS", nav_h, search) == 100
+    assert parse_config_int("HOP_SETTLE_MS", nav_h, search) == 200
 
 
 def test_load_profile_config_hop_settle_ms() -> None:
     """``ProfileConfig.hop_settle_ms`` is populated from the real ``ConfigNav.h``."""
     cfg = load_profile_config()
-    assert cfg.hop_settle_ms == 100
+    assert cfg.hop_settle_ms == 200
 
 
 # ---------------------------------------------------------------------------------------

@@ -3086,7 +3086,7 @@ def test_blind_edge_into_blind_node_still_accepted() -> None:
 
 def test_parse_line_sensor_axle_offset_matches_config() -> None:
     """TC26: parse_line_sensor_axle_offset_cm() equals Config::LINE_SENSOR_AXLE_OFFSET_CM."""
-    assert parse_line_sensor_axle_offset_cm() == pytest.approx(12.02)
+    assert parse_line_sensor_axle_offset_cm() == pytest.approx(11.0)
 
 
 def test_parse_pivot_min_turn_deg_matches_config() -> None:

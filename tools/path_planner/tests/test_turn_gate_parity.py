@@ -294,7 +294,10 @@ def test_tc13_multi_hop_cumulative_no_compiler_only_turn():
     rule the heading advances onto every edge, so no turn is ever emitted.
     """
     field_start = 0.0
-    headings = [0.0, 0.3, 0.6, 0.9, 1.2]
+    # Each per-hop step is sub-tolerance (0.3x); four of them accumulate past the
+    # tolerance. Derived from the live tolerance so a retune moves the fixture with it.
+    step = NAV_TURN_TOLERANCE_DEG * 0.3
+    headings = [round(step * i, 9) for i in range(5)]
     prior = [field_start] + headings[:-1]
     # Setup invariants: every per-hop step is sub-tolerance, cumulative is not.
     for before, after in zip(prior, headings):
@@ -348,10 +351,10 @@ def test_tc13_skewed_collinear_fixture_emits_no_turn():
 @pytest.mark.parametrize(
     "turn_deg, expect_emit",
     [
-        (90.0, True),                     # a real turn still emits
-        (0.6, True),                      # just above tolerance -> emits
-        (NAV_TURN_TOLERANCE_DEG, False),  # exactly 0.5 -> skipped (gate is strictly >)
-        (0.4, False),                     # sub-tolerance -> skipped
+        (90.0, True),                            # a real turn still emits
+        (NAV_TURN_TOLERANCE_DEG + 0.1, True),    # just above tolerance -> emits
+        (NAV_TURN_TOLERANCE_DEG, False),         # exactly at tolerance -> skipped (gate is strictly >)
+        (0.4, False),                            # sub-tolerance -> skipped
     ],
     ids=["90deg", "just-above", "exactly-tol", "sub-tol"],
 )

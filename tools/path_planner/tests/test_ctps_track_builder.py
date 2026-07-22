@@ -2535,13 +2535,13 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
        ``ACT_RETURN_FORWARD`` (dead-reckon, ``S`` is BLIND); the second
        triggers ``ACT_RETURN_STOP_AT_LINE`` (line-seek, ``A`` is LINE-typed and
        re-anchors back onto itself, so the trailing ``goto A`` needs no further
-       hop). Both must render their cruise plateau at ``cfg.speed_fast`` (90),
+       hop). Both must render their cruise plateau at ``cfg.speed_fast`` (80),
        matching ``PIPELINE_SPEED: FAST`` -- pre-fix, both rendered at
-       ``cfg.speed_normal`` (70) instead, conflating the return moves with the
+       ``cfg.speed_normal`` (65) instead, conflating the return moves with the
        un-tiered wall-depart default.
     2. ``_wall_depart_field_data`` drives a single ``goto R`` (``R`` typed
        ``reset``): the arrival auto-fires WALL_STOP -> REANCHOR -> WALL_DEPART.
-       ``ACT_WALL_DEPART`` must STILL render at ``cfg.speed_normal`` (70) despite
+       ``ACT_WALL_DEPART`` must STILL render at ``cfg.speed_normal`` (65) despite
        the SAME ``PIPELINE_SPEED: FAST`` field -- it mirrors the firmware's
        ``.setPower``-free wall-departure move, which never consults
        ``PIPELINE_CONFIG.speed`` at all.
@@ -2549,11 +2549,11 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
     cfg = default_config()
     fast_speed = SCALE_CM_S_PER_PWM * cfg.speed_fast
     normal_speed = SCALE_CM_S_PER_PWM * cfg.speed_normal
-    # Sanity-pin the current firmware Config values the plan cites (90 / 70) so
+    # Sanity-pin the current firmware Config values the plan cites (80 / 65) so
     # a future retune of ConfigDrive.h is caught here rather than silently
-    # changing what "renders at 90" means.
-    assert cfg.speed_fast == 90
-    assert cfg.speed_normal == 70
+    # changing what "renders at the FAST preset" means.
+    assert cfg.speed_fast == 80
+    assert cfg.speed_normal == 65
 
     # -- Return tags: ACT_RETURN_FORWARD (dead-reckon) + ACT_RETURN_STOP_AT_LINE (line-seek) --
     return_trace = Trace(

@@ -241,20 +241,21 @@ def test_tc2_orthogonal_turn_no_line_pass():
 @pytest.mark.parametrize(
     "heading_delta, expected_tag",
     [
-        (0.4999, ACT_LINE_PASS),       # TC3: just inside tolerance → LINE_PASS
-        (0.5001, ACT_LINE_OVERSHOOT),  # TC4: just outside tolerance → LINE_OVERSHOOT
+        (NAV_TURN_TOLERANCE_DEG - 0.0001, ACT_LINE_PASS),       # TC3: just inside tolerance → LINE_PASS
+        (NAV_TURN_TOLERANCE_DEG + 0.0001, ACT_LINE_OVERSHOOT),  # TC4: just outside tolerance → LINE_OVERSHOOT
     ],
     ids=["TC3_inside_tolerance", "TC4_outside_tolerance"],
 )
 def test_tc3_tc4_heading_tolerance_boundary(heading_delta, expected_tag):
-    """TC3/TC4: Heading delta just inside (0.4999°) and just outside (0.5001°) the
+    """TC3/TC4: Heading delta just inside and just outside the
     NAV_TURN_TOLERANCE_DEG boundary determines LINE_PASS vs LINE_OVERSHOOT.
 
     Layout:
         A(0,0) --heading 0°--> B(50,0) --heading delta°--> C
 
     For the B intersection (not the destination), a collinear next-hop
-    (|delta| <= 0.5°) emits LINE_PASS; any larger delta emits LINE_OVERSHOOT.
+    (|delta| <= NAV_TURN_TOLERANCE_DEG) emits LINE_PASS; any larger delta emits
+    LINE_OVERSHOOT. The deltas bracket the live tolerance so a retune moves them.
     """
     c_x = 50.0 + math.cos(math.radians(heading_delta)) * 50.0
     c_y = 0.0 + math.sin(math.radians(heading_delta)) * 50.0

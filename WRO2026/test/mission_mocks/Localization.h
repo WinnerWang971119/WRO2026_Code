@@ -65,6 +65,17 @@ public:
     }
 
     /**
+     * @brief Snap the current node by name — no-op shadow (string overload).
+     *
+     * Mirrors the real `bool declarePosition(const char*)`, reachable from a
+     * `Tasks.cpp` task body compiled into this target. Deliberately records
+     * nothing: the recording fields stay keyed only to the `uint8_t` calls that
+     * `Mission.cpp`'s recovery verb makes and the tests assert on.
+     * @return Always `true`; the return value is unused by the mission tests.
+     */
+    bool declarePosition(const char* /*nodeName*/) { return true; }
+
+    /**
      * @brief World->IMU yaw conversion — identity shadow.
      *
      * Heading math is not modelled here (the mission-dispatch tests assert task /

@@ -36,6 +36,23 @@ public:
      * translation unit.
      */
     int16_t toImuYaw(float worldHeadingDeg) const { return (int16_t) worldHeadingDeg; }
+
+    /**
+     * @brief Snap the current node — no-op shadow (numeric id overload).
+     *
+     * A task body may declare a known position mid-routine (ADR-045 / #189). The
+     * tasks-dispatch tests assert registry / dispatch behaviour, not localization
+     * state, so this shadow only needs to exist for the link.
+     */
+    void declarePosition(uint8_t /*nodeId*/) {}
+
+    /**
+     * @brief Snap the current node by name — no-op shadow (string overload).
+     *
+     * Mirrors the real `bool declarePosition(const char*)`; the return value is
+     * unused by the tasks-dispatch tests.
+     */
+    bool declarePosition(const char* /*nodeName*/) { return true; }
 };
 
 /** @brief Single global instance — `inline` so no extra TU is linked. */

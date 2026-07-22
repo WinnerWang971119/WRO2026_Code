@@ -267,22 +267,22 @@ TURN_EPSILON_DEG: float = 1e-6
 #
 # ADR-035 reconciliation: this was historically a placeholder ``5.0`` while
 # the comment already claimed it mirrors ``Config::LINE_SENSOR_AXLE_OFFSET_CM``.
-# Config.h carries the authoritative physical measurement FRONT = 12.02 cm,
+# Config.h carries the authoritative physical measurement FRONT = 11.0 cm,
 # and the firmware (ADR-035, two-sided pivot compensation) reduces THIS offset
-# by a line-incoming pivot trim ``delta`` (validated ``delta <= 12.02``). With
-# the stale 5.0 a line-incoming pivot up to 7.68 cm would drive the reduced
+# by a line-incoming pivot trim ``delta`` (validated ``delta <= 11.0``). With
+# the stale 5.0 a line-incoming pivot up to the offset would drive the reduced
 # overshoot NEGATIVE in the sim and diverge from the firmware. The offset is
 # therefore aligned to Config.h's real value. This preserves drift == 0 on
 # every NON-pivot hop because each hop still nets exactly the edge length
 # (``(distance_cm - offset)`` followed by ``offset`` is ``distance_cm``,
 # independent of the offset magnitude).
-LINE_SENSOR_AXLE_OFFSET_CM: float = 12.02
+LINE_SENSOR_AXLE_OFFSET_CM: float = 11.0
 
 # MUST mirror ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` in WRO2026/Config.h.
 # Used for REAR (reverse) overshoot so a rear-board hop dead-reckons with the
 # rear board's own axle offset instead of the front board's. ADR-035: aligned
 # to Config.h's authoritative bench measurement (6.0 cm); the validator caps a
-# line-incoming pivot ``delta`` at ``MIN(12.02, 6.0) = 6.0`` so the reduced
+# line-incoming pivot ``delta`` at ``MIN(11.0, 6.0) = 6.0`` so the reduced
 # REAR overshoot stays non-negative. Keep the two C++ and Python values in
 # lockstep.
 LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = 6.0
@@ -303,7 +303,7 @@ PIVOT_TRIM_MIN_DRIVE_CM: float = 0.5
 
 # MUST mirror ``Config::NAV_TURN_TOLERANCE_DEG`` in WRO2026/Config.h.
 # Pytest TC9 verifies parity via regex grep on the header (no C parser).
-NAV_TURN_TOLERANCE_DEG: float = 0.5
+NAV_TURN_TOLERANCE_DEG: float = 10.0
 
 # MUST mirror ``Config::PATH_PASS_THROUGH_ENABLED`` in WRO2026/Config.h.
 # Pytest TC9 verifies parity via the same regex pattern (see
@@ -327,7 +327,7 @@ PATH_PASS_THROUGH_TRUST_LINE_ENABLED: bool = True
 # cruise + the captured pass-through cruise must match the firmware's
 # ``Config::SPEED_NORMAL`` byte-for-byte. Hand-mirrored because Python cannot
 # import the C++ header; the parity sweep exercises the resolved value.
-SPEED_NORMAL: int = 70
+SPEED_NORMAL: int = 65
 
 # MUST mirror ``Config::SPEED_SLOW`` / ``Config::SPEED_FAST`` in
 # WRO2026/config/ConfigDrive.h -- the SLOW / FAST cruise PWM presets a per-edge
@@ -335,10 +335,10 @@ SPEED_NORMAL: int = 70
 # resolved blind cruise, the RAW_FLAT flat plan, the blind-chain cruise, and the
 # clamped pass-through entry seed all derive from these via
 # :func:`_speed_tier_to_pwm`. Hand-mirrored alongside SPEED_NORMAL (Python cannot
-# import the C++ header); keep SLOW=60 / NORMAL=70 / FAST=90 byte-identical to
+# import the C++ header); keep SLOW=50 / NORMAL=65 / FAST=80 byte-identical to
 # ConfigDrive.h -- the sim MUST mirror the robot (the parity sweep catches drift).
-SPEED_SLOW: int = 60
-SPEED_FAST: int = 90
+SPEED_SLOW: int = 50
+SPEED_FAST: int = 80
 
 # MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h
 # (``= PWM_MIN_MAGNITUDE`` = 45). The cold-start ramp seed a non-pass-through
@@ -388,7 +388,7 @@ PATH_BLIND_COALESCE_MAX_POSITION_ERROR_CM: float = 1.0
 # run-buffer dimension). The sim has no fixed-buffer constraint but honors the
 # same cap so its output matches the firmware (ADR-050 parity). Pytest verifies
 # parity via regex grep on ConfigNav.h.
-MAX_CHAIN_HOPS: int = 8
+MAX_CHAIN_HOPS: int = 16
 
 # MUST mirror ``Config::LINE_HEADING_RESET_ON_PROJECTION`` in
 # WRO2026/config/ConfigNav.h (ADR-052). Enables the line-arrival heading
@@ -1315,8 +1315,8 @@ def _speed_tier_to_pwm(tier: SpeedTier) -> int:
 
     Function-identical mirror of the firmware
     ``presetToPwm(speedTierToPreset(tier))`` chain (``WROMath.h`` +
-    ``ConfigDrive.h``): ``SLOW`` -> :data:`SPEED_SLOW` (60), ``NORMAL`` ->
-    :data:`SPEED_NORMAL` (70), ``FAST`` -> :data:`SPEED_FAST` (90). ``DEFAULT``
+    ``ConfigDrive.h``): ``SLOW`` -> :data:`SPEED_SLOW` (50), ``NORMAL`` ->
+    :data:`SPEED_NORMAL` (65), ``FAST`` -> :data:`SPEED_FAST` (80). ``DEFAULT``
     defensively maps to :data:`SPEED_NORMAL` -- the resolver delivers a concrete
     tier before this point (``DEFAULT`` is inherited upstream via
     :func:`resolve_speed`), matching the C++ default arm. Hand-mirrored; the
@@ -2870,7 +2870,7 @@ class PathTrackerSim:
         turn decision every planned hop AND the return-to-node prologue go through, so a
         return can never skip the pre-edge turn (issue #36, #6).
 
-        The turn-emission gate is :data:`NAV_TURN_TOLERANCE_DEG` (0.5°), NOT a raw float
+        The turn-emission gate is :data:`NAV_TURN_TOLERANCE_DEG` (10.0°), NOT a raw float
         epsilon (#147): a heading delta at or below the tolerance emits NO
         ``ACT_TURN_REL`` (the firmware would not dispatch a turn that small either), so
         the sim's emission stream matches :func:`tools.path_planner.compiler.compile_path`,

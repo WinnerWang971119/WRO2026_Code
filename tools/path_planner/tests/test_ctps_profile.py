@@ -404,7 +404,7 @@ def _copy_config_headers(dest_dir: Path) -> Path:
 
 
 def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Path) -> None:
-    """Doubling ``TSHAPE_ACCEL_PWM_PER_CM`` 4->8 halves ramp distances/durations.
+    """Doubling ``TSHAPE_ACCEL_PWM_PER_CM`` 3.5->7 halves ramp distances/durations.
 
     Copies all three Config sub-headers into a temp dir (the ``config_path``
     seam), doubles ``TSHAPE_ACCEL_PWM_PER_CM`` in the copied ``ConfigDrive.h``
@@ -414,7 +414,7 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
     shortens too, so the whole move's render duration changes (AC4).
     """
     baseline_cfg = load_profile_config()
-    assert baseline_cfg.accel == pytest.approx(4.0)
+    assert baseline_cfg.accel == pytest.approx(3.5)
 
     perturbed_dir = tmp_path / "perturbed_config"
     perturbed_dir.mkdir()
@@ -422,8 +422,8 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
 
     original_text = perturbed_drive_h.read_text(encoding="utf-8")
     doubled_text = original_text.replace(
-        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 4.0f;",
-        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 8.0f;",
+        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 3.5f;",
+        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 7.0f;",
     )
     assert doubled_text != original_text, (
         "the literal TSHAPE_ACCEL_PWM_PER_CM declaration text did not match; "
@@ -432,7 +432,7 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
     perturbed_drive_h.write_text(doubled_text, encoding="utf-8")
 
     perturbed_cfg = load_profile_config(perturbed_drive_h)
-    assert perturbed_cfg.accel == pytest.approx(8.0)
+    assert perturbed_cfg.accel == pytest.approx(7.0)
 
     # A representative trapezoid move (dist=40, cruise=90, start=35, end=35):
     # ramp distance = |delta| / accel, so doubling accel halves BOTH ramps. The
@@ -978,7 +978,7 @@ def test_tc9_ac8_rear_window_fit_compresses_shed_to_window() -> None:
     # the production window-fit's floor operand — the KINETIC floor
     # (``_window_fit_stop`` is called with ``cfg.pwm_moving_min``), not the
     # static breakaway floor.
-    assert fast == 90
+    assert fast == 80
     natural_shed = (fast - moving_min) / cfg.accel
     assert natural_shed > rear_window, (
         f"natural shed {natural_shed} cm must overrun the rear window "

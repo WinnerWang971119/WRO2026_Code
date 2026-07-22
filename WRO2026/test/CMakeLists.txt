@@ -592,8 +592,12 @@ add_executable(test_path_tracker_passthrough_drift_on
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 # ADR-061: pin HOP_SETTLE_MS=0 so the tick sequence is unperturbed by the settle dwell (T4).
+# Raise LINE_HEADING_RESET_TOLERANCE_DEG above NAV_TURN_TOLERANCE_DEG (both 10.0 in production
+# after the 2026-07 retune) so the injected drift stays below the heading-reset ceiling and
+# genuinely reaches _dispatchTurnIfNeeded (the reset gate would otherwise launder it first).
 target_compile_definitions(test_path_tracker_passthrough_drift_on
-    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
+    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0
+            LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT=20.0f)
 target_include_directories(test_path_tracker_passthrough_drift_on PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_passthrough_drift_on)   # FIRST (ROUTES_H)
@@ -614,8 +618,12 @@ add_executable(test_path_tracker_passthrough_drift_off
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 # ADR-061: pin HOP_SETTLE_MS=0 so the tick sequence is unperturbed by the settle dwell (T4).
+# Raise LINE_HEADING_RESET_TOLERANCE_DEG above NAV_TURN_TOLERANCE_DEG (both 10.0 in production
+# after the 2026-07 retune) so the injected drift stays below the heading-reset ceiling and
+# genuinely reaches _dispatchTurnIfNeeded (the reset gate would otherwise launder it first).
 target_compile_definitions(test_path_tracker_passthrough_drift_off
-    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
+    PRIVATE PATH_PASS_THROUGH_TRUST_LINE_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0
+            LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT=20.0f)
 target_include_directories(test_path_tracker_passthrough_drift_off PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_passthrough_drift_off)   # FIRST (ROUTES_H)
