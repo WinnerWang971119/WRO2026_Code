@@ -92,7 +92,7 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. `stepMs = 12` slows the capture stroke. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, false, 12 };  // TODO tune stepMs
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 70, 97, 7.0f, 80, false, 12 };  // TODO tune stepMs
     /** @brief Dumper servo calibration. TODO calibrate. `stepMs = 0` = instant. */
     constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false, 0 };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */

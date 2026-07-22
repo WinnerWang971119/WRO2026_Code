@@ -452,8 +452,8 @@ bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
 bool TasksClass::_grabToBin(uint8_t bin)
 {
     Manipulator.sortTo(bin).async();
-    Manipulator.release().rampMs(2);
-    Manipulator.grab().rampMs(2);
+    Manipulator.release().rampMs(1);
+    Manipulator.grab().rampMs(1);
     return true;
 }
 
