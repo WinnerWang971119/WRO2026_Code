@@ -71,6 +71,7 @@ namespace Config
         uint8_t  rcId;       ///< RC-bus channel this servo is wired to.
         uint16_t homeDeg;    ///< Rest / start angle (degrees).
         uint16_t openDeg;    ///< "Open" pose angle (degrees).
+        uint16_t openForWhiteDeg;   ///< White-payload open pose angle (degrees).
         uint16_t closeDeg;   ///< "Close" pose angle (degrees).
         float    msPerDeg;   ///< Slew estimate (ms per degree) for move-time budgeting.
         uint16_t settleMs;   ///< Extra dwell after the slew completes (ms).
@@ -78,11 +79,11 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 97, 7.0f, 80, true };  
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 5, 97, 7.0f, 80, true };
     /** @brief Dumper servo calibration. TODO calibrate. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  78, 33, 18, 5.0f, 80, false };  
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 5.2f, 95, false };  // open/close unused; 
+    constexpr ServoCfg SORTER = { SORTER_RC_ID, 90, 0, 0, 0, 5.2f, 95, false };  // open/close unused
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          

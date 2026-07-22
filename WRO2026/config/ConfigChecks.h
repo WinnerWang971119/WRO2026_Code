@@ -277,8 +277,10 @@ namespace Config
     static_assert(SORTER_BIN_COUNT >= 1, "SORTER_BIN_COUNT must be >= 1.");
     static_assert(BELT_STATION_COUNT >= 1, "BELT_STATION_COUNT must be >= 1.");
     // Servo angles must be within the 0..180 RC range.
-    static_assert(GRABBER.openDeg <= 180 && GRABBER.closeDeg <= 180 && GRABBER.homeDeg <= 180 &&
-                  DUMPER.openDeg  <= 180 && DUMPER.closeDeg  <= 180 && DUMPER.homeDeg  <= 180 &&
+    static_assert(GRABBER.openDeg <= 180 && GRABBER.openForWhiteDeg <= 180 &&
+                  GRABBER.closeDeg <= 180 && GRABBER.homeDeg <= 180 &&
+                  DUMPER.openDeg <= 180 && DUMPER.openForWhiteDeg <= 180 &&
+                  DUMPER.closeDeg <= 180 && DUMPER.homeDeg <= 180 &&
                   SORTER.homeDeg  <= 180,
                   "Manipulator servo angles must be <= 180.");
 
