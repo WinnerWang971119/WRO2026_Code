@@ -309,7 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i1");
+    PathTracker.goTo("MWU");
     return true;
 }
 
