@@ -475,6 +475,28 @@ int main()
               "TC9: thetaDeg stays ~0 on the tick after declarePosition");
     }
 
+        // TC10 — the name overload delegates to the generated FieldMap lookup. A bad name must
+        // not disturb the existing recovery anchor.
+        {
+          resetWorld();
+
+          const uint8_t originalNode = Localization.getCurrentNode();
+          check(Localization.declarePosition("MWU"),
+              "TC10: declarePosition(name) resolves a valid generated node name");
+          check(Localization.getCurrentNode() != originalNode,
+              "TC10: declarePosition(name) changes the node for a distinct valid name");
+
+          const uint8_t declaredNode = Localization.getCurrentNode();
+          check(!Localization.declarePosition("not-a-node"),
+              "TC10: declarePosition(name) rejects an unknown node name");
+          check(Localization.getCurrentNode() == declaredNode,
+              "TC10: an unknown node name leaves the current node unchanged");
+          check(!Localization.declarePosition(nullptr),
+              "TC10: declarePosition(name) rejects a null node name");
+          check(Localization.getCurrentNode() == declaredNode,
+              "TC10: a null node name leaves the current node unchanged");
+        }
+
     if (g_failures == 0)
     {
         std::printf("LOCALIZATION OFFSET OK\n");

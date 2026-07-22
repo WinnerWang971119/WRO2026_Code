@@ -264,6 +264,19 @@ public:
     void declarePosition(uint8_t nodeId);
 
     /**
+     * @brief Operator-recovery re-anchor by generated field node name.
+     *
+     * Resolves @p nodeName through `FieldMap`, then performs the same re-anchor as
+     * `declarePosition(uint8_t)`. An unknown or null name leaves the current node and
+     * offset unchanged.
+     *
+     * @param nodeName Generated route node name, such as `"MWU"`.
+     * @return `true` when @p nodeName resolves and the position is declared; `false`
+     *         when it does not name a field node.
+     */
+    bool declarePosition(const char* nodeName);
+
+    /**
      * @brief Wall-zero re-anchor: adopt the ground truth a `Drive.wallStop` just established.
      *
      * After the chassis presses its REAR against a known wall, the tracked wheel axle sits

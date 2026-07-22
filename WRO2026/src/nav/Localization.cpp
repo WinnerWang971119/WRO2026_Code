@@ -201,6 +201,18 @@ void LocalizationClass::declarePosition(uint8_t nodeId)
     clearOffset();
 }
 
+bool LocalizationClass::declarePosition(const char* nodeName)
+{
+    const uint8_t nodeId = FieldMap::findNodeByName(nodeName);
+    if (nodeId == FieldMap::NODE_NONE)
+    {
+        return false;
+    }
+
+    declarePosition(nodeId);
+    return true;
+}
+
 void LocalizationClass::_bindHeadingFromYaw(float imuYaw, float headingDeg)
 {
     // Single source of truth for the offset-bind invariant, shared by reanchorAtWall step (1) and
