@@ -309,6 +309,10 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
+    PathTracker.goTo("i2");
+    Drive.turnToYaw(Localization.toImuYaw(90));
+    Manipulator.dumper.openForWhite();
+    _waitStationaryMs(200);
     PathTracker.goTo("MWU");
     return true;
 }
