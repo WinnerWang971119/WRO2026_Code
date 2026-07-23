@@ -380,6 +380,35 @@ inline bool turnImuReadStalled(uint32_t nowMs, uint32_t lastGoodReadMs, uint32_t
     return (uint32_t) (nowMs - lastGoodReadMs) >= stallTimeoutMs;
 }
 
+/**
+ * @brief Length (cm) of the heading-held GYRO approach leg of a wall-stop push.
+ *
+ * A wall-stop push travels `distToWallCm - contactOffsetCm` before the contact face meets the
+ * wall (the tracked axle stops short of the wall by the contact offset). The first part of that
+ * run is driven in GYRO so the squared heading is actively held (a long open-loop push drifts and
+ * skews the press line); the last `rawTailCm` before the EXPECTED contact point hands off to the
+ * builder's open-loop press mode, because at contact one wheel stalls first and a heading-hold PID
+ * would fight the wall instead of pressing square. Clamps at zero: a standoff too short to fit
+ * both margins degrades to a pure open-loop push (the previous behaviour).
+ *
+ * @param distToWallCm    Nominal node-to-wall distance on the reset axis (the wallStop advisory).
+ * @param contactOffsetCm Contact-face-to-axle distance (`Config::WALL_CONTACT_OFFSET_CM`).
+ * @param rawTailCm       Open-loop press margin before expected contact
+ *                        (`Config::WALL_STOP_RAW_TAIL_CM`).
+ * @return `max(0, distToWallCm - contactOffsetCm - rawTailCm)`.
+ *
+ * @note Source of truth for the approach-length DECISION — `PathTracker::_dispatchWallStop`
+ *       computes the `WallStopBuilder::setGyroApproach` argument through this, and the host test
+ *       (test_wall_stop_watchdog.cpp) drives it directly so the typical / clamp / boundary cases
+ *       are CI-verified. Inside `Drive::_updateWallStop` the hand-off gate is
+ *       `traveled < gyroApproachCm` -> GYRO, so an approach of exactly 0 never emits a GYRO tick.
+ */
+inline float wallStopGyroApproachCm(float distToWallCm, float contactOffsetCm, float rawTailCm)
+{
+    const float approach = distToWallCm - contactOffsetCm - rawTailCm;
+    return (approach > 0.0f) ? approach : 0.0f;
+}
+
 // =============================================================================================
 // Lateral line-follow offset resolution (issue #156)
 // =============================================================================================

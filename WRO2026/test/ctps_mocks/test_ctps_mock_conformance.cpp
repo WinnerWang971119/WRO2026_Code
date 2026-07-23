@@ -131,13 +131,14 @@ int main()
         .setBlocking(true)
         .async();
 
-    // WallStopBuilder (Drive.wallStop) — 10 setters; setMode takes DriveMode.
+    // WallStopBuilder (Drive.wallStop) — 11 setters; setMode takes DriveMode.
     Drive.wallStop(10.0f)
         .setPower(int16_t(50))
         .setPreset(Config::SpeedPreset::NORMAL)
         .setMode(DriveMode::GYRO)
         .setHeading(int16_t(0))
         .setReverse(true)
+        .setGyroApproach(2.0f)
         .setBackOff(3.0f)
         .setTimeout(uint32_t(4000))
         .setBrake(true)

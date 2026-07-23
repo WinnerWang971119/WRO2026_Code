@@ -150,6 +150,9 @@ struct DriveCommand
     // with the stop-at-line seek.
     float       backOffCm  = 0.0f;     ///< Distance to back off the wall after a confirmed stall.
     uint32_t    timeoutMs  = 0;        ///< Outer advisory timeout; on no-stall, soft-fault (no halt).
+    float       gyroApproachCm = 0.0f; ///< First this many cm of the push are driven in GYRO
+                                       ///< (holding `heading`) before falling back to `mode` for
+                                       ///< the open-loop press. 0 = whole push in `mode`.
 };
 
 /**
@@ -412,7 +415,9 @@ public:
      *
      * Defaults are: sync-blocking, `DriveMode::GYRO` (heading-locked so the push stays square to
      * the wall), power `Config::WALL_STOP_PUSH_PWM`, brake `true`, heading = current `_heldYaw`,
-     * `backOff = Config::WALL_STOP_BACK_OFF_CM`, `timeout = Config::WALL_STOP_TIMEOUT_MS`, forward.
+     * `backOff = Config::WALL_STOP_BACK_OFF_CM`, `timeout = Config::WALL_STOP_TIMEOUT_MS`, forward,
+     * no GYRO approach leg. For an open-loop press mode, `.setGyroApproach(cm)` keeps the first
+     * `cm` of the push heading-held (see `WallStopBuilder::setGyroApproach`).
      * Chain `.async()` for the auto-path-planner / PathTracker opt-out (tick `loop()`, poll
      * `Drive.isIdle()` / `Drive.wallStopTimedOut()`).
      *
@@ -1092,19 +1097,28 @@ private:
     ///<        `_updateWallStop()`.
 
     DriveMode _wallMode = DriveMode::GYRO;
-    ///< @brief Mode of the active PUSH (RAW / SYNC / GYRO). Selects which continuous primitive
-    ///<        `_updateWallStop()` commands each PUSH/BACK_OFF tick. The reset interlude passes RAW
-    ///<        (open-loop + motor bias) because the `SQUARE` phase already faced the wall normal, so
-    ///<        the push goes straight without the GYRO PID fighting the wall contact. Mirrors
-    ///<        `DriveMode`. Captured from `cmd.mode`.
+    ///< @brief Mode of the PUSH's press leg (RAW / SYNC / GYRO). Selects which continuous
+    ///<        primitive `_updateWallStop()` commands each PUSH/BACK_OFF tick once the GYRO
+    ///<        approach leg (`_wallGyroApproachCm`) is consumed. The reset interlude passes RAW
+    ///<        (open-loop + motor bias) for the press: at contact one wheel stalls first, and a
+    ///<        heading PID would fight the wall instead of pressing square. Mirrors `DriveMode`.
+    ///<        Captured from `cmd.mode`.
+
+    float _wallGyroApproachCm = 0.0f;
+    ///< @brief First this many cm of the PUSH are emitted in `DriveMode::GYRO` holding
+    ///<        `_wallHeading` — active heading-hold over the approach so open-loop drift cannot
+    ///<        skew the press line — before the emit falls back to `_wallMode` for the final
+    ///<        press. 0 disables the approach leg (whole push in `_wallMode`, the previous
+    ///<        behaviour). Gate: `traveled < _wallGyroApproachCm` (monotonic `traveled`, so the
+    ///<        hand-off happens exactly once). Captured from `cmd.gyroApproachCm`.
 
     int16_t _wallPushPwm = Config::WALL_STOP_PUSH_PWM;
     ///< @brief Resolved (positive) push PWM magnitude held during PUSH. Captured from `cmd.power`.
 
     int16_t _wallHeading = 0;
-    ///< @brief Wall-normal yaw target. The `SQUARE` phase turns in place to this BEFORE the push
-    ///<        (and a `DriveMode::GYRO` push, if ever selected, would hold it). Captured from
-    ///<        `cmd.heading`.
+    ///< @brief Wall-normal yaw target. The `SQUARE` phase turns in place to this BEFORE the push,
+    ///<        the GYRO approach leg holds it while driving, and a `DriveMode::GYRO` press (if
+    ///<        ever selected) would keep holding it. Captured from `cmd.heading`.
 
     float _wallBackOffCm = Config::WALL_STOP_BACK_OFF_CM;
     ///< @brief Back-off distance (cm) rolled in the reverse-of-push direction after a confirmed
@@ -1425,11 +1439,15 @@ private:
      *     this state only polls `_turnProfileState`, then seeds the push watchdogs at the true start
      *     of the push and enters `PUSH`. Squaring first means a misaligned arrival presses square
      *     instead of arcing into the wall.
-     *   - `PUSH` — drive flat at `_wallPushPwm` toward the wall. REUSES the stop-at-line no-progress
-     *     watchdog (`stopAtLineProgressed` advances `_wallLastProgressCm` / `_wallLastProgressMs`;
-     *     `stopAtLineStalled` over `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`) — but a stall here is
-     *     SUCCESS: capture `_wallBackOffEnc` and transition to `BACK_OFF`. If the outer advisory
-     *     timeout (`_wallTimeoutMs` from `_wallStartMs`) elapses first WITHOUT a stall, set
+     *   - `PUSH` — drive flat at `_wallPushPwm` toward the wall, in `DriveMode::GYRO` (holding
+     *     `_wallHeading`) while `traveled < _wallGyroApproachCm` and in `_wallMode` after — the
+     *     heading-held approach keeps a long push on the press line, the mode fall-back keeps the
+     *     final press open-loop so the heading PID never fights the wall contact. REUSES the
+     *     stop-at-line no-progress watchdog (`stopAtLineProgressed` advances `_wallLastProgressCm`
+     *     / `_wallLastProgressMs`; `stopAtLineStalled` over
+     *     `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`) — but a stall here is SUCCESS: capture
+     *     `_wallBackOffEnc` and transition to `BACK_OFF`. If the outer advisory timeout
+     *     (`_wallTimeoutMs` from `_wallStartMs`) elapses first WITHOUT a stall, set
      *     `_wallStopTimedOut = true` (NON-LATCHING advisory — NOT a hard fault) and transition to
      *     `DONE`.
      *   - `BACK_OFF` — roll `_wallBackOffCm` in the reverse-of-push direction (so the chassis is no
@@ -3131,11 +3149,15 @@ private:
  * (wall reached), not a fault. On stall the chassis backs off `setBackOff(...)` cm and idles. If it
  * pushes for `setTimeout(...)` ms without ever stalling, it records a NON-LATCHING advisory outcome
  * (`Drive.wallStopTimedOut()`), stops, and idles WITHOUT halting the FSM — the caller assumes
- * at-wall and continues. Defaults: `DriveMode::GYRO` (heading-locked), power
- * `Config::WALL_STOP_PUSH_PWM`, brake `true`, blocking `true`, forward, heading = `Drive`'s current
- * `_heldYaw` (only consulted in `DriveMode::GYRO`), `backOff = Config::WALL_STOP_BACK_OFF_CM`,
- * `timeout = Config::WALL_STOP_TIMEOUT_MS`. Unlike `driveDist` there is NO `tShape` knob — the push
- * is a continuous stall-terminated move whose stop point is unknown until the wheels stall.
+ * at-wall and continues. `.setGyroApproach(cm)` splits the push in two: the first `cm` are driven
+ * in `DriveMode::GYRO` (active heading-hold, so a long approach cannot drift off the press line)
+ * before the emit falls back to `.setMode(...)` for the final open-loop press. Defaults:
+ * `DriveMode::GYRO` (heading-locked), power `Config::WALL_STOP_PUSH_PWM`, brake `true`, blocking
+ * `true`, forward, heading = `Drive`'s current `_heldYaw` (consulted by a `DriveMode::GYRO` press
+ * and by the GYRO approach leg), `backOff = Config::WALL_STOP_BACK_OFF_CM`,
+ * `timeout = Config::WALL_STOP_TIMEOUT_MS`, `gyroApproach = 0` (no approach leg). Unlike
+ * `driveDist` there is NO `tShape` knob — the push is a continuous stall-terminated move whose
+ * stop point is unknown until the wheels stall.
  */
 class WallStopBuilder
 {
@@ -3177,6 +3199,7 @@ public:
           _backOff(other._backOff),
           _timeout(other._timeout),
           _reverse(other._reverse),
+          _gyroApproach(other._gyroApproach),
           _executed(other._executed)
     {
         other._executed = true;
@@ -3247,6 +3270,28 @@ public:
     WallStopBuilder& setReverse(bool r)
     {
         _reverse = r;
+        return *this;
+    }
+
+    /**
+     * @brief Drive the first @p cm of the push in `DriveMode::GYRO` before the press mode.
+     *
+     * The approach leg actively holds the resolved heading (`setHeading(...)` or the current
+     * `_heldYaw`) so a long push cannot drift off the press line the way an open-loop RAW run
+     * does; once `traveled >= cm` the emit falls back to `setMode(...)` for the final press —
+     * which should stay open-loop, because at wall contact one wheel stalls first and a heading
+     * PID would fight the wall instead of pressing square. Size @p cm so the hand-off lands
+     * BEFORE the earliest possible contact (see `Config::WALL_STOP_RAW_TAIL_CM` and
+     * `wallStopGyroApproachCm` in WROMath.h for the PathTracker sizing).
+     *
+     * @param cm GYRO approach length in centimetres. Default `0` = no approach leg (whole push
+     *           in `setMode(...)`). Negative values are clamped to `0` at enqueue.
+     * @return `*this` for chaining.
+     * @note Pointless when the resolved mode is already `GYRO` (the whole push holds heading).
+     */
+    WallStopBuilder& setGyroApproach(float cm)
+    {
+        _gyroApproach = cm;
         return *this;
     }
 
@@ -3367,6 +3412,7 @@ private:
     float               _backOff       = Config::WALL_STOP_BACK_OFF_CM;
     uint32_t            _timeout       = Config::WALL_STOP_TIMEOUT_MS;
     bool                _reverse       = false;
+    float               _gyroApproach  = 0.0f;    ///< GYRO approach leg length; 0 = disabled.
     bool                _executed      = false;
 };
 
@@ -3443,6 +3489,7 @@ inline WallStopBuilder::~WallStopBuilder()
     cmd.reverse   = _reverse;
     cmd.backOffCm = _backOff;     // defaults to Config::WALL_STOP_BACK_OFF_CM; setBackOff overrides
     cmd.timeoutMs = _timeout;     // defaults to Config::WALL_STOP_TIMEOUT_MS; setTimeout overrides
+    cmd.gyroApproachCm = (_gyroApproach > 0.0f) ? _gyroApproach : 0.0f;    // clamp: 0 = disabled
 
     if (_blocking)
     {

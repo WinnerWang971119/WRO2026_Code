@@ -517,6 +517,31 @@ namespace Config
                   "wall press trips the inner stall-success watchdog before the outer advisory "
                   "timeout — otherwise every successful press would mis-report as a timeout.");
 
+    /**
+     * @brief Length (cm) of the final OPEN-LOOP leg of a wall-stop push, measured back from the
+     *        expected wall-contact point.
+     *
+     * A wall-stop push with a GYRO approach leg (`WallStopBuilder::setGyroApproach`) holds the
+     * squared heading for the bulk of the run — killing the open-loop drift that skews a long RAW
+     * push — but must hand off to the builder's press mode (RAW) BEFORE the chassis can touch the
+     * wall: at contact one wheel stalls first, and a heading-hold PID would read that as a yaw
+     * error and fight the wall instead of pressing square. This margin is how far BEFORE the
+     * expected contact point that hand-off happens, so it must absorb the total distance
+     * uncertainty of the approach: dead-reckon error over the push plus the tolerance on
+     * `WALL_CONTACT_OFFSET_CM` (still a bring-up placeholder). Contact arriving up to this many
+     * cm EARLY still lands in the open-loop leg. Bench-tunable.
+     *
+     * @note Consumed by `PathTracker::_dispatchWallStop` via `wallStopGyroApproachCm` (WROMath.h):
+     *       `gyroApproach = max(0, distToWall - WALL_CONTACT_OFFSET_CM - WALL_STOP_RAW_TAIL_CM)`.
+     *       A standoff too short to fit both margins degrades to a pure open-loop push (the
+     *       approach clamps to 0, restoring the previous all-RAW behaviour).
+     */
+    constexpr float WALL_STOP_RAW_TAIL_CM = 5.0f;
+    static_assert(WALL_STOP_RAW_TAIL_CM >= 0.0f,
+                  "Config::WALL_STOP_RAW_TAIL_CM is a distance margin and must be non-negative — "
+                  "a negative tail would hand the GYRO hold the wall contact itself, making the "
+                  "heading PID fight the wall as one wheel stalls first.");
+
     // ---------------------------------------------------------------------------------------
     // Turn PD controller (ADR-068) — per-tick PD + kinetic creep floor + slew-limited ramp-up.
     //

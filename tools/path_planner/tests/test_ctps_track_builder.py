@@ -2605,15 +2605,16 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
     )
     wall_track = _build_quiet(wall_trace, _wall_depart_field_data())
 
-    # (128, 0, 0) is the unique REANCHOR-landed axle coordinate (wall_coord 120
-    # + WALL_CONTACT_OFFSET_CM 8); (180, 0, 0) is R's node coordinate, which
+    # (wall_coord 120 + WALL_CONTACT_OFFSET_CM, 0, 0) is the unique
+    # REANCHOR-landed axle coordinate; (180, 0, 0) is R's node coordinate, which
     # ALSO appears earlier (the inbound arrival, before WALL_STOP runs) -- the
     # ordered cursor in ``_boundary_indices`` skips that earlier occurrence and
     # lands on WALL_DEPART's own landing, the later one.
     wall_boundaries = _boundary_indices(
         wall_track.keyframes,
         [
-            (128.0, 0.0, 0.0),  # wall_depart: entry (post REANCHOR)
+            # wall_depart: entry (post REANCHOR)
+            (120.0 + _runtime.WALL_CONTACT_OFFSET_CM, 0.0, 0.0),
             (180.0, 0.0, 0.0),  # wall_depart: landing (R's node coordinate)
         ],
     )

@@ -1602,8 +1602,10 @@ void DriveClass::_endStopAtLine(bool brake)
 //
 // CONTINUOUS, STALL-terminated push. Unlike `_updateProfile()` there is no known total distance to
 // plan a ramp-down against — the stop point is unknown until the wheels stall against the wall. Each
-// tick this commands a continuous primitive (Move / MoveSync / the R4 GYRO heading-hold) per
-// `_wallMode` in the push direction (`_wallReverse`) and walks PUSH → BACK_OFF → DONE:
+// tick this commands a continuous primitive (Move / MoveSync / the R4 GYRO heading-hold) in the push
+// direction (`_wallReverse`) — GYRO holding `_wallHeading` while the approach leg lasts
+// (`traveled < _wallGyroApproachCm`), then `_wallMode` for the press — and walks
+// PUSH → BACK_OFF → DONE:
 //   - PUSH      drive flat at the low push PWM; REUSE the stop-at-line no-progress watchdog
 //               (`stopAtLineProgressed` / `stopAtLineStalled` over STOP_AT_LINE_STALL_TIMEOUT_MS).
 //               A stall here is SUCCESS (wall reached) — the INVERSE of the seek, where a stall is
@@ -1697,11 +1699,12 @@ void DriveClass::_updateWallStop()
 
     // Emit a continuous PWM at the given positive magnitude through the shared `_emitContinuous`,
     // applying the push direction (backward when `_wallReverse`). Every magnitude passed here is
-    // positive — the builder carries direction in `_wallReverse`, never in the power sign.
-    auto driveContinuous = [&](int16_t mag)
+    // positive — the builder carries direction in `_wallReverse`, never in the power sign. The
+    // caller picks the mode per tick (the PUSH phase hands off GYRO approach → press mode).
+    auto driveContinuous = [&](DriveMode mode, int16_t mag)
     {
         const int16_t pwm = (int16_t) (_wallReverse ? -mag : mag);
-        _emitContinuous(_wallMode, pwm, _wallHeading);
+        _emitContinuous(mode, pwm, _wallHeading);
     };
 
     switch (_wallState)
@@ -1745,8 +1748,16 @@ void DriveClass::_updateWallStop()
             break;
         }
 
-        // Still pushing — hold the flat low push PWM toward the wall.
-        driveContinuous(_wallPushPwm);
+        // Still pushing — hold the flat low push PWM toward the wall. Two-stage emit: while the
+        // GYRO approach leg lasts (`traveled < _wallGyroApproachCm`), hold `_wallHeading` actively
+        // so open-loop drift cannot skew the press line; past it, fall back to `_wallMode` (RAW
+        // for the reset interlude) so the final press is open-loop — at contact one wheel stalls
+        // first, and a heading PID would fight the wall instead of pressing square. `traveled` is
+        // monotonic (unsigned magnitude from `_wallStartEnc`), so the hand-off happens exactly
+        // once and never oscillates. The caller sizes the leg to end BEFORE the earliest possible
+        // contact (`wallStopGyroApproachCm`, WROMath.h).
+        driveContinuous((traveled < _wallGyroApproachCm) ? DriveMode::GYRO : _wallMode,
+                        _wallPushPwm);
         break;
     }
 
@@ -2087,6 +2098,7 @@ void DriveClass::_dispatchNext()
         _wallTimeoutMs = cmd.timeoutMs;
         _wallReverse  = cmd.reverse;
         _wallBrake    = cmd.brake;
+        _wallGyroApproachCm = cmd.gyroApproachCm;    // 0 = whole push in `_wallMode` (no GYRO leg).
         _wallStopTimedOut = false;    // cleared on dispatch; set true only on the no-stall timeout.
 
         // (#1) SQUARE FIRST. Turn in place to the wall normal (`_wallHeading`) BEFORE pushing, so the

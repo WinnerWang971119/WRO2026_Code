@@ -481,13 +481,14 @@ namespace Config
      * re-zeroed axis reads the axle, and the PathTracker reset interlude then drives
      * `standoff - WALL_CONTACT_OFFSET_CM` forward back onto the node.
      *
-     * @note TODO: measure at bring-up — the empty-box rest geometry sets it (the variable / loaded
-     *       box case is deferred to issue #77). Hand-mirrored in
-     *       `tools/path_planner/sim/runtime.py` (added together in this change); keep in lockstep.
-     * @note Consumed by `Localization::reanchorAtWall` (margin subtraction) and the PathTracker
-     *       wall-depart move, both landing in this same change (Pillar 2).
+     * @note Measured on the assembled chassis 2026-07 (empty-box rest geometry; the variable /
+     *       loaded box case is deferred to issue #77). Hand-mirrored in
+     *       `tools/path_planner/sim/runtime.py`; keep in lockstep.
+     * @note Consumed by `Localization::reanchorAtWall` (margin subtraction), the PathTracker
+     *       wall-depart move, and the `_dispatchWallStop` GYRO-approach sizing
+     *       (`wallStopGyroApproachCm`, WROMath.h).
      */
-    constexpr float WALL_CONTACT_OFFSET_CM = 8.0f;   // TODO measure at bring-up
+    constexpr float WALL_CONTACT_OFFSET_CM = 8.3f;   // measured 2026-07 (rear contact face → axle)
 
     /**
      * @brief Minimum node-to-wall standoff (cm) a reset node may be authored at.

@@ -669,7 +669,7 @@ WALL_STOP_BACK_OFF_CM: float = 2.0
 # axle), then the depart drives this margin forward back onto the node.
 # Hand-mirrored (Python cannot import the C++ header); keep in lockstep with the
 # firmware constant.
-WALL_CONTACT_OFFSET_CM: float = 8.0
+WALL_CONTACT_OFFSET_CM: float = 8.3
 
 # Sim-only primitive tag for the wall-stop push (phase 1 of the reset
 # interlude). Mirrors the firmware's ``Drive.wallStop(distToWall).setMode(GYRO)

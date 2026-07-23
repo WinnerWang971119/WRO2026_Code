@@ -517,6 +517,7 @@ public:
         _hasHeading = true;
         return *this;
     }
+    WallStopBuilder& setGyroApproach(float) { return *this; }
     WallStopBuilder& setBackOff(float) { return *this; }
     WallStopBuilder& setTimeout(uint32_t) { return *this; }
     WallStopBuilder& setReverse(bool r)

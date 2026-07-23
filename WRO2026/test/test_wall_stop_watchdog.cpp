@@ -1,6 +1,6 @@
 // =========================================================================================
 // Host-compile tests for the Drive.wallStop watchdog state machine (PR2 / T14, AC8) —
-// TC9 (stall-success) + TC10 (no-stall advisory timeout).
+// TC9 (stall-success) + TC10 (no-stall advisory timeout) + TC11 (GYRO-approach sizing).
 //
 // WHY AN INLINE MIRROR (not the real Drive.cpp)
 //   `Drive.cpp` is NOT host-compiled by ANY target — it pulls the full MatrixMiniR4 vendor
@@ -295,6 +295,32 @@ int main()
               "TC9/TC10 boundary: stall-on-maturity reports success, never the advisory timeout");
 
         (void) kOuter;
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC11 — GYRO-approach sizing (`wallStopGyroApproachCm`, WROMath.h). The SAME pure helper
+    // `PathTracker::_dispatchWallStop` calls to size the heading-held approach leg of the push:
+    // max(0, distToWall - contactOffset - rawTail). Inside `_updateWallStop` the hand-off gate is
+    // `traveled < approach` -> GYRO, so a 0 approach never emits a GYRO tick (the all-RAW push).
+    // Driven with the REAL Config constants so a retune flows through, plus fixed values for the
+    // clamp/boundary arithmetic.
+    // -------------------------------------------------------------------------------------
+    {
+        // Typical reset-node geometry: the approach is the standoff minus BOTH margins.
+        const float standoff = Config::WALL_CONTACT_OFFSET_CM + Config::WALL_STOP_RAW_TAIL_CM + 14.0f;
+        const float approach = wallStopGyroApproachCm(
+            standoff, Config::WALL_CONTACT_OFFSET_CM, Config::WALL_STOP_RAW_TAIL_CM);
+        check(std::fabs(approach - 14.0f) < 1e-4f,
+              "TC11: approach == standoff - (contact offset + RAW tail) when both margins fit");
+
+        // Clamp: a standoff too short to fit the margins degrades to 0 (pure open-loop push),
+        // never a negative length.
+        check(wallStopGyroApproachCm(1.0f, 8.3f, 5.0f) == 0.0f,
+              "TC11: a too-short standoff clamps the approach to 0 (all-RAW push)");
+
+        // Boundary: margins exactly consume the standoff -> approach exactly 0.
+        check(wallStopGyroApproachCm(13.3f, 8.3f, 5.0f) == 0.0f,
+              "TC11: standoff == contact offset + RAW tail yields exactly 0 (no GYRO tick)");
     }
 
     if (g_failures == 0)

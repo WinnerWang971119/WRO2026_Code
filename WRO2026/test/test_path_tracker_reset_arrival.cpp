@@ -39,11 +39,11 @@
  *     PLAN_NEXT_HOP with `!PathTracker.hasFault()`. The advisory surfaces only via the no-op
  *     EventTrace mock + Serial, so it is asserted BEHAVIORALLY (the FSM continued, no fault),
  *     never via a mock bool. The INTERMEDIATE post-reanchor / pre-depart belief is the AXLE
- *     (y == 146 = node 139 + the ~7 cm `standoff - WALL_CONTACT_OFFSET_CM` offset); the FINAL
- *     post-clearOffset belief is the NODE (y == 139, NOT the wall 154) — so 139 is reached by
- *     clearing a REAL ~7 cm offset, not by it never existing.
+ *     (y == wall 154 - WALL_CONTACT_OFFSET_CM, the `standoff - offset` short of the node); the
+ *     FINAL post-clearOffset belief is the NODE (y == 139, NOT the wall 154) — so 139 is reached
+ *     by clearing a REAL offset, not by it never existing.
  *   - TC-RA2 (clean stall-success) — identical with `expectWallStop(270, timedOut=false)`: the
- *     non-advisory path, same believed-pose 146 -> 139, no fault.
+ *     non-advisory path, same believed-pose axle -> 139, no fault.
  *   - TC-RA3 (one-shot latch) — `goTo(Inter3)` routes a goal BEYOND `Wall1` (the Wall1 ->
  *     position1 reverse BLIND edge is the first hop), so after WALL_DEPART -> PLAN_NEXT_HOP the
  *     FSM re-enters `_onPlanNextHop` with `cur == Wall1` and a REAL next hop to plan: the
@@ -72,13 +72,15 @@ namespace
 // `fixtures/routes_fixture.cpp` + `config/ConfigNav.h`):
 //   - `Wall1` (RESET) node y == 139; reset record { axis=y, wall_coord=154, facing=270 }.
 //   - standoff           = |154 - 139|            = 15 cm.
-//   - Config::WALL_CONTACT_OFFSET_CM               = 8 cm.
-//   - departCm           = standoff - contact     = 7 cm (> 0, so WALL_DEPART runs).
-//   - INTERMEDIATE belief (post-reanchor, pre-clearOffset): node + offset == 154 - 8 == 146.
-//   - FINAL belief        (post-clearOffset)              : node                      == 139.
+//   - departCm           = standoff - Config::WALL_CONTACT_OFFSET_CM (> 0, so WALL_DEPART runs).
+//   - INTERMEDIATE belief (post-reanchor, pre-clearOffset):
+//       node + offset == wall - WALL_CONTACT_OFFSET_CM (the axle).
+//   - FINAL belief        (post-clearOffset)              : node == 139.
+// The axle belief derives from Config so a re-measured contact offset flows through.
 // ===========================================================================
 constexpr float kWall1NodeY        = 139.0f;
-constexpr float kWall1AxleBeliefY  = 146.0f;    // node + (standoff - WALL_CONTACT_OFFSET_CM)
+constexpr float kWall1WallY        = 154.0f;    // reset record wall_coord (routes_fixture.cpp)
+constexpr float kWall1AxleBeliefY  = kWall1WallY - Config::WALL_CONTACT_OFFSET_CM;
 constexpr int16_t kWall1Facing     = 270;       // app-frame wall normal the SQUARE turn aligns to
 
 /// @brief Approx-equality for the believed-pose floats (TestAssert has only an integer
@@ -194,8 +196,8 @@ void runResetArrivalContinues(bool timedOut)
         cooperativeTick();
     }
 
-    // FINAL belief — the node coordinate (139), reached by clearing the real ~7 cm offset (NOT the
-    // wall 154, NOT the lingering axle 146).
+    // FINAL belief — the node coordinate (139), reached by clearing the real offset (NOT the
+    // wall 154, NOT the lingering axle belief).
     ASSERT_TRUE(approx(believedY(wall1), kWall1NodeY));
 
     // BEHAVIORAL invariant: the advisory / clean-success path did NOT halt — the FSM continued

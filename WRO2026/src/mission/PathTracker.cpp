@@ -1791,17 +1791,23 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     const float nodeCoord  = Localization.coordOnAxis(node, info->axis);
     const float distToWall = fabsf(info->wall_coord - nodeCoord);
 
-    // (#1) Square-then-push, REVERSE. `wallStop` first turns in place to `facing` — its internal
-    // SQUARE phase — which points the robot's FRONT away from the wall (so the REAR faces it),
-    // then presses the rear STRAIGHT into the wall in RAW mode (open-loop + motor bias). Only the
-    // rear of this chassis may take wall load; a front press would break the mechanism. RAW (not
-    // GYRO) because once the chassis is squared a heading-hold PID would only fight the wall
-    // contact as one wheel stalls first; an open-loop straight press with motor bias presses square
-    // and stalls cleanly. The squaring corrects any arrival-heading error up front. `facing` is the
-    // PARKED heading (front away from the wall); the node is authored so the wall is BEHIND along
-    // `facing + 180`. Back-off is 0 — the post-re-anchor WALL_DEPART move provides all turn
-    // clearance, so the chassis stays pressed (belief == axle) until WALL_DEPART pulls it off.
+    // (#1) Square, GYRO approach, RAW press — REVERSE. `wallStop` first turns in place to
+    // `facing` — its internal SQUARE phase — which points the robot's FRONT away from the wall
+    // (so the REAR faces it). Only the rear of this chassis may take wall load; a front press
+    // would break the mechanism. The push itself is two-stage: the GYRO approach leg
+    // (`.setGyroApproach`) actively holds the squared heading over the bulk of the run — a pure
+    // open-loop push at this distance drifts and skews the press line — and hands off to RAW
+    // (open-loop + motor bias) `Config::WALL_STOP_RAW_TAIL_CM` before the EXPECTED contact point,
+    // because at contact one wheel stalls first and a heading-hold PID would fight the wall
+    // instead of pressing square. The leg length comes from `wallStopGyroApproachCm` (WROMath.h):
+    // max(0, distToWall - WALL_CONTACT_OFFSET_CM - WALL_STOP_RAW_TAIL_CM) — a standoff too short
+    // to fit both margins degrades to the previous all-RAW push. `facing` is the PARKED heading
+    // (front away from the wall); the node is authored so the wall is BEHIND along `facing + 180`.
+    // Back-off is 0 — the post-re-anchor WALL_DEPART move provides all turn clearance, so the
+    // chassis stays pressed (belief == axle) until WALL_DEPART pulls it off.
     const int16_t imuTarget = Localization.toImuYaw((float) info->facing);
+    const float   gyroApproachCm = wallStopGyroApproachCm(
+        distToWall, Config::WALL_CONTACT_OFFSET_CM, Config::WALL_STOP_RAW_TAIL_CM);
 
     Serial.print(F("[PathTracker] WALL_STOP: node="));
     Serial.print(node);
@@ -1824,6 +1830,7 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
         .setReverse(true)
         .setMode(DriveMode::RAW)
         .setHeading(imuTarget)
+        .setGyroApproach(gyroApproachCm)
         .setBackOff(0.0f)
         .async();
 #ifdef PT_PARITY_TRACE

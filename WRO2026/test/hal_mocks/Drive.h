@@ -262,6 +262,7 @@ public:
     WallStopBuilder& setMode(DriveMode) { return *this; }
     WallStopBuilder& setHeading(int16_t) { return *this; }
     WallStopBuilder& setReverse(bool) { return *this; }
+    WallStopBuilder& setGyroApproach(float) { return *this; }
     WallStopBuilder& setBackOff(float) { return *this; }
     WallStopBuilder& setTimeout(uint32_t) { return *this; }
     WallStopBuilder& setBrake(bool) { return *this; }
