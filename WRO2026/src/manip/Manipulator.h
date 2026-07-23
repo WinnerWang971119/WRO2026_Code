@@ -194,10 +194,11 @@ public:
     ManipulatorClass();
 
     /**
-     * @brief Configure and home every actuator. Blocking, setup-time only.
+     * @brief Configure every actuator and drive it to its boot pose. Blocking, setup-time only.
      *
      * Calls each servo's `begin()` (applies hardware direction, seeds the move timer) and the
-     * belt's `begin()` (configures the motor and stall-homes it, blocking-bounded). Must be
+     * belt's `begin()` (configures the motor and stall-homes it, blocking-bounded). The grabber
+     * boots to its CLOSE pose; the sorter and dumper boot to their home poses. Must be
      * called once from `setup()` after `MiniR4.begin()` has returned.
      *
      * @return `true` if every actuator initialised successfully; `false` if the belt failed to

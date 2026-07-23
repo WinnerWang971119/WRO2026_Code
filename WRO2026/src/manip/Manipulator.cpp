@@ -194,12 +194,13 @@ void ManipulatorClass::_applyStepMs(uint8_t mask, uint16_t stepMs)
 bool ManipulatorClass::begin()
 {
     // Configure each servo's hardware direction + seed its move-timer shadow, then command
-    // each to its home pose so the manipulator boots into a known safe pose (AC8).
+    // each to its boot pose so the manipulator boots into a known safe pose (AC8). The
+    // grabber boots CLOSED (not home); sorter and dumper boot to their home poses.
     grabber.begin();
     sorter.begin();
     dumper.begin();
 
-    grabber.home();
+    grabber.close();
     sorter.home();
     dumper.home();
 
@@ -222,7 +223,7 @@ bool ManipulatorClass::begin()
         // Servo completion is a software timer estimate, not a hardware confirmation, so a
         // settle timeout here is non-fatal — warn and continue. begin()'s success/failure is
         // governed by the belt, which has real feedback.
-        Serial.println(F("[Manipulator] begin(): servo home settle timed out"));
+        Serial.println(F("[Manipulator] begin(): servo boot-pose settle timed out"));
     }
 
     // Belt configures the motor and stall-homes into its end-stop, blocking-bounded inside

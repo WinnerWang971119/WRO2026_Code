@@ -107,7 +107,8 @@ public:
      *       `true` only after `cfg.settleMs` (NOT immediately) — poll it before assuming the servo
      *       has settled.
      * @note Empirically the servo does not reach the home pose unless the angle is written here in
-     *       `begin()` (the later `home()` in `Manipulator::begin()` is not sufficient on its own),
+     *       `begin()` (the later boot-pose command in `Manipulator::begin()` is not sufficient on
+     *       its own),
      *       so this write is left in place deliberately — "if it works, it works" — pending a
      *       hardware-level root cause for the duplicate home.
      * @note The vendor `setHWDir` returns `bool`; on a failed call this retries once after a 1 ms

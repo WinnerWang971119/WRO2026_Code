@@ -172,16 +172,17 @@ static void test_TC1b_dumper_open_for_white_uses_dedicated_pose()
 // These pin the msPerDeg completion estimate for an instant (stepMs = 0) move, so they call the
 // explicit-rate setAngle(deg, 0) overload — independent of the grabber's configured default rate.
 // Estimate from cfg: |target - prevShadow| * msPerDeg + settleMs.
-// grabber home shadow = GRABBER.homeDeg (post-begin). setAngle(180, 0):
-//   est = |180 - homeDeg| * GRABBER.msPerDeg + GRABBER.settleMs.
+// grabber boot shadow = GRABBER.closeDeg (post-begin — begin() boots the grabber CLOSED).
+// setAngle(180, 0):
+//   est = |180 - closeDeg| * GRABBER.msPerDeg + GRABBER.settleMs.
 // ===========================================================================
 
-// Slew+settle budget for grabber home -> 180, computed from Config (drift-proof).
+// Slew+settle budget for grabber boot pose (close) -> 180, computed from Config (drift-proof).
 static uint32_t grabberSetAngle180Est()
 {
     // Mirror production ManipServo::setAngle() exactly: fabs() of the delta, so a misconfigured
-    // homeDeg > 180 can't drive the cast negative and underflow into a huge uint32_t.
-    return (uint32_t) (fabs(180.0f - (float) Config::GRABBER.homeDeg) * Config::GRABBER.msPerDeg)
+    // closeDeg > 180 can't drive the cast negative and underflow into a huge uint32_t.
+    return (uint32_t) (fabs(180.0f - (float) Config::GRABBER.closeDeg) * Config::GRABBER.msPerDeg)
            + Config::GRABBER.settleMs;
 }
 
@@ -762,7 +763,8 @@ static void test_TC12_reset_homes_all_servos_and_belt()
 }
 
 // ===========================================================================
-// TC15 (AC8) — begin() homes everything and zeroes the belt encoder exactly once.
+// TC15 (AC8) — begin() drives every actuator to its boot pose (grabber CLOSED,
+// sorter/dumper home, belt homed) and zeroes the belt encoder exactly once.
 //
 // This test deliberately does NOT use resetWorld() (which calls begin() then wipes the
 // mock + clock); it drives begin() directly off a freshly-wiped mock/clock so the
@@ -805,6 +807,10 @@ static void test_TC15_begin_homes_all_and_zeroes_belt_once()
     ASSERT_TRUE(Manipulator.dumper.isDone());
     ASSERT_TRUE(Manipulator.belt.isDone());
     ASSERT_TRUE(Manipulator.isDone());
+    // Boot poses: grabber CLOSED, sorter/dumper at home (raw angles, no SW reverse).
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
+    ASSERT_EQ(rcFor(Config::SORTER.rcId).lastAngle, (uint16_t) Config::SORTER.homeDeg);
+    ASSERT_EQ(rcFor(Config::DUMPER.rcId).lastAngle, (uint16_t) Config::DUMPER.homeDeg);
     // The belt home zeroed the encoder exactly once during begin().
     ASSERT_EQ(MiniR4.M1.resetCounterCallCount, (uint32_t) 1);
 
