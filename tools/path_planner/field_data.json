@@ -189,7 +189,7 @@
     "MG2": "line",
     "MGD": "blind",
     "MGU": "blind",
-    "MR": "blind",
+    "MR": "reset",
     "MW2": "line",
     "MWD": "blind",
     "MWU": "blind",
@@ -389,6 +389,13 @@
       "PotPut"
     ]
   ],
+  "RESET_NODES": {
+    "MR": {
+      "axis": "y",
+      "wall_coord": 0.0,
+      "facing": 90.0
+    }
+  },
   "blind_projection_auto_seek": false,
   "pipeline_speed": "NORMAL",
   "pipeline_blind_mode": "GYRO_TSHAPE",

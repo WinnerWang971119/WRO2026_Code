@@ -496,7 +496,6 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("MR");
     Drive.turnToYaw(Localization.toImuYaw(90));
-    Drive.stopAtLine(4).setMode(DriveMode::RAW).setReverse(false).setPreset(Config::SpeedPreset::SLOW);
     return true;
 }
 
@@ -807,7 +806,9 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 // always optimal — the remaining requirement is the same whether a tile is taken now
 // or later, so taking it while already parked can only remove a future revisit. The
 // only real decision left is the ORDER of station visits, which `_mosaicAlgo` solves
-// exactly; see its docblock.
+// exactly; see its docblock. Returning to a station already visited re-anchors at `MR`
+// first (encoder drift), and the planner prices that detour so orders with fewer
+// revisits win.
 // =============================================================================
 
 // `WHITE` is a macro (`SSD1306_WHITE`) in every TU that includes <MatrixMiniR4.h>,
@@ -983,7 +984,7 @@ namespace
     /** @brief Number of distinct packed states (one byte). */
     constexpr uint16_t kMosaicStateCount = 256;
     /** @brief Cost sentinel for "the mosaic cannot be completed from here". */
-    constexpr uint8_t  kMosaicCostInf    = 254;
+    constexpr uint16_t kMosaicCostInf    = 0xFFFF;
 
     /**
      * @brief Wall-chain position of each station, in HALF-node units.
@@ -1012,6 +1013,21 @@ namespace
      * measured from there rather than from an arbitrary end.
      */
     constexpr uint8_t kMosaicEntryChainPos = 7;   // MYD — the node MR opens onto
+
+    /** @brief `kMosaicEntryChainPos` in the HALF-node units of `kMosaicStationHalf`. */
+    constexpr uint8_t kMosaicEntryHalf = (uint8_t)(2 * kMosaicEntryChainPos);
+
+    /**
+     * @brief Extra travel a reset detour costs beyond the on-wall chain distance, in
+     *        HALF-node units.
+     *
+     * `MR` sits ~13.7 cm off the bottom of the wall chain, so a detour drives that leg
+     * out AND back on top of the chain travel. Row nodes average ~3.6 cm per half unit
+     * (50.8 cm over 14 halves), putting the out-and-back near 8 halves. Only the
+     * RELATIVE weight matters: it is what makes the planner prefer orders with fewer
+     * revisits now that every revisit re-anchors at `MR` (encoder drift, see `mosaic`).
+     */
+    constexpr uint8_t kMosaicResetDetourHalf = 8;
 
     /** @brief Fill depth of bin @p bin in packed @p state. */
     uint8_t mosaicDepth(uint8_t state, uint8_t bin)
@@ -1060,6 +1076,59 @@ namespace
             state = mosaicWithDepth(state, bin, depth);
         }
         return state;
+    }
+
+    /**
+     * @brief Whether station @p station has already been visited by the time @p state holds.
+     *
+     * Every stop loads at least one tile and a tile of a colour only loads while parked at
+     * that colour's station, so "visited" is exactly "some filled cell needs this station".
+     * That makes the visited set derivable from the packed state alone — path-independent,
+     * which is what lets the DP price reset detours without widening its state.
+     *
+     * @param state     Packed fill depths.
+     * @param station   Station index in `[0, kMosaicColorCount)`.
+     * @param cellIndex Per-cell station index of the read pattern.
+     */
+    bool mosaicStationVisited(uint8_t state, uint8_t station, const uint8_t* cellIndex)
+    {
+        for (uint8_t bin = 0; bin < kMosaicCols; ++bin)
+        {
+            const uint8_t depth = mosaicDepth(state, bin);
+            for (uint8_t d = 0; d < depth; ++d)
+            {
+                if (cellIndex[d * kMosaicCols + bin] == station)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Travel cost of the next stop at station @p toStation, leaving from @p fromHalf.
+     *
+     * A first visit drives the wall chain directly. A REVISIT must re-anchor at `MR` first
+     * (encoder drift — see `mosaic`), so it pays chain travel down to the entry, the
+     * off-wall out-and-back (`kMosaicResetDetourHalf`), then chain travel back up to the
+     * station.
+     *
+     * @param fromHalf  Half-unit chain position the robot leaves from.
+     * @param toStation Station index of the stop being priced.
+     * @param state     Packed fill depths BEFORE the stop (decides first visit vs revisit).
+     * @param cellIndex Per-cell station index of the read pattern.
+     */
+    uint16_t mosaicHopCost(uint8_t fromHalf, uint8_t toStation, uint8_t state,
+                           const uint8_t* cellIndex)
+    {
+        const uint8_t toHalf = kMosaicStationHalf[toStation];
+        if (!mosaicStationVisited(state, toStation, cellIndex))
+        {
+            return mosaicChainGap(fromHalf, toHalf);
+        }
+        return (uint16_t)(mosaicChainGap(fromHalf, kMosaicEntryHalf) + kMosaicResetDetourHalf +
+                          mosaicChainGap(kMosaicEntryHalf, toHalf));
     }
 }    // namespace
 
@@ -1184,6 +1253,12 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     uint8_t parkedRow   = 0xFF;
     uint8_t chainPos    = kMosaicEntryChainPos;
 
+    // Stations already stopped at this run. Encoder drift builds along the wall chain, so a
+    // RETURN to one of these re-anchors at `MR` before the drive; first visits (and row
+    // shifts while parked at the same colour) go direct. The planner prices the same rule
+    // (`mosaicHopCost`), so the pick order already minimises these detours.
+    bool visited[kMosaicColorCount] = { false, false, false, false };
+
     // Enter the wall through the reset node — a direct run at a row node crosses the mosaic.
     // `MR` is a NodeType::RESET node, so arriving squares up, presses the rear into the wall
     // and re-anchors Localization on its own.
@@ -1199,8 +1274,12 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         const uint8_t station = mosaicColorIndex(picks[i].color);
         const uint8_t bin     = mosaicBinForColumn((uint8_t)(picks[i].cell % kMosaicCols));
 
-        const uint8_t row =
-            _mosaicPickRow(stock[station], station, parkedColor, parkedRow, chainPos);
+        // A return to an already-visited colour goes through `MR` first, so the row choice
+        // is measured from the wall entry, not from where the robot is parked now.
+        const bool resetFirst = visited[station] && station != parkedColor;
+
+        const uint8_t row = _mosaicPickRow(stock[station], station, parkedColor, parkedRow,
+                                           resetFirst ? kMosaicEntryChainPos : chainPos);
         if (row >= 2)
         {
             Serial.print(F("[Tasks] mosaic: wall out of "));
@@ -1217,12 +1296,22 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
             }
             // Retract before every chassis move — an extended belt throws the centre of mass too far off to drive on.
             Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
+            if (resetFirst)
+            {
+                // Arriving at the RESET node squares up, presses the rear into the wall and
+                // re-anchors Localization on its own — the drift accumulated since the last
+                // anchor is wiped before the return drive.
+                Serial.print(F("[Tasks] mosaic: reset detour before "));
+                Serial.println(kMosaicColorTag[station]);
+                PathTracker.goTo(kMosaicResetNode);
+            }
             PathTracker.goTo(kMosaicRowNodes[station][row].node);
 
             parkedColor = station;
             parkedRow   = row;
             chainPos    = kMosaicRowNodes[station][row].chainPos;
         }
+        visited[station] = true;
 
         // Show the colour being grabbed — set AFTER the drive so the LED matches the
         // wall the chassis is physically parked at, not the one it's still driving to.
@@ -1429,8 +1518,11 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
     // every state reachable from it already holds its final cost.
     //
     // `bestCost[state][station]` = minimum remaining travel to finish, given the carrier is
-    // in `state` with the robot parked at `station`. 1 KB, static so it stays off the stack.
-    static uint8_t bestCost[kMosaicStateCount][kMosaicColorCount];
+    // in `state` with the robot parked at `station`. Costs are revisit-aware — a hop to a
+    // station already visited in `state` prices the full `MR` reset detour (see
+    // `mosaicHopCost`) — so detour sums can exceed one byte. 2 KB, static so it stays off
+    // the stack.
+    static uint16_t bestCost[kMosaicStateCount][kMosaicColorCount];
 
     for (int8_t loaded = (int8_t) Config::VISION_CELL_COUNT; loaded >= 0; --loaded)
     {
@@ -1450,7 +1542,7 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
                     continue;
                 }
 
-                uint8_t best = kMosaicCostInf;
+                uint16_t best = kMosaicCostInf;
                 for (uint8_t to = 0; to < kMosaicColorCount; ++to)
                 {
                     const uint8_t next = mosaicAdvance(state, to, cellIndex);
@@ -1459,8 +1551,8 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
                         continue;    // loads nothing, or leads to a dead end
                     }
 
-                    const uint8_t total = (uint8_t)(
-                        mosaicChainGap(kMosaicStationHalf[from], kMosaicStationHalf[to]) +
+                    const uint16_t total = (uint16_t)(
+                        mosaicHopCost(kMosaicStationHalf[from], to, state, cellIndex) +
                         bestCost[next][to]);
                     if (total < best)
                     {
@@ -1476,12 +1568,12 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
     uint8_t state = 0;
     uint8_t count = 0;
     // The first hop is measured from the wall entry node, not from another station.
-    uint8_t fromHalf = (uint8_t)(2 * kMosaicEntryChainPos);
+    uint8_t fromHalf = kMosaicEntryHalf;
 
     while (state != kMosaicStateDone && count < maxPicks)
     {
-        uint8_t chosen = 0xFF;
-        uint8_t best   = kMosaicCostInf;
+        uint8_t  chosen = 0xFF;
+        uint16_t best   = kMosaicCostInf;
 
         for (uint8_t to = 0; to < kMosaicColorCount; ++to)
         {
@@ -1491,8 +1583,8 @@ uint8_t TasksClass::_mosaicAlgo(MosaicPick picks[], uint8_t maxPicks) const
                 continue;
             }
 
-            const uint8_t total = (uint8_t)(
-                mosaicChainGap(fromHalf, kMosaicStationHalf[to]) + bestCost[next][to]);
+            const uint16_t total =
+                (uint16_t)(mosaicHopCost(fromHalf, to, state, cellIndex) + bestCost[next][to]);
             if (total < best)
             {
                 best   = total;

@@ -474,7 +474,7 @@ namespace Config
      *          wall before the watchdog confirms the stall. Keep this at or just above the floor.
      *          The static_assert below pins the value in the snap-safe band.
      */
-    constexpr int16_t WALL_STOP_PUSH_PWM = PWM_MIN_MAGNITUDE;
+    constexpr int16_t WALL_STOP_PUSH_PWM = 70;
     static_assert(WALL_STOP_PUSH_PWM >= PWM_MIN_MAGNITUDE && WALL_STOP_PUSH_PWM <= PWM_MAX,
                   "Config::WALL_STOP_PUSH_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the wall "
                   "push is neither silently floored by the motor deadband nor capped by the "
@@ -536,7 +536,7 @@ namespace Config
      *       A standoff too short to fit both margins degrades to a pure open-loop push (the
      *       approach clamps to 0, restoring the previous all-RAW behaviour).
      */
-    constexpr float WALL_STOP_RAW_TAIL_CM = 5.0f;
+    constexpr float WALL_STOP_RAW_TAIL_CM = 3.5f;
     static_assert(WALL_STOP_RAW_TAIL_CM >= 0.0f,
                   "Config::WALL_STOP_RAW_TAIL_CM is a distance margin and must be non-negative — "
                   "a negative tail would hand the GYRO hold the wall contact itself, making the "

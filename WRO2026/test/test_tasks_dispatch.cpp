@@ -234,6 +234,131 @@ static void test_mosaic_substitutes_beyond_wall_stock()
     }
 }
 
+// Collapse the per-tile plan into the station STOP sequence (a run of consecutive
+// same-colour picks is one stop), then pull the executor's reset-detour lines back
+// out of the capture, in order.
+static size_t mosaicStopSequence(const char tags[], size_t n, char stops[], size_t cap)
+{
+    size_t m = 0;
+    for (size_t i = 0; i < n && m < cap; ++i)
+    {
+        if (m == 0 || stops[m - 1] != tags[i])
+        {
+            stops[m++] = tags[i];
+        }
+    }
+    return m;
+}
+
+static size_t mosaicParseResetDetours(const std::string& capture, char detourTags[], size_t cap)
+{
+    const std::string head = "[Tasks] mosaic: reset detour before ";
+    size_t n   = 0;
+    size_t pos = 0;
+    while (n < cap && (pos = capture.find(head, pos)) != std::string::npos)
+    {
+        detourTags[n++] = capture[pos + head.size()];
+        pos += head.size();
+    }
+    return n;
+}
+
+static void test_mosaic_resets_before_every_revisited_station()
+{
+    TEST_SCOPE("mosaic: a return to an already-visited colour detours through MR; first visits don't");
+    Tasks.begin();
+    Serial.clearCapture();
+
+    // Every column alternates two colours, so no colour's cells are contiguous in any
+    // column and every colour is forced to be stopped at more than once — revisits (and
+    // therefore reset detours) are unavoidable regardless of the order the planner picks.
+    static const Config::Color kAlternating[Config::VISION_CELL_COUNT] = {
+        Config::Color::YELLOW, Config::Color::BLUE,   Config::Color::GREEN, Config::Color::WHITE,
+        Config::Color::BLUE,   Config::Color::YELLOW, Config::Color::WHITE, Config::Color::GREEN,
+        Config::Color::YELLOW, Config::Color::BLUE,   Config::Color::GREEN, Config::Color::WHITE,
+    };
+    Vision._setInjectedColors(kAlternating);
+
+    TaskArgs args{};
+    ASSERT_TRUE(Tasks.runTask("mosaic", args));
+
+    char    tags[Config::VISION_CELL_COUNT];
+    uint8_t bins[Config::VISION_CELL_COUNT];
+    const size_t n = mosaicParsePlan(Serial.captured(), tags, bins, Config::VISION_CELL_COUNT);
+    ASSERT_EQ((int)Config::VISION_CELL_COUNT, (int)n);
+
+    char         stops[Config::VISION_CELL_COUNT];
+    const size_t stopCount = mosaicStopSequence(tags, n, stops, Config::VISION_CELL_COUNT);
+
+    // Expected detours, derived from the plan itself: every stop at a colour that already
+    // appeared in an EARLIER stop, in order. The first stop of each colour drives direct.
+    char   expected[Config::VISION_CELL_COUNT];
+    size_t expectedCount = 0;
+    bool   seen[4]       = { false, false, false, false };
+    for (size_t s = 0; s < stopCount; ++s)
+    {
+        size_t c = 0;
+        switch (stops[s])
+        {
+        case 'Y': c = 0; break;
+        case 'B': c = 1; break;
+        case 'G': c = 2; break;
+        case 'W': c = 3; break;
+        default: ASSERT_TRUE(false); continue;
+        }
+        if (seen[c])
+        {
+            expected[expectedCount++] = stops[s];
+        }
+        seen[c] = true;
+    }
+    ASSERT_TRUE(expectedCount > 0);   // this pattern cannot be built without revisits
+
+    char         detours[Config::VISION_CELL_COUNT];
+    const size_t detourCount =
+        mosaicParseResetDetours(Serial.captured(), detours, Config::VISION_CELL_COUNT);
+
+    ASSERT_EQ((int)expectedCount, (int)detourCount);
+    for (size_t i = 0; i < expectedCount && i < detourCount; ++i)
+    {
+        ASSERT_EQ((int)expected[i], (int)detours[i]);
+    }
+}
+
+static void test_mosaic_no_reset_when_no_revisit_needed()
+{
+    TEST_SCOPE("mosaic: a pattern buildable in one pass per colour triggers no reset detour");
+    Tasks.begin();
+    Serial.clearCapture();
+
+    // One colour per row (3 rows -> 3 stops, each colour needed 4 = exactly the wall
+    // stock). Stopping Y then B then G fills every bin top-down with no colour ever
+    // revisited, so the revisit-aware planner must find a zero-detour order.
+    static const Config::Color kRowUniform[Config::VISION_CELL_COUNT] = {
+        Config::Color::YELLOW, Config::Color::YELLOW, Config::Color::YELLOW, Config::Color::YELLOW,
+        Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::BLUE,
+        Config::Color::GREEN,  Config::Color::GREEN,  Config::Color::GREEN,  Config::Color::GREEN,
+    };
+    Vision._setInjectedColors(kRowUniform);
+
+    TaskArgs args{};
+    ASSERT_TRUE(Tasks.runTask("mosaic", args));
+
+    char    tags[Config::VISION_CELL_COUNT];
+    uint8_t bins[Config::VISION_CELL_COUNT];
+    const size_t n = mosaicParsePlan(Serial.captured(), tags, bins, Config::VISION_CELL_COUNT);
+    ASSERT_EQ((int)Config::VISION_CELL_COUNT, (int)n);
+
+    char         stops[Config::VISION_CELL_COUNT];
+    const size_t stopCount = mosaicStopSequence(tags, n, stops, Config::VISION_CELL_COUNT);
+    ASSERT_EQ(3, (int)stopCount);
+
+    char         detours[Config::VISION_CELL_COUNT];
+    const size_t detourCount =
+        mosaicParseResetDetours(Serial.captured(), detours, Config::VISION_CELL_COUNT);
+    ASSERT_EQ(0, (int)detourCount);
+}
+
 // ===========================================================================
 // Test cases — all against the real global ``Tasks`` singleton, asserting via
 // the real global ``Serial`` (MockSerial) capture buffer. Each case resets the
@@ -430,6 +555,8 @@ int main()
     test_mosaic_fills_bins_in_row_order();
     test_mosaic_rejects_uncoloured_cell();
     test_mosaic_substitutes_beyond_wall_stock();
+    test_mosaic_resets_before_every_revisited_station();
+    test_mosaic_no_reset_when_no_revisit_needed();
 
     TEST_REPORT();
 }
