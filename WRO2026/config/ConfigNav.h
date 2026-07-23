@@ -418,7 +418,7 @@ namespace Config
      * @note TODO: bench-tune. Default `FAULT` (refuse-and-fault when offset > cap).
      *       Override to `OffMapGate::BEST_EFFORT` for bench use once tested.
      */
-    constexpr OffMapGate OFF_MAP_GATE = OffMapGate::FAULT;
+    constexpr OffMapGate OFF_MAP_GATE = OffMapGate::BEST_EFFORT;
 
     // ---------------------------------------------------------------------------------------
     // Wall-normal strict sanity check (Pillar 2 — consumed by Localization::reanchorAtWall)
@@ -612,7 +612,7 @@ namespace Config
      *       value-range tripwires).
      */
 #ifndef LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT
-#define LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT 10.0f
+#define LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT 1.0f
 #endif
     constexpr float LINE_HEADING_RESET_TOLERANCE_DEG = LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT;
 

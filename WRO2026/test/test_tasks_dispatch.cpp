@@ -263,15 +263,33 @@ static size_t mosaicParseResetDetours(const std::string& capture, char detourTag
     return n;
 }
 
-static void test_mosaic_resets_before_every_revisited_station()
+// Wall-chain position of each colour's station, in the HALF-node units of
+// `kMosaicStationHalf` inside Tasks.cpp. Positions GROW toward the `MR` entry (Y sits at
+// the bottom of the wall, W at the top), so a hop to a HIGHER value reverses back down
+// the wall and must detour through `MR`; a hop to a LOWER value drives forward and goes
+// direct. Colours never interleave row nodes, so the station-level sign matches the
+// row-level sign the executor tests.
+static uint8_t mosaicStationHalfOf(char tag)
 {
-    TEST_SCOPE("mosaic: a return to an already-visited colour detours through MR; first visits don't");
+    switch (tag)
+    {
+    case 'Y': return 13;
+    case 'B': return 9;
+    case 'G': return 5;
+    default:  return 1;   // 'W'
+    }
+}
+
+static void test_mosaic_resets_before_every_backward_hop()
+{
+    TEST_SCOPE("mosaic: a stop reached by reversing down the wall detours through MR; forward stops don't");
     Tasks.begin();
     Serial.clearCapture();
 
     // Every column alternates two colours, so no colour's cells are contiguous in any
-    // column and every colour is forced to be stopped at more than once — revisits (and
-    // therefore reset detours) are unavoidable regardless of the order the planner picks.
+    // column and every colour is forced to be stopped at more than once. More than four
+    // stops cannot all drive forward (the wall only has four stations), so backward hops
+    // — and therefore reset detours — are unavoidable regardless of the planned order.
     static const Config::Color kAlternating[Config::VISION_CELL_COUNT] = {
         Config::Color::YELLOW, Config::Color::BLUE,   Config::Color::GREEN, Config::Color::WHITE,
         Config::Color::BLUE,   Config::Color::YELLOW, Config::Color::WHITE, Config::Color::GREEN,
@@ -290,29 +308,19 @@ static void test_mosaic_resets_before_every_revisited_station()
     char         stops[Config::VISION_CELL_COUNT];
     const size_t stopCount = mosaicStopSequence(tags, n, stops, Config::VISION_CELL_COUNT);
 
-    // Expected detours, derived from the plan itself: every stop at a colour that already
-    // appeared in an EARLIER stop, in order. The first stop of each colour drives direct.
+    // Expected detours, derived from the plan itself: every stop whose station sits back
+    // DOWN the wall (toward `MR`) from the previous stop, in order. The first stop enters
+    // from `MR` and is always a forward drive.
     char   expected[Config::VISION_CELL_COUNT];
     size_t expectedCount = 0;
-    bool   seen[4]       = { false, false, false, false };
-    for (size_t s = 0; s < stopCount; ++s)
+    for (size_t s = 1; s < stopCount; ++s)
     {
-        size_t c = 0;
-        switch (stops[s])
-        {
-        case 'Y': c = 0; break;
-        case 'B': c = 1; break;
-        case 'G': c = 2; break;
-        case 'W': c = 3; break;
-        default: ASSERT_TRUE(false); continue;
-        }
-        if (seen[c])
+        if (mosaicStationHalfOf(stops[s]) > mosaicStationHalfOf(stops[s - 1]))
         {
             expected[expectedCount++] = stops[s];
         }
-        seen[c] = true;
     }
-    ASSERT_TRUE(expectedCount > 0);   // this pattern cannot be built without revisits
+    ASSERT_TRUE(expectedCount > 0);   // this pattern cannot be built forward-only
 
     char         detours[Config::VISION_CELL_COUNT];
     const size_t detourCount =
@@ -325,15 +333,15 @@ static void test_mosaic_resets_before_every_revisited_station()
     }
 }
 
-static void test_mosaic_no_reset_when_no_revisit_needed()
+static void test_mosaic_no_reset_when_forward_only_order_exists()
 {
-    TEST_SCOPE("mosaic: a pattern buildable in one pass per colour triggers no reset detour");
+    TEST_SCOPE("mosaic: a pattern buildable in one forward pass up the wall triggers no reset detour");
     Tasks.begin();
     Serial.clearCapture();
 
     // One colour per row (3 rows -> 3 stops, each colour needed 4 = exactly the wall
-    // stock). Stopping Y then B then G fills every bin top-down with no colour ever
-    // revisited, so the revisit-aware planner must find a zero-detour order.
+    // stock). The only feasible order is Y then B then G — a strictly forward march up
+    // the wall — so the executor must fire no reset detour at all.
     static const Config::Color kRowUniform[Config::VISION_CELL_COUNT] = {
         Config::Color::YELLOW, Config::Color::YELLOW, Config::Color::YELLOW, Config::Color::YELLOW,
         Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::BLUE,   Config::Color::BLUE,
@@ -555,8 +563,8 @@ int main()
     test_mosaic_fills_bins_in_row_order();
     test_mosaic_rejects_uncoloured_cell();
     test_mosaic_substitutes_beyond_wall_stock();
-    test_mosaic_resets_before_every_revisited_station();
-    test_mosaic_no_reset_when_no_revisit_needed();
+    test_mosaic_resets_before_every_backward_hop();
+    test_mosaic_no_reset_when_forward_only_order_exists();
 
     TEST_REPORT();
 }

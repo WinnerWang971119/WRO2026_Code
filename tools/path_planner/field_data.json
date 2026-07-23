@@ -89,8 +89,8 @@
       77.50000000000001
     ],
     "MR": [
-      38.1911,
-      27.3
+      38.3911,
+      15.700000000000042
     ],
     "MW2": [
       50.4867,
@@ -208,7 +208,7 @@
     "shovel1Get": "line",
     "shovel1Put": "blind",
     "shovel2Get": "line",
-    "shovel2Put": "blind"
+    "shovel2Put": "projection"
   },
   "LINE_SEGMENTS": [
     [
@@ -286,6 +286,10 @@
     [
       "CG3",
       "CG2"
+    ],
+    [
+      "shovel2Put",
+      "i1"
     ]
   ],
   "BLIND_EDGES": [
@@ -370,16 +374,16 @@
       "MYD"
     ],
     [
-      "shovel2Put",
-      "MR"
-    ],
-    [
       "MR",
       "i1"
     ],
     [
       "Start",
       "MR"
+    ],
+    [
+      "Start",
+      "i1"
     ]
   ],
   "pivot_turns": [
