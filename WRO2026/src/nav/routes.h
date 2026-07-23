@@ -120,7 +120,7 @@ namespace Routes {
     // Sparse, sorted wall-zero reset table (PR2). Sorted by node
     // index for a deterministic golden and a short bounded linear
     // scan in FieldMap::getResetInfo.
-    constexpr uint8_t N_RESET_NODES = 0;
+    constexpr uint8_t N_RESET_NODES = 1;
     extern const ResetNode RESET_NODES[1];
 
     // Sentinel for unreachable next-hop entries; PathTracker

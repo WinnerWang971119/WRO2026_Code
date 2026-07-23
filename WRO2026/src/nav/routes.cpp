@@ -26,18 +26,18 @@ namespace Routes {
         { 117.718600f, 40.100000f, NodeType::BLIND, "CY3"        },     // index 11
         { 50.486700f, 69.452237f, NodeType::LINE, "M"          },     // index 12
         { 50.486700f, 60.953245f, NodeType::LINE, "MB2"        },     // index 13
-        { 36.840000f, 56.400000f, NodeType::BLIND, "MBD"        },     // index 14
-        { 36.840000f, 63.400000f, NodeType::BLIND, "MBU"        },     // index 15
+        { 38.191100f, 55.800000f, NodeType::BLIND, "MBD"        },     // index 14
+        { 38.191100f, 62.400000f, NodeType::BLIND, "MBU"        },     // index 15
         { 50.486700f, 77.465572f, NodeType::LINE, "MG2"        },     // index 16
-        { 36.640000f, 72.200000f, NodeType::BLIND, "MGD"        },     // index 17
-        { 36.640000f, 78.900000f, NodeType::BLIND, "MGU"        },     // index 18
-        { 36.800000f, 27.300000f, NodeType::BLIND, "MR"         },     // index 19
+        { 38.191100f, 71.400000f, NodeType::BLIND, "MGD"        },     // index 17
+        { 38.191100f, 77.500000f, NodeType::BLIND, "MGU"        },     // index 18
+        { 38.391100f, 15.700000f, NodeType::RESET, "MR"         },     // index 19
         { 50.486700f, 93.249414f, NodeType::LINE, "MW2"        },     // index 20
-        { 36.640000f, 88.200000f, NodeType::BLIND, "MWD"        },     // index 21
-        { 36.640000f, 94.600000f, NodeType::BLIND, "MWU"        },     // index 22
+        { 38.191100f, 85.600000f, NodeType::BLIND, "MWD"        },     // index 21
+        { 38.191100f, 91.800000f, NodeType::BLIND, "MWU"        },     // index 22
         { 50.486700f, 45.900000f, NodeType::LINE, "MY2"        },     // index 23
-        { 36.840000f, 40.800000f, NodeType::BLIND, "MYD"        },     // index 24
-        { 36.840000f, 47.100000f, NodeType::BLIND, "MYU"        },     // index 25
+        { 38.191100f, 41.000000f, NodeType::BLIND, "MYD"        },     // index 24
+        { 38.191100f, 45.500000f, NodeType::BLIND, "MYU"        },     // index 25
         { 117.718600f, 22.829197f, NodeType::BLIND, "PotGet"     },     // index 26
         { 164.342100f, 37.027584f, NodeType::BLIND, "PotPut"     },     // index 27
         { 18.700000f, 22.900000f, NodeType::BLIND, "Start"      },     // index 28
@@ -50,7 +50,7 @@ namespace Routes {
         { 89.400000f, 27.303600f, NodeType::LINE, "shovel1Get" },     // index 35
         { 79.366037f, 18.101519f, NodeType::BLIND, "shovel1Put" },     // index 36
         { 147.729100f, 27.303600f, NodeType::LINE, "shovel2Get" },     // index 37
-        { 32.500000f, 27.303600f, NodeType::BLIND, "shovel2Put" },     // index 38
+        { 32.500000f, 27.303600f, NodeType::PROJECTION, "shovel2Put" },     // index 38
     };
 
     const uint8_t NEXT_HOP[N_NODES][N_NODES] = {
@@ -70,30 +70,30 @@ namespace Routes {
         { 0xFF, 0xFF, 0xFF,    3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,   12, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, // from M (index 12)
         {   23,   23,   23, 0xFF,   23,   23,   23,   23,   23,   23,   23,   23, 0xFF,   13,   15,   15,   16,   15,   15,   23,   16,   15,   15,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23 }, // from MB2 (index 13)
         {   25,   25,   25, 0xFF,   25,   25,   25,   25,   25,   25,   25,   25, 0xFF,   15,   14,   15,   15,   15,   15,   25,   15,   15,   15,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25 }, // from MBD (index 14)
-        {   13,   13,   13, 0xFF,   13,   13,   13,   13,   13,   13,   13,   13, 0xFF,   13,   14,   15,   17,   17,   17,   14,   17,   17,   17,   13,   14,   14,   13,   13,   14,   13,   13,   13,   13,   13,   13,   13,   13,   13,   14 }, // from MBU (index 15)
-        {   13,   13,   13, 0xFF,   13,   13,   13,   13,   13,   13,   13,   13, 0xFF,   13,   18,   18,   16,   18,   18,   13,   20,   18,   20,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13 }, // from MG2 (index 16)
+        {   13,   13,   13, 0xFF,   13,   13,   13,   13,   13,   13,   13,   13, 0xFF,   13,   14,   15,   17,   17,   17,   14,   17,   17,   17,   13,   14,   14,   13,   13,   14,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13 }, // from MBU (index 15)
+        {   13,   13,   13, 0xFF,   13,   13,   13,   13,   13,   13,   13,   13, 0xFF,   13,   18,   18,   16,   18,   18,   13,   20,   18,   18,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13,   13 }, // from MG2 (index 16)
         {   15,   15,   15, 0xFF,   15,   15,   15,   15,   15,   15,   15,   15, 0xFF,   15,   15,   15,   18,   17,   18,   15,   18,   18,   18,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15,   15 }, // from MGD (index 17)
-        {   17,   17,   17, 0xFF,   17,   17,   17,   17,   17,   17,   17,   17, 0xFF,   17,   17,   17,   16,   17,   18,   17,   16,   21,   21,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17 }, // from MGU (index 18)
-        {   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32, 0xFF,   32,   24,   24,   32,   24,   24,   19,   32,   24,   24,   32,   24,   24,   32,   32,   28,   32,   32,   32,   32,   32,   32,   32,   32,   32,   38 }, // from MR (index 19)
-        {   16,   16,   16, 0xFF,   16,   16,   16,   16,   16,   16,   16,   16, 0xFF,   16,   16,   16,   16,   16,   16,   16,   20,   22,   22,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16 }, // from MW2 (index 20)
+        {   17,   17,   17, 0xFF,   17,   17,   17,   17,   17,   17,   17,   17, 0xFF,   17,   17,   17,   16,   17,   18,   17,   21,   21,   21,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17,   17 }, // from MGU (index 18)
+        {   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32, 0xFF,   32,   24,   24,   32,   24,   24,   19,   32,   24,   24,   32,   24,   24,   32,   32,   28,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32 }, // from MR (index 19)
+        {   16,   16,   16, 0xFF,   16,   16,   16,   16,   16,   16,   16,   16, 0xFF,   16,   22,   22,   16,   22,   22,   16,   20,   22,   22,   16,   22,   22,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16,   16 }, // from MW2 (index 20)
         {   18,   18,   18, 0xFF,   18,   18,   18,   18,   18,   18,   18,   18, 0xFF,   18,   18,   18,   18,   18,   18,   18,   22,   21,   22,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18,   18 }, // from MWD (index 21)
-        {   21,   21,   21, 0xFF,   21,   21,   21,   21,   21,   21,   21,   21, 0xFF,   21,   21,   21,   20,   21,   21,   21,   20,   21,   22,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21 }, // from MWU (index 22)
+        {   21,   21,   21, 0xFF,   21,   21,   21,   21,   21,   21,   21,   21, 0xFF,   21,   21,   21,   21,   21,   21,   21,   20,   21,   22,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21,   21 }, // from MWU (index 22)
         {   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32, 0xFF,   13,   25,   13,   13,   13,   13,   32,   13,   13,   13,   23,   25,   25,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32 }, // from MY2 (index 23)
-        {   19,   19,   19, 0xFF,   19,   19,   19,   19,   19,   19,   19,   19, 0xFF,   25,   25,   25,   25,   25,   25,   19,   25,   25,   25,   25,   24,   25,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19 }, // from MYD (index 24)
-        {   23,   23,   23, 0xFF,   23,   23,   23,   23,   23,   23,   23,   23, 0xFF,   23,   14,   14,   23,   14,   14,   24,   23,   14,   14,   23,   24,   25,   23,   23,   24,   23,   23,   23,   23,   23,   23,   23,   23,   23,   24 }, // from MYU (index 25)
+        {   25,   25,   25, 0xFF,   25,   25,   25,   25,   25,   25,   25,   25, 0xFF,   25,   25,   25,   25,   25,   25,   19,   25,   25,   25,   25,   24,   25,   25,   25,   19,   25,   25,   25,   25,   25,   25,   25,   25,   25,   25 }, // from MYD (index 24)
+        {   23,   23,   23, 0xFF,   23,   23,   23,   23,   23,   23,   23,   23, 0xFF,   23,   14,   14,   23,   14,   14,   24,   14,   14,   14,   23,   24,   25,   23,   23,   24,   23,   23,   23,   23,   23,   23,   23,   23,   23,   23 }, // from MYU (index 25)
         {   33,   33,   33, 0xFF,   33,   33,   33,   33,   33,   33,   33,   33, 0xFF,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   26,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33 }, // from PotGet (index 26)
         {   34,   34,   34, 0xFF,   34,   34,   34,   34,   34,   34,   34,   34, 0xFF,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   27,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34,   34 }, // from PotPut (index 27)
-        {   19,   19,   19, 0xFF,   19,   19,   19,   19,   19,   19,   19,   19, 0xFF,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   28,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19 }, // from Start (index 28)
+        {   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32, 0xFF,   32,   19,   19,   32,   19,   19,   19,   32,   19,   19,   32,   19,   19,   32,   32,   28,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32 }, // from Start (index 28)
         {   30,   30,   30, 0xFF,   30,   30,   30,   30,   30,   30,   30,   30, 0xFF,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   29,   30,   30,   30,   30,   30,   30,   30,   30,   30 }, // from dump1 (index 29)
         {   31,   31,   31, 0xFF,   31,   31,   31,   31,   31,   31,   31,   31, 0xFF,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   31,   29,   30,   31,   31,   31,   31,   31,   31,   31,   31 }, // from dump2 (index 30)
         {   11,   11,   11, 0xFF,   11,   11,   11,   11,   11,   11,   11,   11, 0xFF,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   11,   30,   30,   31,   11,   11,   11,   11,   11,   11,   11 }, // from dump3 (index 31)
-        {   35,   35,   35, 0xFF,   35,   35,   35,   35,   35,   35,   35,   35, 0xFF,   23,   23,   23,   23,   23,   23,   19,   23,   23,   23,   23,   19,   23,   35,   35,   19,   35,   35,   35,   32,   35,   35,   35,   35,   35,   19 }, // from i1 (index 32)
+        {   35,   35,   35, 0xFF,   35,   35,   35,   35,   35,   35,   35,   35, 0xFF,   23,   23,   23,   23,   23,   23,   19,   23,   23,   23,   23,   23,   23,   35,   35,   28,   35,   35,   35,   32,   35,   35,   35,   35,   35,   38 }, // from i1 (index 32)
         {   37,   37,   37, 0xFF,   37,   37,   37,   37,   37,   37,   37,   11, 0xFF,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   26,   37,   35,   29,   11,   11,   35,   33,   37,   35,   35,   37,   35 }, // from i3 (index 33)
         {    0,    0,    0, 0xFF,    0,    0,    0,    0,    0,    0,    0,   37, 0xFF,   37,   37,   37,   37,   37,   37,   37,   37,   37,   37,   37,   37,   37,   37,   27,   37,   37,   37,   37,   37,   37,   34,   37,   37,   37,   37 }, // from p1 (index 34)
         {   33,   33,   33, 0xFF,   33,   33,   33,   33,   33,   33,   33,   33, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   33,   33,   32,   33,   33,   33,   32,   33,   33,   35,   36,   33,   32 }, // from shovel1Get (index 35)
         {   35,   35,   35, 0xFF,   35,   35,   35,   35,   35,   35,   35,   35, 0xFF,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   35,   36,   35,   35 }, // from shovel1Put (index 36)
         {   34,   34,   34, 0xFF,   34,   34,   34,   34,   34,   34,   34,   33, 0xFF,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   33,   34,   33,   33,   33,   33,   33,   33,   34,   33,   33,   37,   33 }, // from shovel2Get (index 37)
-        {   19,   19,   19, 0xFF,   19,   19,   19,   19,   19,   19,   19,   19, 0xFF,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   19,   38 }, // from shovel2Put (index 38)
+        {   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32, 0xFF,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   32,   38 }, // from shovel2Put (index 38)
     };
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
@@ -647,7 +647,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to M
             makeEdge(EdgeType::NONE), // to MB2
             makeEdge(EdgeType::NONE), // to MBD
-            makeEdge(EdgeType::BLIND, 13.864308f, 169.835280f), // to MBU
+            makeEdge(EdgeType::BLIND, 12.380423f, 173.289182f), // to MBU
             makeEdge(EdgeType::LINE, 16.512327f, 90.000000f), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
@@ -688,7 +688,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to M
             makeEdge(EdgeType::NONE), // to MB2
             makeEdge(EdgeType::NONE), // to MBD
-            makeEdge(EdgeType::BLIND, 7.000000f, 90.000000f, SpeedTier::SLOW), // to MBU
+            makeEdge(EdgeType::BLIND, 6.600000f, 90.000000f, SpeedTier::SLOW), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
@@ -698,7 +698,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
-            makeEdge(EdgeType::BLIND, 9.300000f, 270.000000f, SpeedTier::SLOW), // to MYU
+            makeEdge(EdgeType::BLIND, 10.300000f, 270.000000f, SpeedTier::SLOW), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
             makeEdge(EdgeType::NONE), // to Start
@@ -727,11 +727,11 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to CY2
             makeEdge(EdgeType::NONE), // to CY3
             makeEdge(EdgeType::NONE), // to M
-            makeEdge(EdgeType::BLIND, 13.864308f, 349.835280f), // to MB2
-            makeEdge(EdgeType::BLIND, 7.000000f, 270.000000f, SpeedTier::SLOW), // to MBD
+            makeEdge(EdgeType::BLIND, 12.380423f, 353.289182f), // to MB2
+            makeEdge(EdgeType::BLIND, 6.600000f, 270.000000f, SpeedTier::SLOW), // to MBD
             makeEdge(EdgeType::NONE), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
-            makeEdge(EdgeType::BLIND, 8.802272f, 91.301953f, SpeedTier::SLOW), // to MGD
+            makeEdge(EdgeType::BLIND, 9.000000f, 90.000000f, SpeedTier::SLOW), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
@@ -773,7 +773,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
-            makeEdge(EdgeType::BLIND, 13.920800f, 174.085626f), // to MGU
+            makeEdge(EdgeType::BLIND, 12.295648f, 179.839570f), // to MGU
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::LINE, 15.783842f, 90.000000f), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
@@ -811,10 +811,10 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to M
             makeEdge(EdgeType::NONE), // to MB2
             makeEdge(EdgeType::NONE), // to MBD
-            makeEdge(EdgeType::BLIND, 8.802272f, 271.301953f, SpeedTier::SLOW), // to MBU
+            makeEdge(EdgeType::BLIND, 9.000000f, 270.000000f, SpeedTier::SLOW), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
-            makeEdge(EdgeType::BLIND, 6.700000f, 90.000000f, SpeedTier::SLOW), // to MGU
+            makeEdge(EdgeType::BLIND, 6.100000f, 90.000000f, SpeedTier::SLOW), // to MGU
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
@@ -853,12 +853,12 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MB2
             makeEdge(EdgeType::NONE), // to MBD
             makeEdge(EdgeType::NONE), // to MBU
-            makeEdge(EdgeType::BLIND, 13.920800f, 354.085626f), // to MG2
-            makeEdge(EdgeType::BLIND, 6.700000f, 270.000000f, SpeedTier::SLOW), // to MGD
+            makeEdge(EdgeType::BLIND, 12.295648f, 359.839570f), // to MG2
+            makeEdge(EdgeType::BLIND, 6.100000f, 270.000000f, SpeedTier::SLOW), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
-            makeEdge(EdgeType::BLIND, 9.300000f, 90.000000f, SpeedTier::SLOW), // to MWD
+            makeEdge(EdgeType::BLIND, 8.100000f, 90.000000f, SpeedTier::SLOW), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
@@ -902,21 +902,21 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
-            makeEdge(EdgeType::BLIND, 13.500059f, 89.830235f, SpeedTier::SLOW), // to MYD
+            makeEdge(EdgeType::BLIND, 25.300791f, 90.452922f, SpeedTier::SLOW), // to MYD
             makeEdge(EdgeType::NONE), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
-            makeEdge(EdgeType::BLIND, 18.627131f, 193.663229f), // to Start
+            makeEdge(EdgeType::BLIND, 20.966149f, 159.915191f), // to Start
             makeEdge(EdgeType::NONE), // to dump1
             makeEdge(EdgeType::NONE), // to dump2
             makeEdge(EdgeType::NONE), // to dump3
-            makeEdge(EdgeType::BLIND, 13.686700f, 0.015070f), // to i1
+            makeEdge(EdgeType::BLIND, 16.761476f, 43.810699f), // to i1
             makeEdge(EdgeType::NONE), // to i3
             makeEdge(EdgeType::NONE), // to p1
             makeEdge(EdgeType::NONE), // to shovel1Get
             makeEdge(EdgeType::NONE), // to shovel1Put
             makeEdge(EdgeType::NONE), // to shovel2Get
-            makeEdge(EdgeType::BLIND, 4.300002f, 179.952031f), // to shovel2Put
+            makeEdge(EdgeType::NONE), // to shovel2Put
         },
         { // from MW2 (index 20)
             makeEdge(EdgeType::NONE), // to C
@@ -941,7 +941,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
-            makeEdge(EdgeType::BLIND, 13.912411f, 174.429077f), // to MWU
+            makeEdge(EdgeType::BLIND, 12.380734f, 186.723038f), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
             makeEdge(EdgeType::NONE), // to MYU
@@ -978,11 +978,11 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
-            makeEdge(EdgeType::BLIND, 9.300000f, 270.000000f, SpeedTier::SLOW), // to MGU
+            makeEdge(EdgeType::BLIND, 8.100000f, 270.000000f, SpeedTier::SLOW), // to MGU
             makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
-            makeEdge(EdgeType::BLIND, 6.400000f, 90.000000f, SpeedTier::SLOW), // to MWU
+            makeEdge(EdgeType::BLIND, 6.200000f, 90.000000f, SpeedTier::SLOW), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
             makeEdge(EdgeType::NONE), // to MYU
@@ -1021,8 +1021,8 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
             makeEdge(EdgeType::NONE), // to MR
-            makeEdge(EdgeType::BLIND, 13.912411f, 354.429077f), // to MW2
-            makeEdge(EdgeType::BLIND, 6.400000f, 270.000000f, SpeedTier::SLOW), // to MWD
+            makeEdge(EdgeType::BLIND, 12.380734f, 6.723038f), // to MW2
+            makeEdge(EdgeType::BLIND, 6.200000f, 270.000000f, SpeedTier::SLOW), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
@@ -1067,7 +1067,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
-            makeEdge(EdgeType::BLIND, 13.699358f, 174.974716f), // to MYU
+            makeEdge(EdgeType::BLIND, 12.302105f, 181.863287f), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
             makeEdge(EdgeType::NONE), // to Start
@@ -1102,13 +1102,13 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
-            makeEdge(EdgeType::BLIND, 13.500059f, 269.830235f, SpeedTier::SLOW), // to MR
+            makeEdge(EdgeType::BLIND, 25.300791f, 270.452922f, SpeedTier::SLOW), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
             makeEdge(EdgeType::NONE), // to MY2
             makeEdge(EdgeType::NONE), // to MYD
-            makeEdge(EdgeType::BLIND, 6.300000f, 90.000000f, SpeedTier::SLOW), // to MYU
+            makeEdge(EdgeType::BLIND, 4.500000f, 90.000000f, SpeedTier::SLOW), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
             makeEdge(EdgeType::NONE), // to Start
@@ -1138,7 +1138,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to CY3
             makeEdge(EdgeType::NONE), // to M
             makeEdge(EdgeType::NONE), // to MB2
-            makeEdge(EdgeType::BLIND, 9.300000f, 90.000000f, SpeedTier::SLOW), // to MBD
+            makeEdge(EdgeType::BLIND, 10.300000f, 90.000000f, SpeedTier::SLOW), // to MBD
             makeEdge(EdgeType::NONE), // to MBU
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
@@ -1147,8 +1147,8 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
-            makeEdge(EdgeType::BLIND, 13.699358f, 354.974716f), // to MY2
-            makeEdge(EdgeType::BLIND, 6.300000f, 270.000000f, SpeedTier::SLOW), // to MYD
+            makeEdge(EdgeType::BLIND, 12.302105f, 1.863287f), // to MY2
+            makeEdge(EdgeType::BLIND, 4.500000f, 270.000000f, SpeedTier::SLOW), // to MYD
             makeEdge(EdgeType::NONE), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
@@ -1266,7 +1266,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
-            makeEdge(EdgeType::BLIND, 18.627131f, 13.663229f), // to MR
+            makeEdge(EdgeType::BLIND, 20.966149f, 339.915191f), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
@@ -1279,7 +1279,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to dump1
             makeEdge(EdgeType::NONE), // to dump2
             makeEdge(EdgeType::NONE), // to dump3
-            makeEdge(EdgeType::NONE), // to i1
+            makeEdge(EdgeType::BLIND, 32.090279f, 7.887321f), // to i1
             makeEdge(EdgeType::NONE), // to i3
             makeEdge(EdgeType::NONE), // to p1
             makeEdge(EdgeType::NONE), // to shovel1Get
@@ -1430,7 +1430,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
-            makeEdge(EdgeType::BLIND, 13.686700f, 180.015070f), // to MR
+            makeEdge(EdgeType::BLIND, 16.761476f, 223.810699f), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
@@ -1439,7 +1439,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MYU
             makeEdge(EdgeType::NONE), // to PotGet
             makeEdge(EdgeType::NONE), // to PotPut
-            makeEdge(EdgeType::NONE), // to Start
+            makeEdge(EdgeType::BLIND, 32.090279f, 187.887321f), // to Start
             makeEdge(EdgeType::NONE), // to dump1
             makeEdge(EdgeType::NONE), // to dump2
             makeEdge(EdgeType::NONE), // to dump3
@@ -1449,7 +1449,7 @@ namespace Routes {
             makeEdge(EdgeType::LINE, 38.913300f, 0.000000f, SpeedTier::SLOW, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT, LineFollowMode::RIGHT), // to shovel1Get
             makeEdge(EdgeType::NONE), // to shovel1Put
             makeEdge(EdgeType::NONE), // to shovel2Get
-            makeEdge(EdgeType::NONE), // to shovel2Put
+            makeEdge(EdgeType::LINE, 17.986700f, 180.000000f), // to shovel2Put
         },
         { // from i3 (index 33)
             makeEdge(EdgeType::NONE), // to C
@@ -1676,7 +1676,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to MG2
             makeEdge(EdgeType::NONE), // to MGD
             makeEdge(EdgeType::NONE), // to MGU
-            makeEdge(EdgeType::BLIND, 4.300002f, 359.952031f), // to MR
+            makeEdge(EdgeType::NONE), // to MR
             makeEdge(EdgeType::NONE), // to MW2
             makeEdge(EdgeType::NONE), // to MWD
             makeEdge(EdgeType::NONE), // to MWU
@@ -1689,7 +1689,7 @@ namespace Routes {
             makeEdge(EdgeType::NONE), // to dump1
             makeEdge(EdgeType::NONE), // to dump2
             makeEdge(EdgeType::NONE), // to dump3
-            makeEdge(EdgeType::NONE), // to i1
+            makeEdge(EdgeType::LINE, 17.986700f), // to i1
             makeEdge(EdgeType::NONE), // to i3
             makeEdge(EdgeType::NONE), // to p1
             makeEdge(EdgeType::NONE), // to shovel1Get
@@ -1705,7 +1705,7 @@ namespace Routes {
     };
 
     const ResetNode RESET_NODES[1] = {
-        // placeholder: N_RESET_NODES == 0, never read at runtime
-        { 0, 0, 0.000000f, 0 },
+        // sorted by node index; axis 0 = x, 1 = y
+        { 19, 1, 0.000000f, 90 },
     };
 }  // namespace Routes
