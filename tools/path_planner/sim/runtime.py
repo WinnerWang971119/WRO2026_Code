@@ -337,7 +337,7 @@ SPEED_NORMAL: int = 65
 # :func:`_speed_tier_to_pwm`. Hand-mirrored alongside SPEED_NORMAL (Python cannot
 # import the C++ header); keep SLOW=50 / NORMAL=65 / FAST=80 byte-identical to
 # ConfigDrive.h -- the sim MUST mirror the robot (the parity sweep catches drift).
-SPEED_SLOW: int = 50
+SPEED_SLOW: int = 47
 SPEED_FAST: int = 80
 
 # MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h

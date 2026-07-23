@@ -5324,13 +5324,13 @@ def test_w2a_cumulative_sub_tolerance_bend_rejected_by_position_corridor():
     "inbound_tier, outbound_tier, expected_seed",
     [
         (SpeedTier.FAST, SpeedTier.FAST, 80),
-        (SpeedTier.FAST, SpeedTier.SLOW, 50),
-        (SpeedTier.SLOW, SpeedTier.FAST, 50),
+        (SpeedTier.FAST, SpeedTier.SLOW, 47),
+        (SpeedTier.SLOW, SpeedTier.FAST, 47),
     ],
     ids=[
         "FAST_into_FAST_seed_80",
-        "FAST_into_SLOW_clamped_50",
-        "SLOW_into_FAST_seed_50",
+        "FAST_into_SLOW_clamped_47",
+        "SLOW_into_FAST_seed_47",
     ],
 )
 def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
@@ -5398,34 +5398,34 @@ def test_w2c_per_tier_blind_cruise_resolves_to_preset():
     The direct pin on the sim's per-edge blind cruise resolution -- the exact
     composition the dispatch (``cruise_mag = _speed_tier_to_pwm(resolve_speed(
     edge))``) and the chain walk-ahead both use. ADR-064 blind speed reuses the
-    line presets (SLOW/NORMAL/FAST = 50/65/80).
+    line presets (SLOW/NORMAL/FAST = 47/65/80).
     """
-    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.SLOW})) == 50
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.SLOW})) == 47
     assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.NORMAL})) == 65
     assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.FAST})) == 80
     # Tie the literals to the module's Config mirrors so a retune moves together.
-    assert _runtime.SPEED_SLOW == 50
+    assert _runtime.SPEED_SLOW == 47
     assert _runtime.SPEED_FAST == 80
 
 
 @pytest.mark.parametrize(
     "tier, expected_cruise",
     [
-        (SpeedTier.SLOW, 50),
+        (SpeedTier.SLOW, 47),
         (SpeedTier.FAST, 80),
     ],
-    ids=["SLOW_cruise_50", "FAST_cruise_80"],
+    ids=["SLOW_cruise_47", "FAST_cruise_80"],
 )
 def test_w2c_per_tier_blind_cruise_drives_chain_at_preset(tier, expected_cruise):
     """W2(c): a same-tier BLIND chain cruises at its resolved per-tier PWM.
 
     A 3-hop collinear chain of one tier is folded into a single continuous run;
     the peak commanded PWM magnitude across the emitted chain suffix is the run
-    cruise, which must equal the tier's resolved preset (SLOW=50, FAST=80) -- NOT
+    cruise, which must equal the tier's resolved preset (SLOW=47, FAST=80) -- NOT
     the hardcoded NORMAL (65) blind speed used before ADR-064.
 
     Non-vacuous: if per-edge blind speed regressed to a constant NORMAL, both the
-    SLOW and FAST chains would peak at 65 -- failing the 50 / 80 assertion.
+    SLOW and FAST chains would peak at 65 -- failing the 47 / 80 assertion.
     """
     sim, _chassis = _collinear_blind_chain_sim(
         [{"speed": tier}, {"speed": tier}, {"speed": tier}]
