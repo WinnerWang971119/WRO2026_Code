@@ -42,9 +42,9 @@ namespace Config
     // -------------------------------------------6-------------------------------------------
 
     /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). */
-    constexpr float LINE_KP_REAR = 6.8f;
+    constexpr float LINE_KP_REAR = 7.0f;
     /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). */
-    constexpr float LINE_KD_REAR = 12.8f;
+    constexpr float LINE_KD_REAR = 13.0f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -71,7 +71,7 @@ namespace Config
      * to a fixed distance without sensor pitch/height/line-width; measured on the mat.
      * @note TODO: bench-tune. LEFT = +, RIGHT = -.
      */
-    constexpr float LINE_FOLLOW_OFFSET_ERROR = 2.5f;
+    constexpr float LINE_FOLLOW_OFFSET_ERROR = 2.5;
 
     // ---------------------------------------------------------------------------------------
     // 8-channel custom line sensor (WROLineArray)

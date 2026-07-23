@@ -14,7 +14,7 @@
   "NODES": {
     "C": [
       185.4986,
-      27.3036
+      25.503600000000006
     ],
     "CB1": [
       206.97499999999974,
@@ -121,12 +121,16 @@
       22.829197020208255
     ],
     "PotPut": [
-      164.3421,
+      166.54209999999986,
       37.027583652302766
     ],
     "Start": [
       18.700000000000003,
       22.9
+    ],
+    "cleanP": [
+      40.9,
+      25.500000000000007
     ],
     "dump1": [
       117.7186,
@@ -142,19 +146,23 @@
     ],
     "i1": [
       50.4867,
-      27.3036
+      25.503600000000006
     ],
     "i3": [
       117.7186,
-      27.3036
+      25.503600000000006
     ],
     "p1": [
-      164.3421,
-      27.3036
+      166.54209999999986,
+      25.503600000000006
+    ],
+    "pot1": [
+      166.4999999999999,
+      9.899999999999995
     ],
     "shovel1Get": [
       89.4,
-      27.3036
+      25.503600000000006
     ],
     "shovel1Put": [
       79.36603695929536,
@@ -162,15 +170,31 @@
     ],
     "shovel2Get": [
       147.7291,
-      27.3036
+      25.503600000000006
     ],
     "shovel2Put": [
       32.5,
-      27.3036
+      25.503600000000006
+    ],
+    "sr1": [
+      104.36340000000001,
+      25.500000000000007
+    ],
+    "sr2": [
+      104.36340000000001,
+      9.870499999999995
+    ],
+    "sr3": [
+      116.70186615186618,
+      9.870499999999995
+    ],
+    "sr4": [
+      74.3719582219582,
+      9.870499999999995
     ]
   },
   "NODE_TYPES": {
-    "C": "line",
+    "C": "blind",
     "CB1": "line",
     "CB2": "line",
     "CB3": "line",
@@ -199,34 +223,24 @@
     "PotGet": "blind",
     "PotPut": "blind",
     "Start": "blind",
+    "cleanP": "blind",
     "dump1": "blind",
     "dump2": "blind",
     "dump3": "blind",
-    "i1": "line",
-    "i3": "line",
-    "p1": "projection",
-    "shovel1Get": "line",
+    "i1": "blind",
+    "i3": "blind",
+    "p1": "blind",
+    "pot1": "blind",
+    "shovel1Get": "blind",
     "shovel1Put": "blind",
-    "shovel2Get": "line",
-    "shovel2Put": "projection"
+    "shovel2Get": "blind",
+    "shovel2Put": "blind",
+    "sr1": "blind",
+    "sr2": "blind",
+    "sr3": "blind",
+    "sr4": "blind"
   },
   "LINE_SEGMENTS": [
-    [
-      "i1",
-      "shovel1Get"
-    ],
-    [
-      "i1",
-      "MY2"
-    ],
-    [
-      "shovel1Get",
-      "i3"
-    ],
-    [
-      "i3",
-      "shovel2Get"
-    ],
     [
       "MW2",
       "MG2"
@@ -264,32 +278,12 @@
       "CB1"
     ],
     [
-      "CB2",
-      "C"
-    ],
-    [
-      "C",
-      "CW2"
-    ],
-    [
       "CW2",
       "CW1"
     ],
     [
-      "C",
-      "p1"
-    ],
-    [
-      "p1",
-      "shovel2Get"
-    ],
-    [
       "CG3",
       "CG2"
-    ],
-    [
-      "shovel2Put",
-      "i1"
     ]
   ],
   "BLIND_EDGES": [
@@ -378,12 +372,60 @@
       "i1"
     ],
     [
-      "Start",
-      "MR"
+      "i1",
+      "cleanP"
     ],
     [
-      "Start",
-      "i1"
+      "cleanP",
+      "shovel2Put"
+    ],
+    [
+      "shovel2Put",
+      "Start"
+    ],
+    [
+      "sr1",
+      "sr2"
+    ],
+    [
+      "sr2",
+      "sr3"
+    ],
+    [
+      "sr4",
+      "sr2"
+    ],
+    [
+      "sr3",
+      "pot1"
+    ],
+    [
+      "pot1",
+      "p1"
+    ],
+    [
+      "i1",
+      "shovel1Get"
+    ],
+    [
+      "shovel1Get",
+      "sr1"
+    ],
+    [
+      "sr1",
+      "i3"
+    ],
+    [
+      "i3",
+      "shovel2Get"
+    ],
+    [
+      "shovel2Get",
+      "p1"
+    ],
+    [
+      "p1",
+      "C"
     ]
   ],
   "pivot_turns": [
@@ -391,6 +433,16 @@
       "shovel2Get",
       "p1",
       "PotPut"
+    ],
+    [
+      "shovel1Get",
+      "sr1",
+      "sr2"
+    ],
+    [
+      "sr3",
+      "pot1",
+      "p1"
     ]
   ],
   "RESET_NODES": {
@@ -404,13 +456,6 @@
   "pipeline_speed": "NORMAL",
   "pipeline_blind_mode": "GYRO_TSHAPE",
   "EDGES": [
-    {
-      "type": "LINE",
-      "u": "i3",
-      "v": "shovel1Get",
-      "speed": "SLOW",
-      "mode": "RIGHT"
-    },
     {
       "type": "BLIND",
       "u": "MR",
@@ -512,62 +557,6 @@
       "u": "PotPut",
       "v": "p1",
       "stop_at_line": "on"
-    },
-    {
-      "type": "LINE",
-      "u": "i1",
-      "v": "shovel1Get",
-      "speed": "SLOW",
-      "mode": "RIGHT"
-    },
-    {
-      "type": "LINE",
-      "u": "shovel1Get",
-      "v": "i1",
-      "speed": "SLOW",
-      "mode": "LEFT"
-    },
-    {
-      "type": "LINE",
-      "u": "shovel1Get",
-      "v": "i3",
-      "speed": "SLOW",
-      "mode": "RIGHT"
-    },
-    {
-      "type": "LINE",
-      "u": "i3",
-      "v": "shovel2Get",
-      "speed": "SLOW",
-      "mode": "RIGHT"
-    },
-    {
-      "type": "LINE",
-      "u": "shovel2Get",
-      "v": "i3",
-      "speed": "SLOW",
-      "mode": "LEFT"
-    },
-    {
-      "type": "LINE",
-      "u": "shovel2Get",
-      "v": "p1",
-      "speed": "SLOW",
-      "mode": "RIGHT"
-    },
-    {
-      "type": "LINE",
-      "u": "C",
-      "v": "p1",
-      "speed": "SLOW",
-      "mode": "LEFT"
-    },
-    {
-      "type": "LINE",
-      "u": "p1",
-      "v": "shovel2Get",
-      "speed": "SLOW",
-      "mode": "LEFT"
     }
   ],
   "OBSTACLES": [

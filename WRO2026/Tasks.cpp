@@ -309,15 +309,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    Manipulator.dumper.close();
-    Manipulator.dumper.open();
-    Drive.driveDist(-7).setMode(DriveMode::GYRO);
-    Manipulator.dumper.close();
-    Manipulator.dumper.open();
-    Drive.driveDist(-7).setMode(DriveMode::GYRO);
-    Manipulator.dumper.close();
-    Manipulator.dumper.open();
-    
+    Manipulator.dumper.openForWhite();
    return true;
 }
 
@@ -1114,12 +1106,16 @@ namespace
 
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i3");
+    PathTracker.goTo("i3").setRouteDirection(Direction::FRONT);
     Drive.turnToYaw(Localization.toImuYaw(90));
     _waitStationaryMs(200);
     LineFollower.setEnabled(true).setPreset(Config::SpeedPreset::SLOW).setReverse(false);
     LineFollower.waitUntilIntersection();
     LineFollower.setEnabled(false);
+
+    /*
+    Drive.driveDist(10).setPower(50);
+    */
     Drive.stop();
 
     //Read
@@ -1134,7 +1130,7 @@ bool TasksClass::readMosaic(const TaskArgs& /*args*/)
     }
     
     //Back to i3
-    Drive.driveDist(7).setMode(DriveMode::GYRO).setPower(-50);
+    Drive.driveDist(9).setMode(DriveMode::GYRO).setPower(-50);
     _waitStationaryMs(100);
     Localization.declarePosition("i3");
     return success;
@@ -1152,41 +1148,35 @@ bool TasksClass::rectangleShovel(const TaskArgs& /*args*/)
 
 bool TasksClass::triangleShovel(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("shovel2Get").setArrivalDirection(Direction::REAR);
-    Drive.turnToYaw(Localization.toImuYaw(90));
-    Manipulator.boxClose();
-    PathTracker.goTo("shovel2Put").setArrivalDirection(Direction::REAR);
-    Drive.turnToYaw(Localization.toImuYaw(25));
-    Manipulator.boxOpen();
+    PathTracker.goTo("shovel1Get").setRouteDirection(Direction::FRONT);
+    _waitStationaryMs(300);
+    PathTracker.goTo("sr3");
+    _waitStationaryMs(300);
+    PathTracker.goTo("sr4");
     return true;
 }
 
 bool TasksClass::pot(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i3");
-    Drive.turnToYaw(Localization.toImuYaw(90));
-    _waitStationaryMs(200);
-    Drive.driveDist(4).setMode(DriveMode::GYRO).setPower(-38).flat();
-    _waitStationaryMs(50);
-    Manipulator.boxClose();
-
-    Drive.driveDist(5).setMode(DriveMode::GYRO).setPower(38).flat();
-    _waitStationaryMs(200);
-    Localization.declarePosition("i3");
-    PathTracker.goTo("PotPut").setRouteDirection(Direction::REAR);
-    Manipulator.boxOpen();
+    PathTracker.goTo("sr3").setArrivalDirection(Direction::FRONT);
+    _waitStationaryMs(300);
+    Manipulator.dumper.openForWhite();
+    _waitStationaryMs(500);
+    PathTracker.goTo("PotPut");
     return true;
 }
 
 bool TasksClass::mosaic(const TaskArgs& /*args*/)
 {
     //Remove this before comp!
+    /*
 #pragma push_macro("WHITE")
 #undef WHITE
     Vision.fakeRead({Config::Color::GREEN, Config::Color::WHITE, Config::Color::BLUE, Config::Color::YELLOW,
                       Config::Color::WHITE, Config::Color::GREEN, Config::Color::BLUE, Config::Color::WHITE,
                       Config::Color::YELLOW, Config::Color::GREEN, Config::Color::BLUE, Config::Color::YELLOW});
 #pragma pop_macro("WHITE")
+*/
 
     // Consumes the latch captured by the `readMosaic` task — this body does not read the
     // camera itself. `_mosaicAlgo` reports one entry per tile, already in optimal collection
@@ -1230,7 +1220,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     // and re-anchors Localization on its own.
     
     Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
-    PathTracker.goTo(kMosaicResetNode);
+    PathTracker.goTo(kMosaicResetNode).setRouteDirection(Direction::FRONT);
     Drive.turnToYaw(Localization.toImuYaw(90));
     Manipulator.dumper.open();
     _waitStationaryMs(300);

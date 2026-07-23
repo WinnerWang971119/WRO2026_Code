@@ -11,14 +11,16 @@
 void buildMission()
 {
     Mission
-        .task("readMosaic")
-        .task("mosaic");
+        //.task("readMosaic")
+        //.task("mosaic");
         //.task("emptyTest");
-        /*.task("dumpMosaic")
-        .task("pot")
-        .task("rectangleShovel")
+        //.task("dumpMosaic")
+        //.task("pot")
+        //.task("rectangleShovel");
         .task("triangleShovel")
-        .task("debries");*/
+        .task("pot");
+        //.task("rectangleShovel");
+        //.task("debries");*/
         //.task("testOne");
         //.task("pot");
         //.task("triangleShovel");

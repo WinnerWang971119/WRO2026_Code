@@ -183,7 +183,7 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 47;
+    constexpr int16_t SPEED_SLOW = 45;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
     constexpr int16_t SPEED_NORMAL = 65;
@@ -743,7 +743,7 @@ namespace Config
      *
      * @note TODO: bench-tune (T11) if B3.2 wants it tighter or looser.
      */
-    constexpr float TURN_TOLERANCE_DEG = 1.0f;
+    constexpr float TURN_TOLERANCE_DEG = 0.5f;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.

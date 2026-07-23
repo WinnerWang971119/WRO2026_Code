@@ -95,9 +95,9 @@ namespace Config
      *         `grab()` capture stroke stages its own rates (jump to `openForWhiteDeg`, slow lift to
      *         `homeDeg` at `GRABBER_LIFT_STEP_MS`, snap to `closeDeg`); other grabber moves
      *         (`release`/`reset`) stay instant unless overridden with `.rampMs()`. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 20, 120, 97, 7.0f, 80, false, 0 };
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 20, 10, 97, 7.0f, 80, false, 0 };
     /** @brief Dumper servo calibration. TODO calibrate. `stepMs = 0` = instant. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false, 0 };
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 10, 18, 5.0f, 80, false, 0 };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
     constexpr ServoCfg SORTER = { SORTER_RC_ID, 89, 0, 0, 0, 5.2f, 95, false, 0 };  // open/close unused; instant
 
