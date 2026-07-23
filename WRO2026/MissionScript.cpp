@@ -12,7 +12,8 @@ void buildMission()
 {
     Mission
         //.task("readMosaic");
-        .task("mosaic");
+        //.task("mosaic")
+        .task("emptyTest");
         /*.task("dumpMosaic")
         .task("pot")
         .task("rectangleShovel")

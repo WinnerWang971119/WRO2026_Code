@@ -95,11 +95,11 @@ namespace Config
      *         `grab()` capture stroke stages its own rates (jump to `openForWhiteDeg`, slow lift to
      *         `homeDeg` at `GRABBER_LIFT_STEP_MS`, snap to `closeDeg`); other grabber moves
      *         (`release`/`reset`) stay instant unless overridden with `.rampMs()`. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 5, 120, 97, 7.0f, 80, false, 0 };
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 130, 20, 120, 97, 7.0f, 80, false, 0 };
     /** @brief Dumper servo calibration. TODO calibrate. `stepMs = 0` = instant. */
     constexpr ServoCfg DUMPER  = { DUMPER_RC_ID, 78, 33, 45, 18, 5.0f, 80, false, 0 };
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER = { SORTER_RC_ID, 90, 0, 0, 0, 5.2f, 95, false, 0 };  // open/close unused; instant
+    constexpr ServoCfg SORTER = { SORTER_RC_ID, 89, 0, 0, 0, 5.2f, 95, false, 0 };  // open/close unused; instant
 
     /**
      * @brief Ramp rate (ms per 1° step) for the SLOW home-lift phase of the grabber `grab()`
@@ -114,7 +114,7 @@ namespace Config
     /** @brief Number of discrete sorter bins. TODO finalize. */
     constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 127};  
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 54, 77 , 103, 125};  
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
@@ -294,7 +294,7 @@ namespace Config
         { BeltMode::POSITION,    900,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos);
         { BeltMode::POSITION,    1300,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
         { BeltMode::POSITION,    920,   0,          BELT_MOVE_SPEED },  // GRAB_RIGHT; TODO calibrate
-        { BeltMode::POSITION,    400,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
+        { BeltMode::POSITION,    200,   0,          BELT_MOVE_SPEED },  // GRAB_MID;   TODO calibrate
         { BeltMode::POSITION,    1,   0,          BELT_MOVE_SPEED },  // GRAB_LEFT;  TODO calibrate
         { BeltMode::POSITION, 1100, 0, BELT_MOVE_SPEED}, //Helps us balance center of mass
     };

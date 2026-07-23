@@ -309,9 +309,14 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
-    Drive.holdYaw();
-    Drive.driveDist(6.4).setMode(DriveMode::GYRO);
+    Manipulator.dumper.close();
+    Manipulator.dumper.open();
+    Drive.driveDist(-7).setMode(DriveMode::GYRO);
+    Manipulator.dumper.close();
+    Manipulator.dumper.open();
+    Drive.driveDist(-7).setMode(DriveMode::GYRO);
+    Manipulator.dumper.close();
+    Manipulator.dumper.open();
     
    return true;
 }
@@ -457,7 +462,10 @@ bool TasksClass::_grabToBin(uint8_t bin)
     Manipulator.release().instant();
     // grab() stages its own rates (instant open -> slow lift to home -> instant close), so it needs
     // no per-move ramp override here — an override would just slow the initial instant jump.
+    _waitStationaryMs(300);
     Manipulator.grab();
+    _waitStationaryMs(300);
+    Manipulator.grabber.close();
     return true;
 }
 
@@ -486,43 +494,9 @@ bool TasksClass::_visionRead()
 
 bool TasksClass::emptyTest(const TaskArgs& /*args*/)
 {
-    Serial.println(F("[Tasks] emptyTest"));
-
-    Manipulator.dumper.open();
-    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open");
-    _waitMs(200);
-
-    for (uint8_t bin = 0; bin < 4; ++bin)
-    {
-        Manipulator.sortTo(bin);
-        _waitMs(200);
-
-        Manipulator.grabber.open();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber open");
-        _waitMs(3000);
-
-        Manipulator.grabber.home();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber home");
-        _waitMs(1000);
-
-        Manipulator.grabber.close();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber close");
-        _waitMs(2000);
-    }
-
-    Manipulator.dumper.close();
-    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close");
-    _waitMs(500);
-
-    Manipulator.dumper.home();
-    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home");
-
+    PathTracker.goTo("MR");
+    Drive.turnToYaw(Localization.toImuYaw(90));
+    Drive.stopAtLine(4).setMode(DriveMode::RAW).setReverse(false).setPreset(Config::SpeedPreset::SLOW);
     return true;
 }
 
@@ -1213,10 +1187,12 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
     // Enter the wall through the reset node — a direct run at a row node crosses the mosaic.
     // `MR` is a NodeType::RESET node, so arriving squares up, presses the rear into the wall
     // and re-anchors Localization on its own.
+    
     Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
     PathTracker.goTo(kMosaicResetNode);
     Drive.turnToYaw(Localization.toImuYaw(90));
-    _waitStationaryMs(200);
+    Manipulator.dumper.open();
+    _waitStationaryMs(300);
 
     for (uint8_t i = 0; i < tiles; ++i)
     {
@@ -1234,6 +1210,11 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
 
         if (station != parkedColor || row != parkedRow)
         {
+            if (kMosaicRowNodes[station][row].node == "MWU"){
+                Manipulator.dumper.openForWhite();
+            } else {
+                Manipulator.dumper.open();
+            }
             // Retract before every chassis move — an extended belt throws the centre of mass too far off to drive on.
             Manipulator.beltTo(Config::BeltStation::MOVE_STRAIGHT);
             PathTracker.goTo(kMosaicRowNodes[station][row].node);
@@ -1250,6 +1231,7 @@ bool TasksClass::mosaic(const TaskArgs& /*args*/)
         // Tiles come off a row in take order, so the slot index is how many are gone.
         const uint8_t slot = (uint8_t)(kMosaicReachablePerRow - stock[station][row]);
         Manipulator.beltTo(kMosaicGrabOrder[slot]);
+        _waitStationaryMs(200);
         _grabToBin(bin);
         --stock[station][row];
     }

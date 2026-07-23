@@ -183,7 +183,7 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 50;
+    constexpr int16_t SPEED_SLOW = 47;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
     constexpr int16_t SPEED_NORMAL = 65;
